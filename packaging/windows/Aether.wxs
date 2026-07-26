@@ -1,0 +1,98 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+    <Package
+        Name="Aether"
+        Manufacturer="Aether contributors"
+        Version="$(env.AETHER_VERSION)"
+        UpgradeCode="7A5DD198-9F54-4EDB-97DB-AF4208BD0917"
+        Language="1033"
+        Codepage="65001"
+        InstallerVersion="500"
+        Scope="perMachine"
+        Compressed="yes">
+
+        <SummaryInformation
+            Description="AQW-optimized Ruffle client"
+            Manufacturer="Aether contributors" />
+
+        <MajorUpgrade
+            Schedule="afterInstallInitialize"
+            DowngradeErrorMessage="A newer version of Aether is already installed."
+            AllowSameVersionUpgrades="yes" />
+
+        <MediaTemplate EmbedCab="yes" />
+
+        <StandardDirectory Id="ProgramFiles6432Folder">
+            <Directory Id="INSTALLFOLDER" Name="Aether">
+                <Component Id="AetherApplication" Guid="*">
+                    <File
+                        Id="AetherExecutable"
+                        Source="$(env.AETHER_BINARY)"
+                        Name="aether.exe"
+                        KeyPath="yes">
+                        <Shortcut
+                            Id="AetherStartMenuShortcut"
+                            Name="Aether"
+                            Description="Launch the AQW-optimized Aether client"
+                            Directory="AetherProgramMenuFolder"
+                            WorkingDirectory="INSTALLFOLDER"
+                            Advertise="yes"
+                            Icon="Aether.ico" />
+                        <Shortcut
+                            Id="AetherDesktopShortcut"
+                            Name="Aether"
+                            Description="Launch the AQW-optimized Aether client"
+                            Directory="DesktopFolder"
+                            WorkingDirectory="INSTALLFOLDER"
+                            Advertise="yes"
+                            Icon="Aether.ico" />
+                    </File>
+                    <RemoveFolder
+                        Id="RemoveAetherProgramMenuFolder"
+                        Directory="AetherProgramMenuFolder"
+                        On="uninstall" />
+                </Component>
+
+                <Component Id="AetherLicense" Guid="*">
+                    <File
+                        Id="AetherLicenseFile"
+                        Source="$(env.AETHER_PROJECT_ROOT)\LICENSE.md"
+                        Name="LICENSE.md"
+                        KeyPath="yes" />
+                </Component>
+
+                <Component Id="AetherReleaseNotes" Guid="*">
+                    <File
+                        Id="AetherReleaseNotesFile"
+                        Source="$(env.AETHER_PROJECT_ROOT)\README_AETHER_RELEASE.md"
+                        Name="README.md"
+                        KeyPath="yes" />
+                </Component>
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="ProgramMenuFolder">
+            <Directory Id="AetherProgramMenuFolder" Name="Aether">
+            </Directory>
+        </StandardDirectory>
+
+        <StandardDirectory Id="DesktopFolder" />
+
+        <Feature
+            Id="AetherFeature"
+            Title="Aether"
+            Description="Installs Aether and its Start Menu and Desktop shortcuts."
+            Level="1">
+            <ComponentRef Id="AetherApplication" />
+            <ComponentRef Id="AetherLicense" />
+            <ComponentRef Id="AetherReleaseNotes" />
+        </Feature>
+
+        <Icon
+            Id="Aether.ico"
+            SourceFile="$(env.AETHER_PROJECT_ROOT)\aether\assets\favicon.ico" />
+        <Property Id="ARPPRODUCTICON" Value="Aether.ico" />
+        <Property Id="ARPHELPLINK" Value="https://github.com/" />
+        <Property Id="ARPCONTACT" Value="Aether contributors" />
+    </Package>
+</Wix>
