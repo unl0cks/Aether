@@ -92,7 +92,7 @@
             Id="Aether.ico"
             SourceFile="$(env.AETHER_PROJECT_ROOT)\aether\assets\favicon.ico" />
         <Property Id="ARPPRODUCTICON" Value="Aether.ico" />
-        <Property Id="ARPHELPLINK" Value="https://github.com/" />
+        <Property Id="ARPHELPLINK" Value="https://github.com/unl0cks/Aether" />
         <Property Id="ARPCONTACT" Value="Aether contributors" />
     </Package>
 </Wix>

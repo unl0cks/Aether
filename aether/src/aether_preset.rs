@@ -12,10 +12,10 @@ pub const AQW_LOADER_URL: &str = "https://game.aq.com/game/gamefiles/Loader_Spid
 pub const AQW_BASE_URL: &str = "https://game.aq.com/game/gamefiles/";
 pub const AQW_PAGE_URL: &str = "https://game.aq.com/";
 pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
-    max_cached_bytes: 256 * 1024 * 1024,
-    max_cached_entries: 2_048,
+    max_cached_bytes: 128 * 1024 * 1024,
+    max_cached_entries: 512,
     max_idle_frames: 1,
-    max_cached_globals: 512,
+    max_cached_globals: 128,
 };
 
 /// Apply conservative AQW defaults while preserving explicit CLI overrides.
@@ -200,7 +200,7 @@ mod tests {
         let opt = parse_and_apply(&["aether"]);
         assert!(opt.aether_bounded_offscreen_pool);
         assert_eq!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames, 1);
-        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes <= 256 * 1024 * 1024);
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes <= 128 * 1024 * 1024);
     }
 
     #[test]

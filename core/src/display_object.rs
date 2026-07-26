@@ -128,11 +128,6 @@ pub struct BitmapCache {
     /// Whether we warned that this bitmap was too large to be cached
     warned_for_oversize: bool,
 
-    /// Number of consecutive rebuilds whose logical output used less than half of the allocated
-    /// texture. This lets short animation spikes reuse capacity without retaining a very large
-    /// surface after the effect has ended.
-    undersized_rebuilds: u8,
-
     /// Consecutive dirty rebuilds of an explicitly filterless cache. A cache that is invalidated
     /// every rendered frame is more expensive than drawing its vector contents directly: it first
     /// renders the same contents offscreen and then copies the texture back to the stage.
@@ -143,83 +138,37 @@ pub struct BitmapCache {
     filterless_direct_frames: u16,
 }
 
-const BITMAP_CACHE_SHRINK_AFTER_UNDERSIZED_REBUILDS: u8 = 120;
 const FILTERLESS_HOT_CACHE_REBUILD_THRESHOLD: u8 = 3;
 const FILTERLESS_HOT_CACHE_DIRECT_FRAMES: u16 = 120;
 const FILTERLESS_HOT_CACHE_MIN_PIXELS: u64 = 128 * 128;
 const AETHER_ADAPTIVE_AVATAR_CACHE_STABLE_FRAMES: u8 = 3;
+const AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION: u32 = 2_048;
+const AETHER_ADAPTIVE_AVATAR_CACHE_MAX_PIXELS: u64 = 1_048_576;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum BitmapCacheTexturePlan {
-    Reuse { undersized_rebuilds: u8 },
+    Reuse,
     Allocate { width: u32, height: u32 },
 }
 
 fn bitmap_cache_texture_plan(
     current: Option<(u32, u32)>,
     requested: (u32, u32),
-    allow_transparent_padding: bool,
-    undersized_rebuilds: u8,
 ) -> BitmapCacheTexturePlan {
-    let Some((current_width, current_height)) = current else {
-        return BitmapCacheTexturePlan::Allocate {
-            width: requested.0,
-            height: requested.1,
-        };
-    };
-
-    if (current_width, current_height) == requested {
-        return BitmapCacheTexturePlan::Reuse {
-            undersized_rebuilds: 0,
-        };
-    }
-
-    if !allow_transparent_padding || requested.0 == 0 || requested.1 == 0 {
-        return BitmapCacheTexturePlan::Allocate {
-            width: requested.0,
-            height: requested.1,
-        };
-    }
-
-    let current_area = u64::from(current_width) * u64::from(current_height);
-    let requested_area = u64::from(requested.0) * u64::from(requested.1);
-    if current_width >= requested.0 && current_height >= requested.1 {
-        if requested_area.saturating_mul(2) < current_area {
-            let next_undersized = undersized_rebuilds.saturating_add(1);
-            if next_undersized >= BITMAP_CACHE_SHRINK_AFTER_UNDERSIZED_REBUILDS {
-                return BitmapCacheTexturePlan::Allocate {
-                    width: requested.0,
-                    height: requested.1,
-                };
-            }
-            return BitmapCacheTexturePlan::Reuse {
-                undersized_rebuilds: next_undersized,
-            };
-        }
-
-        return BitmapCacheTexturePlan::Reuse {
-            undersized_rebuilds: 0,
-        };
-    }
-
-    // Preserve the high-water mark of each axis. AQW animation commonly alternates between a
-    // tall/narrow frame and a short/wide frame; exact allocation otherwise recreates both GPU
-    // textures every animation frame. Avoid combining wildly different maxima into a surface
-    // more than twice the logical output area.
-    let capacity_width = current_width.max(requested.0);
-    let capacity_height = current_height.max(requested.1);
-    let capacity_area = u64::from(capacity_width) * u64::from(capacity_height);
-    if capacity_area > current_area.max(requested_area).saturating_mul(2) {
-        BitmapCacheTexturePlan::Allocate {
-            width: requested.0,
-            height: requested.1,
-        }
+    if current == Some(requested) {
+        BitmapCacheTexturePlan::Reuse
     } else {
         BitmapCacheTexturePlan::Allocate {
-            width: capacity_width,
-            height: capacity_height,
+            width: requested.0,
+            height: requested.1,
         }
     }
+}
+
+fn adaptive_avatar_cache_dimensions_allowed(width: u32, height: u32) -> bool {
+    width <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
+        && height <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
+        && u64::from(width) * u64::from(height) <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_PIXELS
 }
 
 impl BitmapCache {
@@ -337,7 +286,6 @@ impl BitmapCache {
         stage_scale_a: f32,
         stage_scale_d: f32,
         swf_version: u8,
-        allow_transparent_padding: bool,
     ) {
         self.matrix_a = matrix.a;
         self.matrix_b = matrix.b;
@@ -356,22 +304,14 @@ impl BitmapCache {
                 .as_ref()
                 .map(|current| (current.width, current.height)),
             (actual_width, actual_height),
-            allow_transparent_padding,
-            self.undersized_rebuilds,
         );
         let (allocation_width, allocation_height) = match texture_plan {
-            BitmapCacheTexturePlan::Reuse {
-                undersized_rebuilds,
-            } => {
-                self.undersized_rebuilds = undersized_rebuilds;
+            BitmapCacheTexturePlan::Reuse => {
                 #[cfg(feature = "aether_metrics")]
                 crate::aether_metrics::bitmap_cache_texture_reused();
                 return;
             }
-            BitmapCacheTexturePlan::Allocate { width, height } => {
-                self.undersized_rebuilds = 0;
-                (width, height)
-            }
+            BitmapCacheTexturePlan::Allocate { width, height } => (width, height),
         };
         #[cfg(feature = "aether_metrics")]
         let resized = self.bitmap.is_some();
@@ -1248,6 +1188,17 @@ impl<'gc> DisplayObjectBase<'gc> {
         true
     }
 
+    /// Invalidate this object's cache even if normal per-frame invalidation has already propagated.
+    ///
+    /// Viewport changes can alter device-pixel bounds without changing the display object's local
+    /// transform. Every live cache must therefore be rebuilt against the new stage matrix.
+    fn invalidate_bitmap_cache_for_viewport_change(&self) {
+        if let Some(cache) = &mut *self.bitmap_cache_mut() {
+            cache.make_dirty();
+        }
+        self.set_flag(DisplayObjectFlags::CACHE_INVALIDATED, true);
+    }
+
     fn clear_invalidate_flag(&self) {
         self.set_flag(DisplayObjectFlags::CACHE_INVALIDATED, false);
     }
@@ -1429,10 +1380,6 @@ pub fn render_base<'gc>(
     }
 
     let blend_mode = this.blend_mode();
-    // Oversized cache capacity is visually inert only when the unused area is cleared to
-    // transparent and is not fed through an outer blend operation.
-    let allow_transparent_cache_padding =
-        blend_mode == ExtendedBlendMode::Normal && this.opaque_background().is_none();
     let original_commands = if blend_mode != ExtendedBlendMode::Normal {
         Some(std::mem::take(&mut context.commands))
     } else {
@@ -1560,6 +1507,14 @@ pub fn render_base<'gc>(
                         y_max: filter_rect.y_max.to_pixels().ceil() as i32,
                     };
                     let draw_offset = Point::new(filter_rect.x_min, filter_rect.y_min);
+                    let texture_width = filter_rect.width().max(0) as u32;
+                    let texture_height = filter_rect.height().max(0) as u32;
+                    #[cfg(feature = "aether_performance")]
+                    let adaptive_avatar_cache_only =
+                        this.base().aether_adaptive_avatar_cache_active()
+                            && !this.is_bitmap_cached_preference();
+                    #[cfg(not(feature = "aether_performance"))]
+                    let adaptive_avatar_cache_only = false;
                     let viewport = context.renderer.viewport_dimensions();
                     if !context.is_offscreen
                         && !bitmap_cache_output_intersects_viewport(
@@ -1574,11 +1529,19 @@ pub fn render_base<'gc>(
                         // is outside the physical viewport. Leave the cache dirty so returning
                         // onscreen rebuilds it before the first visible draw.
                         bitmap_cache_culled = true;
+                    } else if adaptive_avatar_cache_only
+                        && !adaptive_avatar_cache_dimensions_allowed(texture_width, texture_height)
+                    {
+                        // Adaptive avatar caches are an optimization, not authored Flash
+                        // semantics. Never let a single elaborate character retain a huge live
+                        // render target; direct rendering is both safer and more predictable.
+                        cache.clear();
+                        cache_info = None;
                     } else if let Some(invalidation_reason) =
                         cache.dirty_reason(&base_transform.matrix, width, height, &stage_matrix)
                     {
-                        let filterless_output_pixels = u64::from(filter_rect.width() as u32)
-                            * u64::from(filter_rect.height() as u32);
+                        let filterless_output_pixels =
+                            u64::from(texture_width) * u64::from(texture_height);
                         if filterless_hot_cache_candidate
                             && filters.is_empty()
                             && filterless_output_pixels >= FILTERLESS_HOT_CACHE_MIN_PIXELS
@@ -1599,8 +1562,8 @@ pub fn render_base<'gc>(
                                         descriptor: crate::aether_diagnostics::DisplayObjectDescriptor::from_display_object(this),
                                         source_width: width,
                                         source_height: height,
-                                        texture_width: filter_rect.width() as u32,
-                                        texture_height: filter_rect.height() as u32,
+                                        texture_width,
+                                        texture_height,
                                         filter_names: crate::aether_diagnostics::filter_names(&filters),
                                         invalidation_reason,
                                     },
@@ -1614,14 +1577,13 @@ pub fn render_base<'gc>(
                                 base_transform.matrix,
                                 width,
                                 height,
-                                filter_rect.width() as u32,
-                                filter_rect.height() as u32,
+                                texture_width,
+                                texture_height,
                                 draw_offset,
                                 bounds_offset,
                                 stage_matrix.a,
                                 stage_matrix.d,
                                 swf_version,
-                                allow_transparent_cache_padding,
                             );
                             #[cfg(feature = "aether_diagnostics")]
                             crate::aether_diagnostics::record_cache_update(
@@ -2465,29 +2427,17 @@ pub trait TDisplayObject<'gc>:
         self.refresh_aether_adaptive_avatar_cache_candidates();
     }
 
-    /// Refresh exact AQW AvatarMC root and direct `mcChar` sublayer cache eligibility.
+    /// Refresh exact AQW AvatarMC root cache eligibility.
     ///
-    /// Direct equipment sublayers are independent candidates so one animated weapon or cape
-    /// cannot invalidate the otherwise stable body branches. Descendants are refreshed on
-    /// naming/reparenting and when the root receives its AVM2 class.
+    /// Descendants are traversed so any stale eligibility from reparenting is cleared, but
+    /// equipment sublayers never own independent live GPU caches.
     #[cfg(feature = "aether_performance")]
     fn refresh_aether_adaptive_avatar_cache_candidates(self) {
         let is_root = self
             .base()
             .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ROOT);
-        let is_direct_mcchar_sublayer = self.parent().is_some_and(|parent| {
-            parent
-                .name()
-                .is_some_and(|name| name.as_wstr() == b"mcChar")
-                && parent.parent().is_some_and(|avatar| {
-                    avatar
-                        .base()
-                        .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ROOT)
-                })
-        });
-
         self.base()
-            .set_aether_adaptive_avatar_cache_candidate(is_root || is_direct_mcchar_sublayer);
+            .set_aether_adaptive_avatar_cache_candidate(is_root);
 
         if let Some(container) = self.as_container() {
             for child in container.iter_render_list() {
@@ -3599,6 +3549,34 @@ pub trait TDisplayObject<'gc>:
         }
     }
 
+    /// Invalidate every cached descendant after the physical viewport changes.
+    ///
+    /// Unlike normal visual invalidation, this deliberately walks down the tree because cached
+    /// descendants may remain locally unchanged while their device-pixel target changes.
+    #[no_dynamic]
+    fn invalidate_cached_bitmaps_for_viewport_change(self) {
+        self.base().invalidate_bitmap_cache_for_viewport_change();
+
+        if let Some(container) = self.as_container() {
+            for child in container.iter_render_list() {
+                child.invalidate_cached_bitmaps_for_viewport_change();
+            }
+        }
+
+        if let Some(button) = self.as_avm2_button() {
+            for state in [
+                swf::ButtonState::UP,
+                swf::ButtonState::OVER,
+                swf::ButtonState::DOWN,
+                swf::ButtonState::HIT_TEST,
+            ] {
+                if let Some(child) = button.get_state_child(state) {
+                    child.invalidate_cached_bitmaps_for_viewport_change();
+                }
+            }
+        }
+    }
+
     /// Retrieve a named property from the AVM1 object.
     ///
     /// This is required as some boolean properties in AVM1 can in fact hold any value.
@@ -3810,7 +3788,7 @@ bitflags! {
         /// Internal adaptive cache contribution; distinct from the authored CACHE_AS_BITMAP bit.
         const AETHER_ADAPTIVE_AVATAR_CACHE_ACTIVE = 1 << 18;
 
-        /// Exact AQW AvatarMC root, used to discover direct `mcChar` equipment sublayers.
+        /// Exact AQW AvatarMC root eligible for one bounded adaptive cache.
         const AETHER_ADAPTIVE_AVATAR_CACHE_ROOT = 1 << 19;
     }
 }
@@ -3952,39 +3930,47 @@ mod avm2_lifecycle_dirty_tests {
     }
 
     #[test]
-    fn bitmap_cache_capacity_reuses_alternating_animation_bounds() {
+    fn viewport_change_forcefully_invalidates_a_live_bitmap_cache() {
+        let base = DisplayObjectBase::default();
+        base.set_bitmap_cached_preference(true);
+        assert!(
+            base.bitmap_cache_mut()
+                .as_ref()
+                .is_some_and(|cache| !cache.matrix_a.is_nan())
+        );
+
+        base.invalidate_bitmap_cache_for_viewport_change();
+
+        assert!(
+            base.bitmap_cache_mut()
+                .as_ref()
+                .is_some_and(|cache| cache.matrix_a.is_nan())
+        );
+        assert!(base.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED));
+    }
+
+    #[test]
+    fn bitmap_cache_capacity_tracks_alternating_animation_bounds_exactly() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((463, 584)), (637, 498), true, 0),
+            bitmap_cache_texture_plan(Some((463, 584)), (637, 498)),
             BitmapCacheTexturePlan::Allocate {
                 width: 637,
-                height: 584,
+                height: 498,
             }
         );
         assert_eq!(
-            bitmap_cache_texture_plan(Some((637, 584)), (463, 584), true, 0),
-            BitmapCacheTexturePlan::Reuse {
-                undersized_rebuilds: 0,
+            bitmap_cache_texture_plan(Some((637, 584)), (463, 584)),
+            BitmapCacheTexturePlan::Allocate {
+                width: 463,
+                height: 584,
             }
         );
     }
 
     #[test]
-    fn bitmap_cache_capacity_shrinks_after_a_transient_large_effect() {
-        for undersized_rebuilds in [0, 1, 60, 118] {
-            assert_eq!(
-                bitmap_cache_texture_plan(
-                    Some((1_031, 840)),
-                    (463, 584),
-                    true,
-                    undersized_rebuilds,
-                ),
-                BitmapCacheTexturePlan::Reuse {
-                    undersized_rebuilds: undersized_rebuilds + 1,
-                }
-            );
-        }
+    fn bitmap_cache_capacity_drops_a_transient_large_effect_immediately() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((1_031, 840)), (463, 584), true, 119),
+            bitmap_cache_texture_plan(Some((1_031, 840)), (463, 584)),
             BitmapCacheTexturePlan::Allocate {
                 width: 463,
                 height: 584,
@@ -3995,12 +3981,27 @@ mod avm2_lifecycle_dirty_tests {
     #[test]
     fn bitmap_cache_capacity_is_exact_when_padding_could_be_visible() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((637, 584)), (463, 584), false, 0),
+            bitmap_cache_texture_plan(Some((637, 584)), (463, 584)),
             BitmapCacheTexturePlan::Allocate {
                 width: 463,
                 height: 584,
             }
         );
+    }
+
+    #[test]
+    fn bitmap_cache_capacity_reuses_only_an_exact_match() {
+        assert_eq!(
+            bitmap_cache_texture_plan(Some((463, 584)), (463, 584)),
+            BitmapCacheTexturePlan::Reuse
+        );
+    }
+
+    #[test]
+    fn adaptive_avatar_cache_rejects_oversized_live_textures() {
+        assert!(adaptive_avatar_cache_dimensions_allowed(1_024, 1_024));
+        assert!(!adaptive_avatar_cache_dimensions_allowed(2_049, 1));
+        assert!(!adaptive_avatar_cache_dimensions_allowed(2_048, 1_024));
     }
 
     #[test]
@@ -4174,7 +4175,8 @@ mod avm2_lifecycle_dirty_tests {
     }
 
     #[test]
-    fn aether_adaptive_avatar_marks_only_direct_mcchar_sublayers() {
+    #[cfg(feature = "aether_performance")]
+    fn aether_adaptive_avatar_marks_only_the_avatar_root() {
         rootless_mutate(|mc| {
             let movie = Arc::new(SwfMovie::empty(10, None));
             let root: DisplayObject<'_> = MovieClip::new(movie.clone(), mc).into();
@@ -4214,7 +4216,7 @@ mod avm2_lifecycle_dirty_tests {
                     .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
             );
             assert!(
-                chest
+                !chest
                     .base()
                     .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
             );
@@ -4227,7 +4229,8 @@ mod avm2_lifecycle_dirty_tests {
     }
 
     #[test]
-    fn aether_adaptive_avatar_sublayer_candidate_clears_after_reparenting() {
+    #[cfg(feature = "aether_performance")]
+    fn aether_adaptive_avatar_sublayers_never_become_independent_candidates() {
         rootless_mutate(|mc| {
             let movie = Arc::new(SwfMovie::empty(10, None));
             let root: DisplayObject<'_> = MovieClip::new(movie.clone(), mc).into();
@@ -4251,7 +4254,7 @@ mod avm2_lifecycle_dirty_tests {
             mc_char.refresh_aether_adaptive_avatar_cache_candidates();
             weapon.refresh_aether_adaptive_avatar_cache_candidates();
             assert!(
-                weapon
+                !weapon
                     .base()
                     .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
             );

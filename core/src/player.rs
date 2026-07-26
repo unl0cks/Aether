@@ -1015,8 +1015,17 @@ impl Player {
 
     pub fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {
         self.mutate_with_update_context(|context| {
+            let previous = context.renderer.viewport_dimensions();
+            let changed = previous.width != dimensions.width
+                || previous.height != dimensions.height
+                || previous.scale_factor.to_bits() != dimensions.scale_factor.to_bits();
             context.renderer.set_viewport_dimensions(dimensions);
             context.stage.build_matrices(context);
+            if changed {
+                context
+                    .stage
+                    .invalidate_cached_bitmaps_for_viewport_change();
+            }
         })
     }
 
