@@ -98,6 +98,15 @@ foreach ($file in $unnecessaryFiles) {
     Remove-Item -LiteralPath $file.FullName -Force
 }
 
+# Keep one canonical, Aether-focused README at the repository root. Historical
+# implementation and hotfix READMEs are intentionally omitted from the export.
+$canonicalReadmeSource = Join-Path $repoRoot 'README_AETHER_RELEASE.md'
+$canonicalReadmeDestination = Join-Path $destinationPath 'README.md'
+if (-not (Test-Path -LiteralPath $canonicalReadmeSource -PathType Leaf)) {
+    throw "Canonical Aether README was not found: $canonicalReadmeSource"
+}
+Copy-Item -LiteralPath $canonicalReadmeSource -Destination $canonicalReadmeDestination -Force
+
 # The exported folder intentionally omits standalone test crates. Remove those
 # crates from the copied workspace member list so `cargo metadata` and normal
 # Aether builds remain valid.
