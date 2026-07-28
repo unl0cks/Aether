@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [string]$Version = '0.3.2',
+    [string]$Version,
     [string]$BinaryPath,
     [string]$OutputDirectory
 )
@@ -9,6 +9,23 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    $metadataJson = & cargo metadata `
+        --manifest-path (Join-Path $repoRoot 'Cargo.toml') `
+        --no-deps `
+        --format-version 1
+    if ($LASTEXITCODE -ne 0) {
+        throw "Unable to read the Aether package version (exit code $LASTEXITCODE)."
+    }
+
+    $aetherPackage = ($metadataJson | ConvertFrom-Json).packages |
+        Where-Object { $_.name -eq 'aether_player' } |
+        Select-Object -First 1
+    if ($null -eq $aetherPackage) {
+        throw 'Unable to find the aether_player package in Cargo metadata.'
+    }
+    $Version = $aetherPackage.version
+}
 if ([string]::IsNullOrWhiteSpace($BinaryPath)) {
     $BinaryPath = Join-Path $repoRoot 'target\dist\aether.exe'
 }
