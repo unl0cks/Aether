@@ -151,17 +151,54 @@ enum BitmapCacheTexturePlan {
     Allocate { width: u32, height: u32 },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BitmapCacheTexturePolicy {
+    Exact,
+    BoundedReuse,
+}
+
 fn bitmap_cache_texture_plan(
     current: Option<(u32, u32)>,
     requested: (u32, u32),
+    policy: BitmapCacheTexturePolicy,
 ) -> BitmapCacheTexturePlan {
     if current == Some(requested) {
-        BitmapCacheTexturePlan::Reuse
-    } else {
-        BitmapCacheTexturePlan::Allocate {
-            width: requested.0,
-            height: requested.1,
+        return BitmapCacheTexturePlan::Reuse;
+    }
+
+    if policy == BitmapCacheTexturePolicy::BoundedReuse
+        && let Some((current_width, current_height)) = current
+    {
+        let requested_area = u64::from(requested.0) * u64::from(requested.1);
+        let current_area = u64::from(current_width) * u64::from(current_height);
+        let current_contains_requested =
+            current_width >= requested.0 && current_height >= requested.1;
+
+        if current_contains_requested
+            && current_area <= requested_area.saturating_mul(2)
+            && adaptive_avatar_cache_dimensions_allowed(current_width, current_height)
+        {
+            return BitmapCacheTexturePlan::Reuse;
         }
+
+        let grown = (
+            current_width.max(requested.0),
+            current_height.max(requested.1),
+        );
+        let grown_area = u64::from(grown.0) * u64::from(grown.1);
+        if grown_area <= requested_area.saturating_mul(2)
+            && adaptive_avatar_cache_dimensions_allowed(grown.0, grown.1)
+        {
+            return BitmapCacheTexturePlan::Allocate {
+                width: grown.0,
+                height: grown.1,
+            };
+        }
+    }
+
+    BitmapCacheTexturePlan::Allocate {
+        width: requested.0,
+        height: requested.1,
     }
 }
 
@@ -286,6 +323,7 @@ impl BitmapCache {
         stage_scale_a: f32,
         stage_scale_d: f32,
         swf_version: u8,
+        texture_policy: BitmapCacheTexturePolicy,
     ) {
         self.matrix_a = matrix.a;
         self.matrix_b = matrix.b;
@@ -304,6 +342,7 @@ impl BitmapCache {
                 .as_ref()
                 .map(|current| (current.width, current.height)),
             (actual_width, actual_height),
+            texture_policy,
         );
         let (allocation_width, allocation_height) = match texture_plan {
             BitmapCacheTexturePlan::Reuse => {
@@ -1584,6 +1623,11 @@ pub fn render_base<'gc>(
                                 stage_matrix.a,
                                 stage_matrix.d,
                                 swf_version,
+                                if adaptive_avatar_cache_only {
+                                    BitmapCacheTexturePolicy::BoundedReuse
+                                } else {
+                                    BitmapCacheTexturePolicy::Exact
+                                },
                             );
                             #[cfg(feature = "aether_diagnostics")]
                             crate::aether_diagnostics::record_cache_update(
@@ -2436,8 +2480,17 @@ pub trait TDisplayObject<'gc>:
         let is_root = self
             .base()
             .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ROOT);
+        let is_world_avatar = self.name().is_some_and(|name| {
+            let name = name.as_wstr();
+            name.len() > 1
+                && name.get(0) == Some(u16::from(b'a'))
+                && (1..name.len()).all(|index| {
+                    name.get(index)
+                        .is_some_and(|unit| (u16::from(b'0')..=u16::from(b'9')).contains(&unit))
+                })
+        });
         self.base()
-            .set_aether_adaptive_avatar_cache_candidate(is_root);
+            .set_aether_adaptive_avatar_cache_candidate(is_root && is_world_avatar);
 
         if let Some(container) = self.as_container() {
             for child in container.iter_render_list() {
@@ -3952,14 +4005,22 @@ mod avm2_lifecycle_dirty_tests {
     #[test]
     fn bitmap_cache_capacity_tracks_alternating_animation_bounds_exactly() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((463, 584)), (637, 498)),
+            bitmap_cache_texture_plan(
+                Some((463, 584)),
+                (637, 498),
+                BitmapCacheTexturePolicy::Exact,
+            ),
             BitmapCacheTexturePlan::Allocate {
                 width: 637,
                 height: 498,
             }
         );
         assert_eq!(
-            bitmap_cache_texture_plan(Some((637, 584)), (463, 584)),
+            bitmap_cache_texture_plan(
+                Some((637, 584)),
+                (463, 584),
+                BitmapCacheTexturePolicy::Exact,
+            ),
             BitmapCacheTexturePlan::Allocate {
                 width: 463,
                 height: 584,
@@ -3970,7 +4031,11 @@ mod avm2_lifecycle_dirty_tests {
     #[test]
     fn bitmap_cache_capacity_drops_a_transient_large_effect_immediately() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((1_031, 840)), (463, 584)),
+            bitmap_cache_texture_plan(
+                Some((1_031, 840)),
+                (463, 584),
+                BitmapCacheTexturePolicy::Exact,
+            ),
             BitmapCacheTexturePlan::Allocate {
                 width: 463,
                 height: 584,
@@ -3981,7 +4046,11 @@ mod avm2_lifecycle_dirty_tests {
     #[test]
     fn bitmap_cache_capacity_is_exact_when_padding_could_be_visible() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((637, 584)), (463, 584)),
+            bitmap_cache_texture_plan(
+                Some((637, 584)),
+                (463, 584),
+                BitmapCacheTexturePolicy::Exact,
+            ),
             BitmapCacheTexturePlan::Allocate {
                 width: 463,
                 height: 584,
@@ -3992,8 +4061,50 @@ mod avm2_lifecycle_dirty_tests {
     #[test]
     fn bitmap_cache_capacity_reuses_only_an_exact_match() {
         assert_eq!(
-            bitmap_cache_texture_plan(Some((463, 584)), (463, 584)),
+            bitmap_cache_texture_plan(
+                Some((463, 584)),
+                (463, 584),
+                BitmapCacheTexturePolicy::Exact,
+            ),
             BitmapCacheTexturePlan::Reuse
+        );
+    }
+
+    #[test]
+    fn adaptive_avatar_cache_reuses_bounded_high_water_capacity() {
+        assert_eq!(
+            bitmap_cache_texture_plan(
+                Some((463, 584)),
+                (637, 498),
+                BitmapCacheTexturePolicy::BoundedReuse,
+            ),
+            BitmapCacheTexturePlan::Allocate {
+                width: 637,
+                height: 584,
+            }
+        );
+        assert_eq!(
+            bitmap_cache_texture_plan(
+                Some((637, 584)),
+                (463, 584),
+                BitmapCacheTexturePolicy::BoundedReuse,
+            ),
+            BitmapCacheTexturePlan::Reuse
+        );
+    }
+
+    #[test]
+    fn adaptive_avatar_cache_drops_excessive_capacity() {
+        assert_eq!(
+            bitmap_cache_texture_plan(
+                Some((1_031, 840)),
+                (463, 584),
+                BitmapCacheTexturePolicy::BoundedReuse,
+            ),
+            BitmapCacheTexturePlan::Allocate {
+                width: 463,
+                height: 584,
+            }
         );
     }
 
@@ -4186,6 +4297,7 @@ mod avm2_lifecycle_dirty_tests {
 
             root.base()
                 .set_aether_adaptive_avatar_cache_root_candidate(true);
+            root.set_name(mc, AvmString::new_utf8(mc, "a123"));
             mc_char.set_name(mc, AvmString::new_utf8(mc, "mcChar"));
             DisplayObjectBase::set_parent_ignoring_orphan_list(
                 Gc::write(mc, mc_char.base()),
@@ -4222,6 +4334,27 @@ mod avm2_lifecycle_dirty_tests {
             );
             assert!(
                 !nested_symbol
+                    .base()
+                    .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "aether_performance")]
+    fn aether_adaptive_avatar_excludes_inventory_preview_roots() {
+        rootless_mutate(|mc| {
+            let movie = Arc::new(SwfMovie::empty(10, None));
+            let preview: DisplayObject<'_> = MovieClip::new(movie, mc).into();
+
+            preview
+                .base()
+                .set_aether_adaptive_avatar_cache_root_candidate(true);
+            preview.set_name(mc, AvmString::new_utf8(mc, "previewMCB"));
+            preview.refresh_aether_adaptive_avatar_cache_candidates();
+
+            assert!(
+                !preview
                     .base()
                     .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
             );

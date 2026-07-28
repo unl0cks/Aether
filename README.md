@@ -35,15 +35,14 @@ Install a current Rust toolchain, then run:
 
 ```powershell
 .\scripts\check-aether.ps1
-.\scripts\build-aether-windows.ps1 -Metrics
+.\scripts\build-aether-windows.ps1
 ```
 
 The optimized executable is written to `target\dist\aether.exe`.
 
-To export a clean source tree and build the installer:
+To build the installer:
 
 ```powershell
-.\scripts\export-github-source.ps1
 .\scripts\build-aether-installer.ps1
 ```
 

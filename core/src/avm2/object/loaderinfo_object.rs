@@ -282,7 +282,24 @@ impl<'gc> LoaderInfoObject<'gc> {
 
         // Remove the Loader's content element if it exists.
         if let Some(child) = loader.child_by_index(0) {
+            stop_loaded_display_subtree(child, context);
             loader.remove_child(context, child);
+            context.orphan_manager.remove_orphan_obj(child);
+        }
+    }
+}
+
+fn stop_loaded_display_subtree<'gc>(
+    display_object: DisplayObject<'gc>,
+    context: &mut UpdateContext<'gc>,
+) {
+    if let Some(movie_clip) = display_object.as_movie_clip() {
+        movie_clip.stop(context);
+    }
+
+    if let Some(container) = display_object.as_container() {
+        for child in container.iter_render_list() {
+            stop_loaded_display_subtree(child, context);
         }
     }
 }

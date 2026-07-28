@@ -13,6 +13,27 @@ pub enum OffscreenTexturePoolPolicy {
     BoundedReuse(BoundedTexturePoolLimits),
 }
 
+/// Keep a much smaller companion pool for transient filter and surface intermediates whenever
+/// the caller explicitly enables bounded offscreen reuse. These textures repeat frequently in
+/// animated Flash content, but retaining every size encountered across maps and login sessions
+/// causes GPU memory to grow without a useful bound.
+pub(crate) fn general_texture_pool_policy(
+    offscreen_policy: OffscreenTexturePoolPolicy,
+) -> OffscreenTexturePoolPolicy {
+    match offscreen_policy {
+        OffscreenTexturePoolPolicy::Ephemeral => OffscreenTexturePoolPolicy::Ephemeral,
+        OffscreenTexturePoolPolicy::BoundedReuse(limits) => {
+            OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
+                max_cached_bytes: (limits.max_cached_bytes / 4)
+                    .clamp(16 * 1024 * 1024, 64 * 1024 * 1024),
+                max_cached_entries: (limits.max_cached_entries / 4).clamp(32, 128),
+                max_idle_frames: limits.max_idle_frames.min(1),
+                max_cached_globals: limits.max_cached_globals.min(32),
+            })
+        }
+    }
+}
+
 /// Bound the amount of cache/filter work recorded into one GPU command submission. The generic
 /// renderer keeps its established batching, while Aether's bounded AQW path retains a safety
 /// margin below that established limit. Sixty-four entries prevents an unbounded command buffer
@@ -230,6 +251,30 @@ mod tests {
         assert_eq!(
             max_cache_entries_per_submission(OffscreenTexturePoolPolicy::BoundedReuse(LIMITS)),
             64
+        );
+    }
+
+    #[test]
+    fn bounded_offscreen_reuse_derives_a_smaller_general_pool() {
+        assert_eq!(
+            general_texture_pool_policy(OffscreenTexturePoolPolicy::Ephemeral),
+            OffscreenTexturePoolPolicy::Ephemeral
+        );
+        assert_eq!(
+            general_texture_pool_policy(OffscreenTexturePoolPolicy::BoundedReuse(
+                BoundedTexturePoolLimits {
+                    max_cached_bytes: 128 * 1024 * 1024,
+                    max_cached_entries: 512,
+                    max_idle_frames: 3,
+                    max_cached_globals: 128,
+                }
+            )),
+            OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
+                max_cached_bytes: 32 * 1024 * 1024,
+                max_cached_entries: 128,
+                max_idle_frames: 1,
+                max_cached_globals: 32,
+            })
         );
     }
 

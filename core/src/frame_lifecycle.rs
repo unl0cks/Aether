@@ -79,6 +79,8 @@ pub fn run_all_phases_avm2(context: &mut UpdateContext<'_>) {
         return;
     }
 
+    context.avm2.begin_frame_error_reporting();
+
     #[cfg(feature = "aether_metrics")]
     let phase_started = Instant::now();
     *context.frame_phase = FramePhase::Enter;

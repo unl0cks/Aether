@@ -218,6 +218,49 @@ pub struct Avm2<'gc> {
     pub debug_output: bool,
 
     pub optimizer_enabled: bool,
+
+    uncaught_error_log_budget: UncaughtErrorLogBudget,
+}
+
+const UNCAUGHT_ERROR_LOGS_PER_FRAME: u8 = 16;
+
+#[derive(Clone, Copy, Collect, Debug, PartialEq, Eq)]
+#[collect(require_static)]
+struct UncaughtErrorLogBudget {
+    remaining: u8,
+    suppression_reported: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum UncaughtErrorLogAction {
+    LogError,
+    ReportSuppression,
+    Suppress,
+}
+
+impl UncaughtErrorLogBudget {
+    fn new() -> Self {
+        Self {
+            remaining: UNCAUGHT_ERROR_LOGS_PER_FRAME,
+            suppression_reported: false,
+        }
+    }
+
+    fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    fn take(&mut self) -> UncaughtErrorLogAction {
+        if self.remaining > 0 {
+            self.remaining -= 1;
+            UncaughtErrorLogAction::LogError
+        } else if !self.suppression_reported {
+            self.suppression_reported = true;
+            UncaughtErrorLogAction::ReportSuppression
+        } else {
+            UncaughtErrorLogAction::Suppress
+        }
+    }
 }
 
 impl<'gc> Avm2<'gc> {
@@ -268,6 +311,7 @@ impl<'gc> Avm2<'gc> {
             debug_output: false,
 
             optimizer_enabled: true,
+            uncaught_error_log_budget: UncaughtErrorLogBudget::new(),
         }
     }
 
@@ -740,6 +784,10 @@ impl<'gc> Avm2<'gc> {
         self.optimizer_enabled = value;
     }
 
+    pub fn begin_frame_error_reporting(&mut self) {
+        self.uncaught_error_log_budget.reset();
+    }
+
     // Report an uncaught AVM2 error.
     // TODO should the `display_object` parameter be optional or not?
     #[cold]
@@ -750,9 +798,19 @@ impl<'gc> Avm2<'gc> {
         error: Error<'gc>,
         extra_info: &str,
     ) {
-        // This will print the properly formatted error
-        let stringified = error.to_string(activation);
-        tracing::error!("{}: {}", extra_info, stringified);
+        match activation.context.avm2.uncaught_error_log_budget.take() {
+            UncaughtErrorLogAction::LogError => {
+                // This will print the properly formatted error.
+                let stringified = error.to_string(activation);
+                tracing::error!("{}: {}", extra_info, stringified);
+            }
+            UncaughtErrorLogAction::ReportSuppression => {
+                tracing::warn!(
+                    "Additional uncaught AVM2 errors are suppressed until the next frame"
+                );
+            }
+            UncaughtErrorLogAction::Suppress => {}
+        }
 
         // TODO: push the error onto `loaderInfo.uncaughtErrorEvents`
     }
@@ -815,5 +873,19 @@ mod tests {
         });
         assert_eq!(entries, vec![1, 3]);
         assert_eq!(pruned, 1);
+    }
+
+    #[test]
+    fn uncaught_error_logging_is_bounded_and_resets_each_frame() {
+        let mut budget = UncaughtErrorLogBudget::new();
+
+        for _ in 0..UNCAUGHT_ERROR_LOGS_PER_FRAME {
+            assert_eq!(budget.take(), UncaughtErrorLogAction::LogError);
+        }
+        assert_eq!(budget.take(), UncaughtErrorLogAction::ReportSuppression);
+        assert_eq!(budget.take(), UncaughtErrorLogAction::Suppress);
+
+        budget.reset();
+        assert_eq!(budget.take(), UncaughtErrorLogAction::LogError);
     }
 }

@@ -49,6 +49,22 @@ fn is_aqw_parent_timeline_label_fallback(
         && ancestor_has_label
 }
 
+fn is_aqw_avatar_timeline_label_fallback(
+    movie_url: &str,
+    label: &str,
+    receiver_has_label: bool,
+    ancestor_name: Option<&str>,
+    ancestor_class_local_name: Option<&str>,
+    ancestor_has_label: bool,
+) -> bool {
+    contains_ascii_case_insensitive(movie_url, "spider.swf")
+        && label == "Idle"
+        && !receiver_has_label
+        && ancestor_name == Some("mcChar")
+        && ancestor_class_local_name == Some("mcSkel")
+        && ancestor_has_label
+}
+
 /// AQW's `ServerList.onBackClick` calls `MovieClip(parent).gotoAndPlay("Login")`.
 /// Some Loader layouts expose one additional parent wrapper, while the requested top-level label
 /// remains on the Loader_Spider ancestor. Redirect only those five known root labels, and only
@@ -71,6 +87,26 @@ pub fn resolve_aqw_parent_timeline_label<'gc>(
                 movie_clip.movie().url(),
                 &label_string,
                 false,
+                ancestor_has_label,
+            ) {
+                return movie_clip;
+            }
+
+            let ancestor_name = movie_clip.name().map(|name| name.to_string());
+            let ancestor_class_local_name = movie_clip.object2().map(|object| {
+                object
+                    .instance_class()
+                    .name()
+                    .local_name()
+                    .as_wstr()
+                    .to_string()
+            });
+            if is_aqw_avatar_timeline_label_fallback(
+                movie_clip.movie().url(),
+                &label_string,
+                false,
+                ancestor_name.as_deref(),
+                ancestor_class_local_name.as_deref(),
                 ancestor_has_label,
             ) {
                 return movie_clip;
@@ -378,6 +414,42 @@ mod tests {
             "https://example.invalid/other.swf",
             "Login",
             false,
+            true,
+        ));
+    }
+
+    #[test]
+    fn aqw_avatar_timeline_fallback_is_limited_to_idle_on_mcchar_skeleton() {
+        assert!(is_aqw_avatar_timeline_label_fallback(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "Idle",
+            false,
+            Some("mcChar"),
+            Some("mcSkel"),
+            true,
+        ));
+        assert!(!is_aqw_avatar_timeline_label_fallback(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "Attack",
+            false,
+            Some("mcChar"),
+            Some("mcSkel"),
+            true,
+        ));
+        assert!(!is_aqw_avatar_timeline_label_fallback(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "Idle",
+            false,
+            Some("previewMCB"),
+            Some("mcSkel"),
+            true,
+        ));
+        assert!(!is_aqw_avatar_timeline_label_fallback(
+            "https://example.invalid/other.swf",
+            "Idle",
+            false,
+            Some("mcChar"),
+            Some("mcSkel"),
             true,
         ));
     }

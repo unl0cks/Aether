@@ -51,6 +51,18 @@ impl<'gc> OrphanManager<'gc> {
         }
     }
 
+    /// Removes a specific object from orphan lifecycle processing.
+    ///
+    /// This is used by `Loader` teardown: unloaded content must not continue
+    /// advancing after its loader has released it. Other objects detached by
+    /// ActionScript retain Flash's normal orphan behavior.
+    pub fn remove_orphan_obj(&mut self, dobj: DisplayObject<'gc>) -> bool {
+        let previous_len = self.orphans.len();
+        self.orphans_mut()
+            .retain(|orphan| !std::ptr::eq(orphan.as_ptr(), dobj.as_ptr()));
+        self.orphans.len() != previous_len
+    }
+
     pub fn each_orphan_obj(
         context: &mut UpdateContext<'gc>,
         mut f: impl FnMut(DisplayObject<'gc>, &mut UpdateContext<'gc>),
@@ -118,4 +130,29 @@ fn valid_orphan<'gc>(
     mc: &Mutation<'gc>,
 ) -> Option<DisplayObject<'gc>> {
     dobj.upgrade(mc).filter(|dobj| dobj.parent().is_none())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::display_object::MovieClip;
+    use crate::tag_utils::SwfMovie;
+    use gc_arena::arena::rootless_mutate;
+    use std::sync::Arc;
+
+    #[test]
+    fn explicitly_removed_loader_content_stops_orphan_processing() {
+        rootless_mutate(|mc| {
+            let movie = Arc::new(SwfMovie::empty(10, None));
+            let content: DisplayObject<'_> = MovieClip::new(movie, mc).into();
+            let mut manager = OrphanManager::default();
+
+            manager.add_orphan_obj(content);
+            assert_eq!(manager.orphans.len(), 1);
+
+            assert!(manager.remove_orphan_obj(content));
+            assert!(manager.orphans.is_empty());
+            assert!(!manager.remove_orphan_obj(content));
+        });
+    }
 }

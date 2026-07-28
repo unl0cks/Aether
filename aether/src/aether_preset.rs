@@ -35,10 +35,10 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     opt.aether_aqw_adaptive_avatar_cache = !opt.no_aether_aqw_adaptive_avatar_cache;
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
 
-    // Retain exact-sized offscreen surfaces long enough for repeating equipment and combat-filter
-    // animation cycles to reuse them. The 256 MiB / 2,048-entry hard limits remain authoritative,
-    // so extending the age window reduces allocation churn without restoring unbounded lifetime
-    // accumulation.
+    // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment
+    // and combat-filter work to reuse them. The renderer also derives a smaller 32 MiB companion
+    // budget for transient filter/surface textures, so changing maps or logging in repeatedly
+    // cannot accumulate every GPU allocation size encountered during the session.
     opt.aether_bounded_offscreen_pool = !opt.no_aether_aqw_bounded_offscreen_pool;
 
     opt.movie_url = Some(Url::parse(AQW_LOADER_URL).context("Invalid built-in AQW loader URL")?);

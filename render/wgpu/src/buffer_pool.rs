@@ -429,6 +429,36 @@ mod tests {
     }
 
     #[test]
+    fn ephemeral_pool_discards_descriptor_buckets_at_frame_end() {
+        let mut pool = TexturePool::new(
+            OffscreenTexturePoolPolicy::Ephemeral,
+            #[cfg(feature = "aether_metrics")]
+            TexturePoolKind::General,
+        );
+        pool.pools.insert(
+            TextureKey {
+                size: wgpu::Extent3d {
+                    width: 64,
+                    height: 64,
+                    depth_or_array_layers: 1,
+                },
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                sample_count: 1,
+            },
+            TextureBucket {
+                pool: BufferPool::new(Box::new(|_, _| unreachable!())),
+                bytes_per_entry: Some(64 * 64 * 4),
+                last_used_frame: 0,
+            },
+        );
+
+        pool.finish_frame();
+
+        assert!(pool.pools.is_empty());
+    }
+
+    #[test]
     fn texture_key_requires_every_descriptor_field_to_match() {
         let base = TextureKey {
             size: wgpu::Extent3d {

@@ -8,7 +8,9 @@ use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::{LayerRef, Surface};
 use crate::target::{MaybeOwnedBuffer, TextureTarget};
 use crate::target::{RenderTargetFrame, TextureBufferInfo};
-use crate::texture_pool_policy::{OffscreenTexturePoolPolicy, max_cache_entries_per_submission};
+use crate::texture_pool_policy::{
+    OffscreenTexturePoolPolicy, general_texture_pool_policy, max_cache_entries_per_submission,
+};
 use crate::utils::BufferDimensions;
 use crate::{
     Descriptors, Error, QueueSyncHandle, RenderTarget, SwapChainTarget, Texture, as_texture,
@@ -260,7 +262,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             shape_tessellator: ShapeTessellator::new(),
             viewport_scale_factor: 1.0,
             texture_pool: TexturePool::new(
-                OffscreenTexturePoolPolicy::Ephemeral,
+                general_texture_pool_policy(offscreen_texture_pool_policy),
                 #[cfg(feature = "aether_metrics")]
                 crate::aether_metrics::TexturePoolKind::General,
             ),
@@ -673,14 +675,20 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
-        let maintenance = self.offscreen_texture_pool.finish_frame();
+        let general_maintenance = self.texture_pool.finish_frame();
+        let offscreen_maintenance = self.offscreen_texture_pool.finish_frame();
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_pool_maintenance(
+            crate::aether_metrics::TexturePoolKind::General,
+            general_maintenance,
+        );
         #[cfg(feature = "aether_metrics")]
         crate::aether_metrics::record_pool_maintenance(
             crate::aether_metrics::TexturePoolKind::Offscreen,
-            maintenance,
+            offscreen_maintenance,
         );
         #[cfg(not(feature = "aether_metrics"))]
-        let _ = maintenance;
+        let _ = (general_maintenance, offscreen_maintenance);
     }
 
     #[instrument(level = "debug", skip_all)]
