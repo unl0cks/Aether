@@ -36,6 +36,10 @@ fn diagnostic_url(url: &Url) -> String {
     sanitized.to_string()
 }
 
+fn configure_low_latency_socket(stream: &TcpStream) -> io::Result<()> {
+    stream.set_nodelay(true)
+}
+
 pub trait NavigatorInterface: Clone + Send + 'static {
     fn navigate_to_website(&self, url: Url);
 
@@ -395,6 +399,9 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     return;
                 }
                 Ok(stream) => {
+                    if let Err(error) = configure_low_latency_socket(&stream) {
+                        warn!("Failed to enable TCP_NODELAY for {host2}:{port}: {error}");
+                    }
                     let action = SocketAction::Connect(handle, ConnectionState::Connected);
                     if !send_action(&sender, action).await {
                         return;
@@ -637,6 +644,17 @@ mod tests {
             socket
         });
         (accept_task, addr)
+    }
+
+    #[macro_rules_attribute::apply(async_test)]
+    async fn aqw_socket_enables_tcp_nodelay() {
+        let (accept_task, addr) = start_test_server().await;
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let _server_socket = accept_task.await.unwrap();
+
+        configure_low_latency_socket(&stream).unwrap();
+
+        assert!(stream.nodelay().unwrap());
     }
 
     fn connect_test_socket(
