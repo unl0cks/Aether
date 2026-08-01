@@ -142,7 +142,6 @@ const FILTERLESS_HOT_CACHE_REBUILD_THRESHOLD: u8 = 3;
 const FILTERLESS_HOT_CACHE_DIRECT_FRAMES: u16 = 120;
 const FILTERLESS_HOT_CACHE_MIN_PIXELS: u64 = 128 * 128;
 const AETHER_ADAPTIVE_AVATAR_CACHE_STABLE_FRAMES: u8 = 3;
-const AETHER_ADAPTIVE_AVATAR_CACHE_DIRTY_FRAMES: u8 = 4;
 const AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION: u32 = 2_048;
 const AETHER_ADAPTIVE_AVATAR_CACHE_MAX_PIXELS: u64 = 1_048_576;
 
@@ -228,8 +227,22 @@ impl BitmapCache {
         }
 
         self.filterless_rebuild_streak = 0;
-        self.filterless_direct_frames = FILTERLESS_HOT_CACHE_DIRECT_FRAMES;
         true
+    }
+
+    /// Start a bounded direct-render window after the subtree has passed the semantic-safety
+    /// check. Keeping this separate from rebuild detection prevents an unchecked subtree from
+    /// entering the bypass.
+    fn begin_filterless_direct_rendering(&mut self) {
+        self.filterless_direct_frames = FILTERLESS_HOT_CACHE_DIRECT_FRAMES;
+    }
+
+    fn has_filterless_direct_render_frames(&self) -> bool {
+        self.filterless_direct_frames != 0
+    }
+
+    fn cancel_filterless_direct_rendering(&mut self) {
+        self.filterless_direct_frames = 0;
     }
 
     /// Consume one temporary direct-render frame for a known-hot filterless cache.
@@ -567,20 +580,6 @@ pub struct DisplayObjectBase<'gc> {
     /// cacheAsBitmap preference.
     aether_adaptive_avatar_cache_clean_frames: Cell<u8>,
 
-    /// Consecutive rendered frames for which an AQW AvatarMC candidate received visual
-    /// invalidation. Persistently animated remote avatars use this to switch to a bounded
-    /// alternating-frame bitmap cache instead of permanently missing the stable-cache path.
-    aether_adaptive_avatar_cache_dirty_frames: Cell<u8>,
-
-    /// Whether a persistently animated remote avatar is using alternating-frame cache rebuilds.
-    /// ActionScript and timelines continue to run every tick; only the rendered composite is
-    /// reused for one frame between rebuilds.
-    aether_adaptive_avatar_cache_throttled: Cell<bool>,
-
-    /// When throttling is active, suppress the next normal visual invalidation of the bitmap.
-    /// Viewport and non-translation transform changes bypass this state and always rebuild.
-    aether_adaptive_avatar_cache_hold_next_dirty: Cell<bool>,
-
     /// Last non-translation transform observed by the adaptive AvatarMC cache state machine.
     /// Root translation is intentionally excluded because Flash bitmap caches can move without
     /// rebuilding, while scale/rotation/skew changes must return to direct rendering immediately.
@@ -640,9 +639,6 @@ impl Default for DisplayObjectBase<'_> {
             flags: Cell::new(DisplayObjectFlags::VISIBLE),
             avm2_lifecycle_dirty: Default::default(),
             aether_adaptive_avatar_cache_clean_frames: Cell::new(0),
-            aether_adaptive_avatar_cache_dirty_frames: Cell::new(0),
-            aether_adaptive_avatar_cache_throttled: Cell::new(false),
-            aether_adaptive_avatar_cache_hold_next_dirty: Cell::new(false),
             aether_adaptive_avatar_cache_matrix: Cell::new([1.0, 0.0, 0.0, 1.0]),
             scroll_rect: Cell::new(None),
             next_scroll_rect: Default::default(),
@@ -668,9 +664,6 @@ impl<'gc> DisplayObjectBase<'gc> {
         self.flags.set(flags_to_keep | DisplayObjectFlags::VISIBLE);
         self.avm2_lifecycle_dirty.0.set(Avm2LifecycleTraversal::ALL);
         self.aether_adaptive_avatar_cache_clean_frames.set(0);
-        self.aether_adaptive_avatar_cache_dirty_frames.set(0);
-        self.aether_adaptive_avatar_cache_throttled.set(false);
-        self.aether_adaptive_avatar_cache_hold_next_dirty.set(false);
         self.aether_adaptive_avatar_cache_matrix
             .set(self.aether_adaptive_avatar_cache_matrix_components());
         self.recheck_cache_as_bitmap();
@@ -1142,9 +1135,6 @@ impl<'gc> DisplayObjectBase<'gc> {
             value,
         );
         self.aether_adaptive_avatar_cache_clean_frames.set(0);
-        self.aether_adaptive_avatar_cache_dirty_frames.set(0);
-        self.aether_adaptive_avatar_cache_throttled.set(false);
-        self.aether_adaptive_avatar_cache_hold_next_dirty.set(false);
         self.aether_adaptive_avatar_cache_matrix
             .set(self.aether_adaptive_avatar_cache_matrix_components());
 
@@ -1169,10 +1159,9 @@ impl<'gc> DisplayObjectBase<'gc> {
 
     /// Update the internal stable-avatar cache contribution before CACHE_INVALIDATED is cleared.
     ///
-    /// A candidate is cached after several completely clean rendered frames. A persistently
-    /// animated remote avatar instead uses a bounded alternating-frame cache after several dirty
-    /// frames, preserving ActionScript/timeline execution while reducing composite render cost.
-    /// Authored cacheAsBitmap and filter-required caches remain authoritative.
+    /// A candidate is cached only after several completely clean rendered frames. The first
+    /// descendant visual mutation deactivates the internal contribution before that dirty frame
+    /// is drawn. Authored cacheAsBitmap and filter-required caches remain authoritative.
     #[cfg(test)]
     fn update_aether_adaptive_avatar_cache(&self, optimization_enabled: bool) {
         self.update_aether_adaptive_avatar_cache_with_transform(
@@ -1199,72 +1188,17 @@ impl<'gc> DisplayObjectBase<'gc> {
         if transform_changed {
             self.aether_adaptive_avatar_cache_matrix.set(current_matrix);
         }
-        if !eligible || transform_changed {
+        let invalidated =
+            transform_changed || self.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED);
+
+        if !eligible || invalidated {
             self.aether_adaptive_avatar_cache_clean_frames.set(0);
-            self.aether_adaptive_avatar_cache_dirty_frames.set(0);
-            self.aether_adaptive_avatar_cache_throttled.set(false);
-            self.aether_adaptive_avatar_cache_hold_next_dirty.set(false);
             if self.aether_adaptive_avatar_cache_active() {
                 self.set_flag(
                     DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ACTIVE,
                     false,
                 );
                 self.recheck_cache_as_bitmap();
-            }
-            return;
-        }
-
-        if self.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED) {
-            self.aether_adaptive_avatar_cache_clean_frames.set(0);
-
-            if self.aether_adaptive_avatar_cache_throttled.get() {
-                self.aether_adaptive_avatar_cache_hold_next_dirty
-                    .set(!self.aether_adaptive_avatar_cache_hold_next_dirty.get());
-                return;
-            }
-
-            let dirty_frames = self
-                .aether_adaptive_avatar_cache_dirty_frames
-                .get()
-                .saturating_add(1);
-            self.aether_adaptive_avatar_cache_dirty_frames
-                .set(dirty_frames);
-
-            if dirty_frames >= AETHER_ADAPTIVE_AVATAR_CACHE_DIRTY_FRAMES
-                && !self.is_bitmap_cached_preference()
-            {
-                self.aether_adaptive_avatar_cache_throttled.set(true);
-                self.aether_adaptive_avatar_cache_hold_next_dirty.set(true);
-                self.set_flag(
-                    DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ACTIVE,
-                    true,
-                );
-                self.recheck_cache_as_bitmap();
-                return;
-            }
-
-            if self.aether_adaptive_avatar_cache_active() {
-                self.set_flag(
-                    DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ACTIVE,
-                    false,
-                );
-                self.recheck_cache_as_bitmap();
-            }
-            return;
-        }
-
-        self.aether_adaptive_avatar_cache_dirty_frames.set(0);
-
-        if self.aether_adaptive_avatar_cache_throttled.get() {
-            let clean_frames = self
-                .aether_adaptive_avatar_cache_clean_frames
-                .get()
-                .saturating_add(1);
-            self.aether_adaptive_avatar_cache_clean_frames
-                .set(clean_frames);
-            if clean_frames >= AETHER_ADAPTIVE_AVATAR_CACHE_STABLE_FRAMES {
-                self.aether_adaptive_avatar_cache_throttled.set(false);
-                self.aether_adaptive_avatar_cache_hold_next_dirty.set(false);
             }
             return;
         }
@@ -1301,14 +1235,8 @@ impl<'gc> DisplayObjectBase<'gc> {
         if self.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED) {
             return false;
         }
-        let hold_adaptive_avatar_cache = self.aether_adaptive_avatar_cache_throttled.get()
-            && self.aether_adaptive_avatar_cache_hold_next_dirty.get()
-            && self.aether_adaptive_avatar_cache_active()
-            && !self.is_bitmap_cached_preference();
-        if !hold_adaptive_avatar_cache {
-            if let Some(cache) = &mut *self.bitmap_cache_mut() {
-                cache.make_dirty();
-            }
+        if let Some(cache) = &mut *self.bitmap_cache_mut() {
+            cache.make_dirty();
         }
         self.set_flag(DisplayObjectFlags::CACHE_INVALIDATED, true);
         true
@@ -1485,6 +1413,16 @@ pub(crate) fn filterless_direct_render_subtree_is_semantically_safe(
     true
 }
 
+/// A verified parent direct-renders the same complete subtree, so descendants must not repeat
+/// the recursive semantic-safety walk. Without this inheritance, nested AQW avatar and map caches
+/// repeatedly traverse the same display tree and can turn a render frame into quadratic work.
+fn filterless_direct_render_safety_check_needed(
+    inherited_subtree_safe: bool,
+    direct_render_window_active: bool,
+) -> bool {
+    direct_render_window_active && !inherited_subtree_safe
+}
+
 pub fn render_base<'gc>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
@@ -1526,18 +1464,41 @@ pub fn render_base<'gc>(
             && this.filters().is_empty()
             && blend_mode == ExtendedBlendMode::Normal
             && this.opaque_background().is_none()
-            && context.transform_stack.transform().color_transform == ColorTransform::default()
-            && filterless_direct_render_subtree_is_semantically_safe(this);
+            && context.transform_stack.transform().color_transform == ColorTransform::default();
     #[cfg(not(feature = "aether_performance"))]
     let filterless_hot_cache_candidate = false;
 
-    let bitmap_cache_direct =
+    let mut bitmap_cache_direct =
         if context.use_bitmap_cache && this.is_bitmap_cached() && filterless_hot_cache_candidate {
-            let base = this.base();
-            let mut cache = base.bitmap_cache_mut();
-            cache
-                .as_mut()
-                .is_some_and(BitmapCache::take_filterless_direct_render_frame)
+            let direct_render_window_active = {
+                let base = this.base();
+                let cache = base.bitmap_cache_mut();
+                cache
+                    .as_ref()
+                    .is_some_and(BitmapCache::has_filterless_direct_render_frames)
+            };
+
+            if direct_render_window_active {
+                let subtree_safe = !filterless_direct_render_safety_check_needed(
+                    context.filterless_direct_subtree_safe,
+                    direct_render_window_active,
+                ) || filterless_direct_render_subtree_is_semantically_safe(this);
+
+                let base = this.base();
+                let mut cache = base.bitmap_cache_mut();
+                if subtree_safe {
+                    cache
+                        .as_mut()
+                        .is_some_and(BitmapCache::take_filterless_direct_render_frame)
+                } else {
+                    if let Some(cache) = cache.as_mut() {
+                        cache.cancel_filterless_direct_rendering();
+                    }
+                    false
+                }
+            } else {
+                false
+            }
         } else {
             false
         };
@@ -1668,11 +1629,16 @@ pub fn render_base<'gc>(
                     {
                         let filterless_output_pixels =
                             u64::from(texture_width) * u64::from(texture_height);
-                        if filterless_hot_cache_candidate
+                        let filterless_direct_threshold_reached = filterless_hot_cache_candidate
                             && filters.is_empty()
                             && filterless_output_pixels >= FILTERLESS_HOT_CACHE_MIN_PIXELS
-                            && cache.note_filterless_rebuild()
-                        {
+                            && cache.note_filterless_rebuild();
+                        let filterless_direct_subtree_safe = filterless_direct_threshold_reached
+                            && (context.filterless_direct_subtree_safe
+                                || filterless_direct_render_subtree_is_semantically_safe(this));
+                        if filterless_direct_subtree_safe {
+                            cache.begin_filterless_direct_rendering();
+                            bitmap_cache_direct = cache.take_filterless_direct_render_frame();
                             cache_info = None;
                         } else {
                             #[cfg(not(feature = "aether_diagnostics"))]
@@ -1814,6 +1780,7 @@ pub fn render_base<'gc>(
                 transform_stack: &mut transform_stack,
                 is_offscreen: true,
                 use_bitmap_cache: true,
+                filterless_direct_subtree_safe: false,
                 stage: context.stage,
             };
             #[cfg(feature = "aether_diagnostics")]
@@ -1876,7 +1843,15 @@ pub fn render_base<'gc>(
         apply_standard_mask_and_scroll(
             this,
             context,
-            |context| this.render_self(context),
+            |context| {
+                let previous_filterless_direct_subtree_safe =
+                    context.filterless_direct_subtree_safe;
+                if bitmap_cache_direct {
+                    context.filterless_direct_subtree_safe = true;
+                }
+                this.render_self(context);
+                context.filterless_direct_subtree_safe = previous_filterless_direct_subtree_safe;
+            },
             &options,
         );
     }
@@ -4208,7 +4183,19 @@ mod avm2_lifecycle_dirty_tests {
         assert!(!cache.note_filterless_rebuild());
         assert!(!cache.note_filterless_rebuild());
         assert!(cache.note_filterless_rebuild());
+
+        // Reaching the hot threshold only requests a semantic-safety check. The expensive
+        // descendant walk decides whether the direct-render window may actually begin.
+        assert!(!cache.take_filterless_direct_render_frame());
+        cache.begin_filterless_direct_rendering();
         assert!(cache.take_filterless_direct_render_frame());
+    }
+
+    #[test]
+    fn filterless_direct_render_skips_redundant_nested_safety_scans() {
+        assert!(!filterless_direct_render_safety_check_needed(false, false));
+        assert!(filterless_direct_render_safety_check_needed(false, true));
+        assert!(!filterless_direct_render_safety_check_needed(true, true));
     }
 
     #[test]
@@ -4299,47 +4286,19 @@ mod avm2_lifecycle_dirty_tests {
 
     #[test]
     #[cfg(feature = "aether_performance")]
-    fn aether_adaptive_avatar_persistent_motion_uses_bounded_cache() {
-        rootless_mutate(|mc| {
-            let movie = Arc::new(SwfMovie::empty(10, None));
-            let clip = MovieClip::new(movie, mc);
-            let base = clip.base();
-            base.set_aether_adaptive_avatar_cache_candidate(true);
-
-            for _ in 0..4 {
-                base.set_flag(DisplayObjectFlags::CACHE_INVALIDATED, true);
-                base.update_aether_adaptive_avatar_cache(true);
-                base.clear_invalidate_flag();
-            }
-
-            assert!(base.aether_adaptive_avatar_cache_active());
-        });
-    }
-
-    #[test]
-    #[cfg(feature = "aether_performance")]
-    fn aether_adaptive_avatar_persistent_motion_rebuilds_every_other_frame() {
+    fn aether_adaptive_avatar_persistent_motion_never_uses_internal_cache() {
         let base = DisplayObjectBase::default();
         base.set_aether_adaptive_avatar_cache_candidate(true);
 
-        for _ in 0..AETHER_ADAPTIVE_AVATAR_CACHE_DIRTY_FRAMES {
+        for _ in 0..8 {
             base.set_flag(DisplayObjectFlags::CACHE_INVALIDATED, true);
             base.update_aether_adaptive_avatar_cache(true);
+
+            assert!(!base.aether_adaptive_avatar_cache_active());
+            assert!(base.cell.borrow().cache.is_none());
+
             base.clear_invalidate_flag();
         }
-
-        {
-            let mut cell = base.cell.borrow_mut();
-            cell.cache.as_mut().unwrap().matrix_a = 1.0;
-        }
-
-        assert!(base.invalidate_cached_bitmap());
-        assert_eq!(base.cell.borrow().cache.as_ref().unwrap().matrix_a, 1.0);
-        base.update_aether_adaptive_avatar_cache(true);
-        base.clear_invalidate_flag();
-
-        assert!(base.invalidate_cached_bitmap());
-        assert!(base.cell.borrow().cache.as_ref().unwrap().matrix_a.is_nan());
     }
 
     #[test]

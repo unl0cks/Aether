@@ -1303,6 +1303,7 @@ struct MovementTraceRuntime {
     enter_frame_depth: usize,
     enter_frame_start_position: Option<MovementPoint>,
     enter_frame_stop_suppressed: bool,
+    mouse_move_depth: usize,
     suppressed_stop_count: usize,
 }
 
@@ -1451,23 +1452,25 @@ impl MovementTraceRuntime {
         }
     }
 
+    fn enter_mouse_move(&mut self) {
+        self.mouse_move_depth = self.mouse_move_depth.saturating_add(1);
+    }
+
+    fn exit_mouse_move(&mut self) {
+        self.mouse_move_depth = self.mouse_move_depth.saturating_sub(1);
+    }
+
     fn try_record_suppressed_stop(
         &mut self,
         receiver_position: MovementPoint,
         remaining_distance: f64,
         walk_elapsed_ms: f64,
     ) -> Option<usize> {
-        let start_position = self.enter_frame_start_position?;
+        let in_enter_frame = self.enter_frame_depth != 0;
+        let in_mouse_move = self.mouse_move_depth != 0;
         if !self.active
             || !self.guard_eligible
-            || self.enter_frame_depth == 0
-            // A collision callback can legitimately call stopWalking twice: first from the
-            // collision branch and then from the rounded no-progress branch. Let that second
-            // call preserve the wall stop. Without a blocking collision, repeated matching
-            // calls are the same premature-stop condition and must all remain suppressed.
-            || (self.enter_frame_stop_suppressed && self.blocking_collision_count > 0)
-            || self.callbacks_without_progress >= MAX_MOVEMENT_CALLBACKS_WITHOUT_PROGRESS
-            || !movement_points_have_same_rounded_position(start_position, receiver_position)
+            || (!in_enter_frame && !in_mouse_move)
             || !movement_stop_guard_should_suppress(
                 remaining_distance,
                 walk_elapsed_ms,
@@ -1477,7 +1480,21 @@ impl MovementTraceRuntime {
             return None;
         }
 
-        self.enter_frame_stop_suppressed = true;
+        if in_enter_frame {
+            let start_position = self.enter_frame_start_position?;
+            // A collision callback can legitimately call stopWalking twice: first from the
+            // collision branch and then from the rounded no-progress branch. Let that second
+            // call preserve the wall stop. Without a blocking collision, repeated matching
+            // calls are the same premature-stop condition and must all remain suppressed.
+            if (self.enter_frame_stop_suppressed && self.blocking_collision_count > 0)
+                || self.callbacks_without_progress >= MAX_MOVEMENT_CALLBACKS_WITHOUT_PROGRESS
+                || !movement_points_have_same_rounded_position(start_position, receiver_position)
+            {
+                return None;
+            }
+            self.enter_frame_stop_suppressed = true;
+        }
+
         self.suppressed_stop_count = self.suppressed_stop_count.saturating_add(1);
         Some(self.suppressed_stop_count)
     }
@@ -1712,6 +1729,38 @@ pub fn enter_movement_frame(receiver: Avm2Value<'_>) -> MovementEnterFrameGuard 
     MovementEnterFrameGuard { active }
 }
 
+pub struct MovementMouseMoveGuard {
+    active: bool,
+}
+
+impl Drop for MovementMouseMoveGuard {
+    fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
+        let mut state = match movement_trace_runtime().lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.exit_mouse_move();
+    }
+}
+
+/// Keep AQW's global `Mouse.onMouseMove` callbacks from cancelling a live walk. The guard spans
+/// both the global mouse listener and the rollover actions dispatched by the same input event;
+/// mouse clicks and unrelated scripted stops remain outside this scope.
+pub fn enter_movement_mouse_move() -> MovementMouseMoveGuard {
+    let active = movement_tracking_enabled();
+    if active {
+        let mut state = match movement_trace_runtime().lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.enter_mouse_move();
+    }
+    MovementMouseMoveGuard { active }
+}
+
 fn movement_stop_guard_should_suppress(
     remaining_distance: f64,
     walk_elapsed_ms: f64,
@@ -1764,10 +1813,11 @@ fn movement_points_have_same_rounded_position(
 }
 
 /// Return true only for the specific impossible early-stop state observed in AQW:
-/// `stopWalking` is called from `onEnterFrameWalk` while the avatar is still materially short of
-/// its target. If the timeline child lost its dynamic `onMove` flag between callbacks, the caller
-/// restores that flag before suppressing the stop. A bounded authored-callback stall counter
-/// prevents an infinite guard without letting rendering delays consume the movement budget.
+/// `stopWalking` is called from `onEnterFrameWalk` or a real `Mouse.onMouseMove` dispatch while
+/// the avatar is still materially short of its target. If the timeline child lost its dynamic
+/// `onMove` flag between callbacks, the caller restores that flag before suppressing the stop. A
+/// bounded authored-callback stall counter prevents an infinite guard without letting rendering
+/// delays consume the movement budget.
 ///
 /// A live collision deliberately does not disqualify the first matching call. AQW's collision
 /// branch restores the old coordinates and calls `stopWalking`, then immediately executes the
@@ -2697,6 +2747,45 @@ mod tests {
             "duplicate no-progress stops without a collision must not bypass the guard"
         );
         state.exit_enter_frame();
+    }
+
+    #[test]
+    fn stop_guard_suppresses_cursor_move_callbacks_only_during_mouse_dispatch() {
+        let owner = "stage#0/game/avatar";
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 150.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            ..MovementTraceRuntime::default()
+        };
+        let current = MovementPoint { x: 100.0, y: 200.0 };
+
+        assert_eq!(
+            state.try_record_suppressed_stop(current, 50.0, 100.0),
+            None,
+            "an unrelated scripted stop outside an authored movement or mouse callback must pass through"
+        );
+
+        state.enter_mouse_move();
+        assert_eq!(
+            state.try_record_suppressed_stop(current, 50.0, 100.0),
+            Some(1),
+            "AQW's global Mouse.onMouseMove callback must not cancel a live walk"
+        );
+        assert_eq!(
+            state.try_record_suppressed_stop(current, 50.0, 100.0),
+            Some(2),
+            "multiple cursor callbacks in the same dispatch must remain harmless"
+        );
+        state.exit_mouse_move();
+
+        assert_eq!(
+            state.try_record_suppressed_stop(current, 50.0, 100.0),
+            None,
+            "the cursor-specific guard must end with the mouse dispatch"
+        );
     }
 
     #[test]

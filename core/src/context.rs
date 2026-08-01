@@ -568,6 +568,10 @@ pub struct RenderContext<'a, 'gc> {
     /// Whether to use cacheAsBitmap, vs drawing everything explicitly
     pub use_bitmap_cache: bool,
 
+    /// Whether an ancestor has already verified that the complete directly rendered subtree
+    /// preserves filterless cache compositing semantics.
+    pub filterless_direct_subtree_safe: bool,
+
     /// The current player's stage (including all loaded levels)
     pub stage: Stage<'gc>,
 }

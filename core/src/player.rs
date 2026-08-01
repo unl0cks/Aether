@@ -1153,6 +1153,10 @@ impl Player {
             return false;
         };
 
+        #[cfg(feature = "aether_diagnostics")]
+        let _aether_movement_mouse_guard = matches!(&event, InputEvent::MouseMove { .. })
+            .then(crate::aether_diagnostics::enter_movement_mouse_move);
+
         let changed_mouse_buttons = self
             .input
             .get_mouse_down_buttons()
@@ -2276,6 +2280,7 @@ impl Player {
                 transform_stack: &mut this.transform_stack,
                 is_offscreen: false,
                 use_bitmap_cache: true,
+                filterless_direct_subtree_safe: false,
                 stage,
             };
 

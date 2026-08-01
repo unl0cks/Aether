@@ -1536,6 +1536,7 @@ pub fn draw<'gc>(
         transform_stack: &mut transform_stack,
         is_offscreen: true,
         use_bitmap_cache: false,
+        filterless_direct_subtree_safe: false,
         stage: context.stage,
     };
 
