@@ -150,6 +150,14 @@ fn aqw_device_font_alias(name: &str) -> Option<(&'static str, fontdb::Weight)> {
     }
 }
 
+fn device_font_registration_style(is_bold: bool, is_italic: bool) -> (bool, bool) {
+    // fontdb may satisfy a request with a metrically compatible face whose own
+    // metadata differs from the requested key. Ruffle indexes registered device
+    // fonts by the request key, so preserve it here or the font is immediately
+    // rejected after loading (notably "Helvetica Neue Bold" with bold=false).
+    (is_bold, is_italic)
+}
+
 impl DesktopUiBackend {
     pub fn new(
         window: Arc<Window>,
@@ -224,6 +232,13 @@ mod aqw_device_font_alias_tests {
             Some(("Arial Narrow", fontdb::Weight::NORMAL))
         );
         assert_eq!(aqw_device_font_alias("Unrelated Font"), None);
+    }
+
+    #[test]
+    fn device_font_registration_uses_the_requested_style_key() {
+        assert_eq!(device_font_registration_style(false, false), (false, false));
+        assert_eq!(device_font_registration_style(true, false), (true, false));
+        assert_eq!(device_font_registration_style(false, true), (false, true));
     }
 }
 
@@ -379,7 +394,14 @@ impl UiBackend for DesktopUiBackend {
                 face.post_script_name,
             );
 
-            match load_fontdb_font(name.to_string(), face) {
+            let (registration_bold, registration_italic) =
+                device_font_registration_style(is_bold, is_italic);
+            match load_fontdb_font(
+                name.to_string(),
+                face,
+                registration_bold,
+                registration_italic,
+            ) {
                 Ok(font_definition) => register(font_definition),
                 Err(error) => tracing::error!("Error loading font from fontdb: {error}"),
             }
@@ -495,10 +517,12 @@ fn load_font_from_file(
     })
 }
 
-fn load_fontdb_font(name: String, face: &FaceInfo) -> Result<FontDefinition<'static>> {
-    let is_bold = face.weight > fontdb::Weight::NORMAL;
-    let is_italic = face.style != fontdb::Style::Normal;
-
+fn load_fontdb_font(
+    name: String,
+    face: &FaceInfo,
+    is_bold: bool,
+    is_italic: bool,
+) -> Result<FontDefinition<'static>> {
     match &face.source {
         fontdb::Source::File(path) => {
             load_font_from_file(path, name, face.index, is_bold, is_italic)

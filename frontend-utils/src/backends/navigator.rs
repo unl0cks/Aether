@@ -27,6 +27,15 @@ use tokio::net::TcpStream;
 use tracing::warn;
 use url::{ParseError, Url};
 
+fn diagnostic_url(url: &Url) -> String {
+    let mut sanitized = url.clone();
+    let _ = sanitized.set_username("");
+    let _ = sanitized.set_password(None);
+    sanitized.set_query(None);
+    sanitized.set_fragment(None);
+    sanitized.to_string()
+}
+
 pub trait NavigatorInterface: Clone + Send + 'static {
     fn navigate_to_website(&self, url: Url);
 
@@ -223,9 +232,16 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 })
             }
             _ => Box::pin(async move {
-                let client = client.ok_or_else(|| ErrorResponse {
-                    url: processed_url.to_string(),
-                    error: Error::FetchError("Network unavailable".to_string()),
+                let diagnostic_request_url = diagnostic_url(&processed_url);
+                let client = client.ok_or_else(|| {
+                    warn!(
+                        "Network request to {} could not start: network unavailable",
+                        diagnostic_request_url
+                    );
+                    ErrorResponse {
+                        url: processed_url.to_string(),
+                        error: Error::FetchError("Network unavailable".to_string()),
+                    }
                 })?;
 
                 let mut request_builder = match request.method() {
@@ -241,6 +257,13 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 request_builder = request_builder.body(body_data);
 
                 let response = spawn_tokio(request_builder.send()).await.map_err(|e| {
+                    // Reqwest errors may include the complete request URL. Strip it so
+                    // login query data and credentials never reach the diagnostic log.
+                    let e = e.without_url();
+                    warn!(
+                        "Network request to {} failed: {}",
+                        diagnostic_request_url, e
+                    );
                     let inner = if e.is_connect() {
                         Error::InvalidDomain(processed_url.to_string())
                     } else {
@@ -261,6 +284,11 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                 let status = response.status().as_u16();
                 let redirected = *response.url() != processed_url;
                 if !response.status().is_success() {
+                    warn!(
+                        "Network request to {} returned HTTP {}",
+                        diagnostic_url(response.url()),
+                        response.status()
+                    );
                     let error = Error::HttpNotOk(
                         format!("Got {}", response.status()),
                         status,
@@ -385,6 +413,8 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
             //NOTE: We clone the sender here as we cant share it between async tasks.
             let sender2 = sender.clone();
             let (mut read, mut write) = stream.split();
+            let read_addr = addr.clone();
+            let write_addr = addr;
 
             let read = async move {
                 loop {
@@ -392,7 +422,13 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
 
                     match read.read(&mut buffer).await {
                         Err(e) if e.kind() == ErrorKind::TimedOut => {} // try again later.
-                        Err(_) | Ok(0) => {
+                        Err(e) => {
+                            warn!("Socket read from {} failed: {}", read_addr, e);
+                            let _ = send_action(&sender, SocketAction::Close(handle)).await;
+                            break;
+                        }
+                        Ok(0) => {
+                            warn!("Socket {} was closed by the remote peer", read_addr);
                             let _ = send_action(&sender, SocketAction::Close(handle)).await;
                             break;
                         }
@@ -430,7 +466,8 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                     if !pending_write.is_empty() {
                         match write.write(&pending_write).await {
                             Err(e) if e.kind() == ErrorKind::TimedOut => {} // try again later.
-                            Err(_) => {
+                            Err(e) => {
+                                warn!("Socket write to {} failed: {}", write_addr, e);
                                 let _ = send_action(&sender2, SocketAction::Close(handle)).await;
                                 return;
                             }
@@ -513,6 +550,16 @@ mod tests {
     // The timeout has to be large enough to allow "instantaneous" actions
     // and local IO to execute, but small enough to fail tests quickly.
     const TIMEOUT: Duration = Duration::from_secs(1);
+
+    #[test]
+    fn network_diagnostics_strip_credentials_and_query_data() {
+        let url = Url::parse(
+            "https://account:secret@example.com/login?username=player&password=secret#result",
+        )
+        .unwrap();
+
+        assert_eq!(diagnostic_url(&url), "https://example.com/login");
+    }
 
     struct TestFutureSpawner;
 

@@ -1461,7 +1461,11 @@ impl MovementTraceRuntime {
         if !self.active
             || !self.guard_eligible
             || self.enter_frame_depth == 0
-            || self.enter_frame_stop_suppressed
+            // A collision callback can legitimately call stopWalking twice: first from the
+            // collision branch and then from the rounded no-progress branch. Let that second
+            // call preserve the wall stop. Without a blocking collision, repeated matching
+            // calls are the same premature-stop condition and must all remain suppressed.
+            || (self.enter_frame_stop_suppressed && self.blocking_collision_count > 0)
             || self.callbacks_without_progress >= MAX_MOVEMENT_CALLBACKS_WITHOUT_PROGRESS
             || !movement_points_have_same_rounded_position(start_position, receiver_position)
             || !movement_stop_guard_should_suppress(
@@ -1767,10 +1771,11 @@ fn movement_points_have_same_rounded_position(
 ///
 /// A live collision deliberately does not disqualify the first matching call. AQW's collision
 /// branch restores the old coordinates and calls `stopWalking`, then immediately executes the
-/// same rounded no-progress check and calls `stopWalking` again. The per-callback latch suppresses
-/// only the first call, so the second one still preserves the genuine wall stop. Treating any
-/// positive collision test as a veto instead disabled the guard on dense maps even when AQW had
-/// successfully resolved the collision along one axis.
+/// same rounded no-progress check and calls `stopWalking` again. The per-callback latch allows
+/// that second call only when the current callback observed a blocking collision, preserving the
+/// genuine wall stop without allowing duplicate no-collision stops to bypass the guard. Treating
+/// any positive collision test as a veto instead disabled the guard on dense maps even when AQW
+/// had successfully resolved the collision along one axis.
 pub fn movement_stop_guard_action_for_receiver(
     receiver: Avm2Value<'_>,
     mc_char_on_move: Option<bool>,
@@ -2668,7 +2673,7 @@ mod tests {
     }
 
     #[test]
-    fn stop_guard_only_suppresses_the_first_no_progress_stop_in_each_frame() {
+    fn stop_guard_suppresses_duplicate_no_progress_stops_without_a_collision() {
         let owner = "stage#0/game/avatar";
         let mut state = MovementTraceRuntime {
             active: true,
@@ -2688,8 +2693,8 @@ mod tests {
         );
         assert_eq!(
             state.try_record_suppressed_stop(current, 50.0, 100.0),
-            None,
-            "a later intentional stop nested in the same callback must be allowed"
+            Some(2),
+            "duplicate no-progress stops without a collision must not bypass the guard"
         );
         state.exit_enter_frame();
     }

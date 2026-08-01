@@ -72,6 +72,14 @@ impl Filter {
     }
 
     pub fn calculate_dest_rect(&self, source_rect: Rectangle<Twips>) -> Rectangle<Twips> {
+        // Empty display objects use Rectangle::INVALID as their bounds. Growing that
+        // sentinel for a blur/glow turns it into a seemingly valid rectangle near
+        // 0x07ff_ffff twips; unioning it with real content then produces a cache that
+        // appears to be roughly 6.7 million pixels wide and tall.
+        if !source_rect.is_valid() {
+            return source_rect;
+        }
+
         match self {
             Filter::BlurFilter(filter) => filter.calculate_dest_rect(source_rect),
             Filter::GlowFilter(filter) => filter.calculate_dest_rect(source_rect),
@@ -180,5 +188,23 @@ impl DisplacementMapFilter {
         // } else {
         //     source_rect
         // }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn filters_preserve_invalid_empty_bounds() {
+        let filter = Filter::BlurFilter(swf::BlurFilter {
+            blur_x: swf::Fixed16::from_f64(8.0),
+            blur_y: swf::Fixed16::from_f64(8.0),
+            flags: swf::BlurFilterFlags::from_passes(1),
+        });
+
+        let invalid = Rectangle::<Twips>::default();
+
+        assert_eq!(filter.calculate_dest_rect(invalid), invalid);
     }
 }
