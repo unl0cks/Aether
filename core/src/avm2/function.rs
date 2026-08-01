@@ -6,7 +6,7 @@ use crate::avm2::object::{ClassObject, FunctionObject};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::TraitKind;
 use crate::avm2::value::Value;
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 use crate::string::AvmString;
 use crate::string::WString;
 use gc_arena::{Collect, Gc};
@@ -175,7 +175,7 @@ impl<'a, 'gc> Iterator for FunctionArgsIter<'a, 'gc> {
     }
 }
 
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AetherMovementMethod {
     EnterFrameWalk,
@@ -184,7 +184,7 @@ enum AetherMovementMethod {
     StopWalking,
 }
 
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method(method_name: &str) -> Option<AetherMovementMethod> {
     match method_name {
         "AvatarMC/onEnterFrameWalk" => Some(AetherMovementMethod::EnterFrameWalk),
@@ -195,7 +195,7 @@ fn classify_aether_movement_method(method_name: &str) -> Option<AetherMovementMe
     }
 }
 
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method_for_parts(
     method_name: &str,
     bound_class: Option<(&str, bool)>,
@@ -206,7 +206,7 @@ fn classify_aether_movement_method_for_parts(
     })
 }
 
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
@@ -217,7 +217,7 @@ fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
-#[cfg(feature = "aether_metrics")]
+#[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovementMethod> {
     let method_name = method.method_name();
     let bound_class = if method_name.as_ref() == "onEnterFrameWalk" {
@@ -259,12 +259,12 @@ pub fn exec<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mc = activation.gc();
 
-    #[cfg(feature = "aether_metrics")]
+    #[cfg(feature = "aether_diagnostics")]
     let aether_movement_method = crate::aether_diagnostics::movement_tracking_enabled()
         .then(|| classify_aether_movement_method_for(method))
         .flatten();
 
-    #[cfg(feature = "aether_metrics")]
+    #[cfg(feature = "aether_diagnostics")]
     let _aether_movement_frame_guard =
         if aether_movement_method == Some(AetherMovementMethod::EnterFrameWalk) {
             Some(crate::aether_diagnostics::enter_movement_frame(receiver))
@@ -272,7 +272,7 @@ pub fn exec<'gc>(
             None
         };
 
-    #[cfg(feature = "aether_metrics")]
+    #[cfg(feature = "aether_diagnostics")]
     let aether_movement_simulation = {
         fn numeric_argument(value: Value<'_>) -> Option<f64> {
             match value {
@@ -462,7 +462,7 @@ pub fn exec<'gc>(
         }
     };
 
-    #[cfg(feature = "aether_metrics")]
+    #[cfg(feature = "aether_diagnostics")]
     if let Some(sequence_id) = aether_movement_simulation {
         let result = match &ret {
             Ok(Value::Null) => "null",
@@ -548,7 +548,7 @@ pub fn display_function<'gc>(output: &mut WString, method: Method<'gc>) {
     output.push_utf8("()");
 }
 
-#[cfg(all(test, feature = "aether_metrics"))]
+#[cfg(all(test, feature = "aether_diagnostics"))]
 mod aether_movement_tests {
     use super::*;
 

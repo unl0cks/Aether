@@ -294,6 +294,13 @@ mod tests {
     }
 
     #[test]
+    fn normal_build_contains_movement_stop_guard_runtime() {
+        ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(true);
+        assert!(ruffle_core::aether_diagnostics::movement_stop_guard_enabled());
+        ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(false);
+    }
+
+    #[test]
     fn aqw_preset_allows_movement_stop_guard_opt_out() {
         let opt = parse_and_apply(&["aether", "--no-aether-aqw-movement-stop-guard"]);
         assert!(!opt.aether_aqw_movement_stop_guard);

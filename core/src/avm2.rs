@@ -28,6 +28,8 @@ use fnv::FnvHashMap;
 use gc_arena::lock::GcRefLock;
 use gc_arena::{Collect, Gc, Mutation};
 use smallvec::SmallVec;
+use std::collections::HashSet;
+use std::hash::Hash;
 use std::sync::Arc;
 use swf::DoAbc2Flag;
 use swf::avm2::read::Reader;
@@ -116,6 +118,26 @@ enum BroadcastEntryState {
 
 fn snapshot_broadcast_entries<T: Copy>(entries: &[T]) -> SmallVec<[T; 8]> {
     entries.iter().copied().collect()
+}
+
+fn remove_broadcast_entries<T>(
+    entries: &mut Vec<T>,
+    mut should_remove: impl FnMut(&T) -> bool,
+) -> usize {
+    let initial_len = entries.len();
+    entries.retain(|entry| !should_remove(entry));
+    initial_len - entries.len()
+}
+
+fn remove_broadcast_entries_for_targets<T, K>(
+    entries: &mut Vec<T>,
+    targets: &HashSet<K>,
+    mut key: impl FnMut(&T) -> K,
+) -> usize
+where
+    K: Eq + Hash,
+{
+    remove_broadcast_entries(entries, |entry| targets.contains(&key(entry)))
 }
 
 fn compact_broadcast_entries<T>(
@@ -222,13 +244,15 @@ pub struct Avm2<'gc> {
     uncaught_error_log_budget: UncaughtErrorLogBudget,
 }
 
-const UNCAUGHT_ERROR_LOGS_PER_FRAME: u8 = 16;
+const UNCAUGHT_ERROR_LOG_CAPACITY: u8 = 16;
+const UNCAUGHT_ERROR_LOG_REFILL_FRAMES: u16 = 60;
 
 #[derive(Clone, Copy, Collect, Debug, PartialEq, Eq)]
 #[collect(require_static)]
 struct UncaughtErrorLogBudget {
     remaining: u8,
     suppression_reported: bool,
+    frames_until_refill: u16,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -241,13 +265,25 @@ enum UncaughtErrorLogAction {
 impl UncaughtErrorLogBudget {
     fn new() -> Self {
         Self {
-            remaining: UNCAUGHT_ERROR_LOGS_PER_FRAME,
+            remaining: UNCAUGHT_ERROR_LOG_CAPACITY,
             suppression_reported: false,
+            frames_until_refill: UNCAUGHT_ERROR_LOG_REFILL_FRAMES,
         }
     }
 
-    fn reset(&mut self) {
-        *self = Self::new();
+    fn begin_frame(&mut self) {
+        if self.remaining >= UNCAUGHT_ERROR_LOG_CAPACITY {
+            self.frames_until_refill = UNCAUGHT_ERROR_LOG_REFILL_FRAMES;
+            return;
+        }
+
+        if self.frames_until_refill > 1 {
+            self.frames_until_refill -= 1;
+        } else {
+            self.remaining = self.remaining.saturating_add(1);
+            self.suppression_reported = false;
+            self.frames_until_refill = UNCAUGHT_ERROR_LOG_REFILL_FRAMES;
+        }
     }
 
     fn take(&mut self) -> UncaughtErrorLogAction {
@@ -467,6 +503,26 @@ impl<'gc> Avm2<'gc> {
         }
 
         bucket.push(object.downgrade());
+    }
+
+    /// Removes every broadcast listener registered by any object in `objects`.
+    ///
+    /// Loader unload is a terminal lifecycle event for a loaded movie. Leaving
+    /// its broadcast registrations behind allows detached AVM2 objects to keep
+    /// receiving enter-frame and input events after their display subtree has
+    /// been removed. Build the target set once so each broadcast bucket is
+    /// compacted only once, regardless of the loaded subtree's size.
+    pub fn unregister_broadcast_listeners_for_objects(
+        context: &mut UpdateContext<'gc>,
+        objects: &[Object<'gc>],
+    ) {
+        let targets = objects
+            .iter()
+            .map(|object| object.as_ptr())
+            .collect::<HashSet<_>>();
+        for listeners in context.avm2.broadcast_list.values_mut() {
+            remove_broadcast_entries_for_targets(listeners, &targets, |entry| entry.as_ptr());
+        }
     }
 
     /// Dispatch an event on all objects in the current execution list.
@@ -785,7 +841,7 @@ impl<'gc> Avm2<'gc> {
     }
 
     pub fn begin_frame_error_reporting(&mut self) {
-        self.uncaught_error_log_budget.reset();
+        self.uncaught_error_log_budget.begin_frame();
     }
 
     // Report an uncaught AVM2 error.
@@ -806,7 +862,7 @@ impl<'gc> Avm2<'gc> {
             }
             UncaughtErrorLogAction::ReportSuppression => {
                 tracing::warn!(
-                    "Additional uncaught AVM2 errors are suppressed until the next frame"
+                    "Additional uncaught AVM2 errors are suppressed until the logging budget refills"
                 );
             }
             UncaughtErrorLogAction::Suppress => {}
@@ -876,16 +932,33 @@ mod tests {
     }
 
     #[test]
-    fn uncaught_error_logging_is_bounded_and_resets_each_frame() {
+    fn broadcast_listener_removal_prunes_every_target_in_one_pass() {
+        let mut entries = vec![1_u8, 2, 2, 3];
+        let targets = HashSet::from([1_u8, 2]);
+
+        let removed = remove_broadcast_entries_for_targets(&mut entries, &targets, |entry| *entry);
+
+        assert_eq!(removed, 3);
+        assert_eq!(entries, vec![3]);
+    }
+
+    #[test]
+    fn uncaught_error_logging_refills_gradually_after_initial_burst() {
         let mut budget = UncaughtErrorLogBudget::new();
 
-        for _ in 0..UNCAUGHT_ERROR_LOGS_PER_FRAME {
+        for _ in 0..UNCAUGHT_ERROR_LOG_CAPACITY {
             assert_eq!(budget.take(), UncaughtErrorLogAction::LogError);
         }
         assert_eq!(budget.take(), UncaughtErrorLogAction::ReportSuppression);
         assert_eq!(budget.take(), UncaughtErrorLogAction::Suppress);
 
-        budget.reset();
+        for _ in 1..UNCAUGHT_ERROR_LOG_REFILL_FRAMES {
+            budget.begin_frame();
+            assert_eq!(budget.take(), UncaughtErrorLogAction::Suppress);
+        }
+
+        budget.begin_frame();
         assert_eq!(budget.take(), UncaughtErrorLogAction::LogError);
+        assert_eq!(budget.take(), UncaughtErrorLogAction::ReportSuppression);
     }
 }

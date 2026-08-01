@@ -314,23 +314,11 @@ fn main() -> Result<(), Error> {
         tracing::info!("AQW AVM2 broadcast cleanup and dispatch fast path is enabled");
     }
 
-    #[cfg(feature = "metrics")]
-    {
-        let movement_stop_guard_enabled =
-            aqw_mode && preferences.cli.aether_aqw_movement_stop_guard;
-        ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(
-            movement_stop_guard_enabled,
-        );
-        if movement_stop_guard_enabled {
-            tracing::warn!(
-                "Experimental AQW premature movement-stop guard is enabled; use only for compatibility testing"
-            );
-        }
-    }
-    #[cfg(not(feature = "metrics"))]
-    if preferences.cli.aether_aqw_movement_stop_guard {
+    let movement_stop_guard_enabled = aqw_mode && preferences.cli.aether_aqw_movement_stop_guard;
+    ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(movement_stop_guard_enabled);
+    if movement_stop_guard_enabled {
         tracing::warn!(
-            "--aether-aqw-movement-stop-guard was requested, but this binary was built without the `metrics` feature"
+            "Experimental AQW premature movement-stop guard is enabled; use only for compatibility testing"
         );
     }
 
@@ -374,8 +362,8 @@ fn main() -> Result<(), Error> {
         ruffle_core::aether_diagnostics::shutdown_input_trace();
         ruffle_core::aether_diagnostics::shutdown_timeline_trace();
         ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(false);
-        ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(false);
     }
+    ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(false);
     ruffle_core::aether_compatibility::set_timeline_child_rebind_enabled(false);
 
     #[cfg(windows)]

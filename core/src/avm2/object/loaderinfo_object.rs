@@ -282,7 +282,9 @@ impl<'gc> LoaderInfoObject<'gc> {
 
         // Remove the Loader's content element if it exists.
         if let Some(child) = loader.child_by_index(0) {
-            stop_loaded_display_subtree(child, context);
+            let mut loaded_objects = Vec::new();
+            stop_loaded_display_subtree(child, context, &mut loaded_objects);
+            Avm2::unregister_broadcast_listeners_for_objects(context, &loaded_objects);
             loader.remove_child(context, child);
             context.orphan_manager.remove_orphan_obj(child);
         }
@@ -292,14 +294,19 @@ impl<'gc> LoaderInfoObject<'gc> {
 fn stop_loaded_display_subtree<'gc>(
     display_object: DisplayObject<'gc>,
     context: &mut UpdateContext<'gc>,
+    loaded_objects: &mut Vec<Object<'gc>>,
 ) {
+    if let Some(object) = display_object.object2() {
+        loaded_objects.push(object.into());
+    }
+
     if let Some(movie_clip) = display_object.as_movie_clip() {
         movie_clip.stop(context);
     }
 
     if let Some(container) = display_object.as_container() {
         for child in container.iter_render_list() {
-            stop_loaded_display_subtree(child, context);
+            stop_loaded_display_subtree(child, context, loaded_objects);
         }
     }
 }

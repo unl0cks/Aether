@@ -64,7 +64,7 @@
                 <Component Id="AetherReleaseNotes" Guid="*">
                     <File
                         Id="AetherReleaseNotesFile"
-                        Source="$(env.AETHER_PROJECT_ROOT)\README_AETHER_RELEASE.md"
+                        Source="$(env.AETHER_PROJECT_ROOT)\README.md"
                         Name="README.md"
                         KeyPath="yes" />
                 </Component>

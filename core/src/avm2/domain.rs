@@ -1,6 +1,10 @@
 //! Application Domains
 
 use std::cell::{Ref, RefMut};
+#[cfg(feature = "aether_compatibility")]
+use std::collections::HashSet;
+#[cfg(feature = "aether_compatibility")]
+use std::sync::{Mutex, OnceLock as StdOnceLock};
 
 use crate::avm2::activation::Activation;
 use crate::avm2::bytearray::ByteArrayStorage;
@@ -17,6 +21,32 @@ use gc_arena::barrier::unlock;
 use gc_arena::lock::{Lock, OnceLock, RefLock};
 use gc_arena::{Collect, Gc, GcWeak, Mutation};
 use ruffle_wstr::WStr;
+
+#[cfg(feature = "aether_compatibility")]
+fn report_aqw_definition_lookup_miss(domain_address: usize, caller_url: &str, name: &str) {
+    if !caller_url.to_ascii_lowercase().contains("spider.swf") {
+        return;
+    }
+
+    const MAX_REPORTED_MISSES: usize = 256;
+    static REPORTED: StdOnceLock<Mutex<HashSet<(usize, String)>>> = StdOnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut reported = match reported.lock() {
+        Ok(reported) => reported,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if reported.len() >= MAX_REPORTED_MISSES || !reported.insert((domain_address, name.to_owned()))
+    {
+        return;
+    }
+
+    tracing::warn!(
+        definition = name,
+        caller_url,
+        domain_address,
+        "AQW definition lookup miss"
+    );
+}
 
 /// Represents a set of scripts and movies that share traits across different
 /// script-global scopes.
@@ -300,8 +330,23 @@ impl<'gc> Domain<'gc> {
 
         // If we're not hitting the special-case, just call `get_defined_value`
 
+        #[cfg(feature = "aether_compatibility")]
+        let lookup_name = name.to_utf8_lossy();
         let name = QName::from_qualified_name(name, activation.context);
-        self.get_defined_value(activation, name)
+        let result = self.get_defined_value(activation, name);
+
+        #[cfg(feature = "aether_compatibility")]
+        if result.is_err()
+            && let Some(caller_movie) = activation.caller_movie()
+        {
+            report_aqw_definition_lookup_miss(
+                self.as_ptr().addr(),
+                caller_movie.url(),
+                &lookup_name,
+            );
+        }
+
+        result
     }
 
     pub fn has_defined_value_handling_vector(

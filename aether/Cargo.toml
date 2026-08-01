@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.3.2"
+version = "0.3.4"
 
 [lints]
 workspace = true
@@ -19,7 +19,7 @@ egui-wgpu = { version = "0.33.3", features = ["winit"] }
 image = { workspace = true, features = ["png"] }
 egui-winit = "0.33.3"
 fontdb = "0.23"
-ruffle_core = { path = "../core", features = ["audio", "clap", "mp3", "aac", "nellymoser", "default_compatibility_rules", "egui", "aether_compatibility", "aether_render_hints", "aether_performance"] }
+ruffle_core = { path = "../core", features = ["audio", "clap", "mp3", "aac", "nellymoser", "default_compatibility_rules", "egui", "aether_compatibility", "aether_diagnostics", "aether_render_hints", "aether_performance"] }
 ruffle_render = { path = "../render", features = ["clap"] }
 ruffle_render_wgpu = { path = "../render/wgpu", features = ["clap"] }
 ruffle_video_software = { path = "../video/software", optional = true }
