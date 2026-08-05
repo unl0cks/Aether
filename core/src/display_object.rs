@@ -1934,9 +1934,19 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
 
         let mask_commands = std::mem::replace(&mut context.commands, original_commands);
 
+        // The visible result is the intersection of maskee and mask, so the maskee's own extent
+        // bounds everything that can appear -- measured here, before the stack unwinds, so it is in
+        // the space the commands were recorded in. `true` includes this object's filters: a glow
+        // draws outside the object, and a target sized to the bare bounds would clip it.
+        let stage_matrix = context.stage.view_matrix();
+        let mask_bounds = this.render_bounds_with_transform(
+            &context.transform_stack.transform().matrix,
+            true,
+            &stage_matrix,
+        );
         context
             .commands
-            .render_alpha_mask(maskee_commands, mask_commands);
+            .render_alpha_mask(maskee_commands, mask_commands, Some(mask_bounds));
     } else {
         draw(context);
     }

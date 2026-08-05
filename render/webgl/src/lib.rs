@@ -1580,7 +1580,13 @@ impl CommandHandler for WebGlRenderBackend {
         self.pop_blend_mode();
     }
 
-    fn render_alpha_mask(&mut self, maskee_commands: CommandList, _mask_commands: CommandList) {
+    fn render_alpha_mask(
+        &mut self,
+        maskee_commands: CommandList,
+        _mask_commands: CommandList,
+        // No sub-target is allocated here, so a region hint has nothing to shrink.
+        _bounds: Option<swf::Rectangle<swf::Twips>>,
+    ) {
         // TODO Add support for alpha masks
         maskee_commands.execute(self);
     }

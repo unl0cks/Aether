@@ -114,6 +114,44 @@ pub fn plan_blend_region(
     })
 }
 
+/// Round a region out to a grid so that near-identical requests share one pool bucket.
+///
+/// The pool keys buckets on exact dimensions, and animating content drifts by a pixel or two every
+/// frame -- a census of one session recorded 512 distinct sizes with pairs like 2209x931 beside
+/// 2209x853 and 1093x419 beside 1093x378. Each of those is a bucket that is allocated once, never
+/// matched again, and meanwhile crowds the retention budget. Snapping to a grid collapses them.
+///
+/// Growing a region is always safe: it can only take in more of the surface, never less, so nothing
+/// that was going to be drawn gets clipped. The origin rounds DOWN and the far edge rounds UP, then
+/// both are clamped back inside the parent -- which is why edge-touching regions can still land off
+/// the grid, and why that is fine.
+pub fn quantise_region(
+    region: BlendRegion,
+    parent_origin: (u32, u32),
+    parent_width: u32,
+    parent_height: u32,
+    grid: u32,
+) -> BlendRegion {
+    let grid = grid.max(1);
+    let snap_down = |v: u32, floor: u32| floor + ((v.saturating_sub(floor)) / grid) * grid;
+    let snap_up = |v: u32, floor: u32| {
+        floor + (v.saturating_sub(floor)).div_ceil(grid) * grid
+    };
+
+    let (ox, oy) = parent_origin;
+    let left = snap_down(region.x, ox);
+    let top = snap_down(region.y, oy);
+    let right = snap_up(region.x + region.width, ox).min(ox + parent_width);
+    let bottom = snap_up(region.y + region.height, oy).min(oy + parent_height);
+
+    BlendRegion {
+        x: left,
+        y: top,
+        width: right.saturating_sub(left).max(1),
+        height: bottom.saturating_sub(top).max(1),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -266,6 +304,73 @@ mod tests {
 
         assert_eq!(region, BlendRegion { x: 800, y: 500, width: 400, height: 300 });
         assert!(region.is_full((800, 500), 400, 300));
+    }
+
+    #[test]
+    fn quantising_snaps_a_region_out_to_the_grid() {
+        // 400..480 x 300..360 on a 128 grid becomes 384..512 x 256..384: origin down, far edge up.
+        let region = quantise_region(
+            BlendRegion { x: 400, y: 300, width: 80, height: 60 },
+            (0, 0),
+            2560,
+            1440,
+            128,
+        );
+
+        assert_eq!(region, BlendRegion { x: 384, y: 256, width: 128, height: 128 });
+    }
+
+    #[test]
+    fn quantising_only_ever_grows_a_region() {
+        // The safety property the whole idea rests on: whatever was inside stays inside.
+        for (x, y, w, h) in [(400, 300, 80, 60), (0, 0, 1, 1), (2000, 1000, 500, 400), (7, 9, 3, 5)] {
+            let exact = BlendRegion { x, y, width: w, height: h };
+            let snapped = quantise_region(exact, (0, 0), 2560, 1440, 128);
+
+            assert!(snapped.x <= exact.x, "{snapped:?} starts after {exact:?}");
+            assert!(snapped.y <= exact.y, "{snapped:?} starts below {exact:?}");
+            assert!(
+                snapped.x + snapped.width >= exact.x + exact.width,
+                "{snapped:?} ends before {exact:?}"
+            );
+            assert!(
+                snapped.y + snapped.height >= exact.y + exact.height,
+                "{snapped:?} ends above {exact:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn quantising_never_escapes_the_parent() {
+        // A region against the right/bottom edge cannot round up past the surface, so it comes back
+        // off-grid. That is the one case where sizes stay irregular, and it is unavoidable.
+        let region = quantise_region(
+            BlendRegion { x: 2500, y: 1400, width: 60, height: 40 },
+            (0, 0),
+            2560,
+            1440,
+            128,
+        );
+
+        assert_eq!(region.x + region.width, 2560);
+        assert_eq!(region.y + region.height, 1440);
+    }
+
+    #[test]
+    fn quantising_a_nested_region_snaps_relative_to_its_parents_corner() {
+        // Inside a parent at (800, 500) the grid starts there, not at the stage origin, so a nested
+        // target lands on the same lattice its siblings do.
+        let region = quantise_region(
+            BlendRegion { x: 900, y: 600, width: 50, height: 50 },
+            (800, 500),
+            400,
+            300,
+            128,
+        );
+
+        // 900..950 is 100..150 from the parent's corner, which straddles the 128 boundary, so it
+        // legitimately spans two cells rather than one.
+        assert_eq!(region, BlendRegion { x: 800, y: 500, width: 256, height: 256 });
     }
 
     #[test]

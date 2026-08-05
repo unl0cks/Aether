@@ -16,7 +16,18 @@ pub trait CommandHandler {
     );
     fn render_stage3d(&mut self, bitmap: BitmapHandle, transform: Transform);
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform);
-    fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList);
+    /// Draw `maskee_commands`, keep only where `mask_commands` is opaque, and composite the result.
+    ///
+    /// `bounds` is where the maskee lands in the CURRENT render target's space, filter growth
+    /// included. The visible result is the intersection of the two, so the maskee's own extent
+    /// bounds everything that can appear, and a backend can size its sub-targets to that rather
+    /// than to the whole surface. `None` means fall back to full-surface targets.
+    fn render_alpha_mask(
+        &mut self,
+        maskee_commands: CommandList,
+        mask_commands: CommandList,
+        bounds: Option<Rectangle<Twips>>,
+    );
     fn draw_rect(&mut self, color: Color, matrix: Matrix);
     fn draw_line(&mut self, color: Color, matrix: Matrix);
     fn draw_line_rect(&mut self, color: Color, matrix: Matrix);
@@ -107,7 +118,8 @@ impl CommandList {
                 Command::RenderAlphaMask {
                     maskee_commands,
                     mask_commands,
-                } => handler.render_alpha_mask(maskee_commands, mask_commands),
+                    bounds,
+                } => handler.render_alpha_mask(maskee_commands, mask_commands, bounds),
             }
         }
     }
@@ -154,11 +166,17 @@ impl CommandHandler for CommandList {
         }
     }
 
-    fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList) {
+    fn render_alpha_mask(
+        &mut self,
+        maskee_commands: CommandList,
+        mask_commands: CommandList,
+        bounds: Option<Rectangle<Twips>>,
+    ) {
         if self.maskers_in_progress <= 1 {
             self.commands.push(Command::RenderAlphaMask {
                 maskee_commands,
                 mask_commands,
+                bounds,
             });
         }
     }
@@ -250,6 +268,7 @@ pub enum Command {
     RenderAlphaMask {
         maskee_commands: CommandList,
         mask_commands: CommandList,
+        bounds: Option<Rectangle<Twips>>,
     },
     DrawRect {
         color: Color,

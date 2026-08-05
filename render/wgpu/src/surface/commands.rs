@@ -1,5 +1,5 @@
 use crate::backend::RenderTargetMode;
-use crate::blend_region::{BlendRegion, plan_blend_region};
+use crate::blend_region::{BlendRegion, plan_blend_region, quantise_region};
 use crate::blend::TrivialBlend;
 use crate::blend::{BlendType, ComplexBlend};
 use crate::buffer_builder::BufferBuilder;
@@ -697,21 +697,32 @@ impl<'a> WgpuCommandHandler<'a> {
     }
 }
 
-/// Whether a blend may render into a target sized to its contents rather than to the whole surface.
+/// Grid that blend and mask sub-target regions snap out to.
 ///
-/// OFF, on evidence. The reasoning for turning it on was that AQW's effects are built from hundreds
-/// of blended clips each paying for a stage-sized target — but the general texture pool's own
-/// counters refute that: 854 stage-sized allocations across a 198-second session, 4.3 per second,
-/// which at that session's frame rate is about one per frame. That one is the main surface. Blend
-/// sub-targets were never the bulk, so shrinking them cannot move peak memory, and measurement
-/// after the fact agreed: no change in frame rate, and the graphics device started reporting "lost"
-/// rather than "out of memory" — consistent with the extra pressure of a distinct pool bucket and a
-/// distinct globals entry per region, since both caches are keyed by size.
+/// The pool keys buckets on exact dimensions, so content that drifts a pixel or two per frame while
+/// it animates mints a fresh bucket every frame -- one census showed 512 distinct sizes, with pairs
+/// like 2209x931 next to 2209x853. 128 keeps the wasted area small (a target is at most 127 px
+/// wider and taller than it needs) while collapsing that spread to a handful of reusable sizes.
+const BLEND_TARGET_SIZE_GRID: u32 = 128;
+
+/// Whether blends and alpha masks render into targets sized to their contents rather than to the
+/// whole surface.
 ///
-/// The machinery is kept, and is correct as far as its tests go, because it becomes worth having
-/// the moment a scene really is blend-heavy. It should not be switched back on without a
-/// measurement showing blend nodes are a meaningful share of texture allocations.
-const SHRINK_BLEND_TARGETS: bool = false;
+/// ON, on measurement. It was off for one release because the pool's cumulative counters seemed to
+/// show only ~1 stage-sized allocation per frame -- but that reading came from a twelve-second run
+/// that never left the login screen. A census of seventy seconds of real gameplay says otherwise:
+///
+/// ```text
+/// texture census: 98171 allocations, 1496.5 GB created, 512 distinct sizes
+///   pool  2560x1365  x1    83094 allocs  1161454.7 MB
+///   pool  2560x1365  x4     7899 allocs   331227.2 MB
+/// ```
+///
+/// About forty stage-sized targets per frame, 1.16 TB of texture creation. They cannot reuse one
+/// another either: `chunk_blends` collects every `Chunk` for the frame before executing any of
+/// them, and `Chunk::Blend` and `DrawCommand::RenderAlphaMask` hold their textures, so a frame's
+/// targets are all alive at once. Alpha masks take two each and were the larger half.
+const SHRINK_BLEND_TARGETS: bool = true;
 
 impl CommandHandler for WgpuCommandHandler<'_> {
     fn blend(
@@ -744,7 +755,13 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                     self.width,
                     self.height,
                 ) {
-                    Some(region) => region,
+                    Some(region) => quantise_region(
+                        region,
+                        self.origin,
+                        self.width,
+                        self.height,
+                        BLEND_TARGET_SIZE_GRID,
+                    ),
                     // None of it lands on the surface, so none of it can be seen. Drawing it would
                     // cost a target, a render pass and a composite to produce nothing.
                     None => return,
@@ -989,17 +1006,52 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         self.current.push(DrawCommand::PopMask);
     }
 
-    fn render_alpha_mask(&mut self, maskee_commands: CommandList, mask_commands: CommandList) {
+    fn render_alpha_mask(
+        &mut self,
+        maskee_commands: CommandList,
+        mask_commands: CommandList,
+        bounds: Option<Rectangle<Twips>>,
+    ) {
+        // Two stage-sized targets per alpha mask was the single biggest source of texture churn in
+        // the renderer: a census of real gameplay recorded 83,094 allocations of the 2560x1365
+        // surface in seventy seconds, about forty per frame, because masks and blends each take
+        // their own and none of them can be reused while the frame's chunks are still being built.
+        // Sizing them to the maskee cuts that by the ratio of object area to screen area.
+        //
+        // Both targets must share ONE region: the shader samples maskee and mask as an aligned
+        // pair, so they have to be the same size and cover the same part of the surface.
+        let region = match bounds.filter(|_| SHRINK_BLEND_TARGETS) {
+            Some(bounds) => match plan_blend_region(
+                bounds,
+                &[],
+                (1.0, 1.0),
+                self.origin,
+                self.width,
+                self.height,
+            ) {
+                Some(region) => quantise_region(
+                    region,
+                    self.origin,
+                    self.width,
+                    self.height,
+                    BLEND_TARGET_SIZE_GRID,
+                ),
+                // Nothing of the maskee lands on the surface, so nothing of the masked result can.
+                None => return,
+            },
+            None => BlendRegion::at(self.origin, self.width, self.height),
+        };
+
         let surface = Surface::new(
             self.descriptors,
             self.quality,
-            self.width,
-            self.height,
+            region.width,
+            region.height,
             wgpu::TextureFormat::Rgba8Unorm,
         );
 
         let maskee = surface.draw_commands_at(
-            self.origin,
+            (region.x, region.y),
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             self.descriptors,
             self.meshes,
@@ -1012,13 +1064,13 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         );
         maskee.ensure_cleared(self.draw_encoder);
         let matrix = Matrix::translate(
-            Twips::from_pixels(self.origin.0 as f64),
-            Twips::from_pixels(self.origin.1 as f64),
-        ) * Matrix::scale(maskee.width() as f32, maskee.height() as f32);
+            Twips::from_pixels(region.x as f64),
+            Twips::from_pixels(region.y as f64),
+        ) * Matrix::scale(region.width as f32, region.height as f32);
         let maskee = maskee.take_color_texture();
 
         let mask = surface.draw_commands_at(
-            self.origin,
+            (region.x, region.y),
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             self.descriptors,
             self.meshes,
