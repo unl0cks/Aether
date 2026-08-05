@@ -103,6 +103,14 @@ pub struct Opt {
     #[clap(skip)]
     pub aether_aqw_adaptive_avatar_cache: bool,
 
+    /// Disable eviction of GPU uploads for bitmaps that are no longer being drawn.
+    #[clap(long)]
+    pub no_aether_aqw_idle_gpu_upload_eviction: bool,
+
+    /// Resolved launch-mode setting; populated by the AQW preset.
+    #[clap(skip)]
+    pub aether_aqw_idle_gpu_upload_eviction: bool,
+
     /// Disable stale live-entry pruning in AQW's AVM2 broadcast registry.
     #[clap(long)]
     pub no_aether_aqw_avm2_broadcast_fast_path: bool,

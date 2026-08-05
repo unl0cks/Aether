@@ -454,3 +454,19 @@ mod tests {
         ));
     }
 }
+
+/// Every AQW class lookup that failed, not just the distinct ones the log reports.
+///
+/// The warning in `avm2::domain` is deduplicated per (domain, name), so the log cannot
+/// distinguish a few hundred misses at load time from a per-frame storm. This can.
+static AQW_DEFINITION_LOOKUP_MISSES: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+pub(crate) fn record_definition_lookup_miss() {
+    AQW_DEFINITION_LOOKUP_MISSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Total AQW class-resolution failures since the last call.
+pub fn take_aqw_definition_lookup_miss_count() -> u64 {
+    AQW_DEFINITION_LOOKUP_MISSES.swap(0, std::sync::atomic::Ordering::Relaxed)
+}

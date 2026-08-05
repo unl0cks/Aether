@@ -1,7 +1,6 @@
 #[cfg(feature = "metrics")]
 use crate::aether_metrics::AetherMetrics;
 use crate::custom_event::{OpenType, RuffleEvent};
-#[cfg(feature = "metrics")]
 use crate::gui::GuiRenderOutcome;
 use crate::gui::{GuiController, MENU_HEIGHT};
 use crate::mouse_motion::MouseMotionCoalescer;
@@ -81,8 +80,15 @@ impl MainWindow {
                 let gui_render_outcome = self.gui.render(player);
                 #[cfg(feature = "metrics")]
                 let gui_present_time = gui_started.elapsed();
-                #[cfg(not(feature = "metrics"))]
-                let _ = gui_render_outcome;
+
+                if gui_render_outcome == GuiRenderOutcome::DeviceUnusable {
+                    // The graphics device is gone. Exiting here flushes traces and
+                    // shuts down cleanly, instead of panicking inside wgpu on the
+                    // next invalidated resource we would have touched.
+                    event_loop.exit();
+                    return;
+                }
+
                 plot_stats_in_tracy(&self.gui.descriptors().wgpu_instance);
 
                 let host_render_time = host_render_started.elapsed();
@@ -92,6 +98,15 @@ impl MainWindow {
 
                 #[cfg(feature = "metrics")]
                 {
+                    if self.metrics.census_due() {
+                        let descriptors = self.gui.descriptors();
+                        self.metrics.set_resource_census(
+                            crate::aether_metrics::wgpu_resource_census(
+                                &descriptors.wgpu_instance,
+                                &descriptors.device,
+                            ),
+                        );
+                    }
                     let counters = ruffle_core::aether_metrics::take_render_snapshot();
                     let wgpu = ruffle_render_wgpu::aether_metrics::take_snapshot();
                     self.metrics.record_render(
@@ -475,7 +490,9 @@ impl MainWindow {
     }
 
     fn about_to_wait(&mut self, gilrs: Option<&mut Gilrs>) {
-        self.flush_due_mouse_move(Instant::now());
+        if self.next_frame_time.is_none() {
+            self.flush_due_mouse_move(Instant::now());
+        }
 
         if let Some(Event { event, .. }) = gilrs.and_then(|gilrs| gilrs.next_event()) {
             match event {
@@ -525,8 +542,7 @@ impl MainWindow {
 
     fn next_wake_time(&self) -> Option<Instant> {
         match (self.next_frame_time, self.mouse_motion.next_deadline()) {
-            (Some(frame), Some(mouse)) => Some(frame.min(mouse)),
-            (Some(frame), None) => Some(frame),
+            (Some(frame), _) => Some(frame),
             (None, Some(mouse)) => Some(mouse),
             (None, None) => None,
         }

@@ -4,13 +4,20 @@ use ruffle_core::LoadBehavior;
 use ruffle_core::backend::navigator::SocketMode;
 use ruffle_core::config::Letterbox;
 use ruffle_render::quality::StageQuality;
-use ruffle_render_wgpu::clap::PowerPreference;
+use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use ruffle_render_wgpu::texture_pool_policy::BoundedTexturePoolLimits;
 use url::Url;
 
 pub const AQW_LOADER_URL: &str = "https://game.aq.com/game/gamefiles/Loader_Spider.swf";
 pub const AQW_BASE_URL: &str = "https://game.aq.com/game/gamefiles/";
 pub const AQW_PAGE_URL: &str = "https://game.aq.com/";
+/// Retention limits for both texture pools, as specified in the bounded-offscreen-pool design.
+///
+/// The design called for 256 MiB / 1,024 entries / 120 idle frames. What shipped was 128 MiB
+/// with `max_idle_frames: 1`, and the general pool then quartered and clamped that to 32 MiB --
+/// two of AQW's ~12 MB render targets, which made the pool a no-op and produced 48 GB/second
+/// of allocation churn. Raising it far past the design instead (768 MiB per pool) restored
+/// reuse but pushed a 10 GB card into a device-lost fault, so this is the documented budget.
 pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
     max_cached_bytes: 128 * 1024 * 1024,
     max_cached_entries: 512,
@@ -34,6 +41,7 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     opt.aether_aqw_cache_hit_fast_path = !opt.no_aether_aqw_cache_hit_fast_path;
     opt.aether_aqw_adaptive_avatar_cache = !opt.no_aether_aqw_adaptive_avatar_cache;
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
+    opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment
     // and combat-filter work to reuse them. The renderer also derives a smaller 32 MiB companion
@@ -51,6 +59,14 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     }
     if opt.power.is_none() {
         opt.power = Some(PowerPreference::High);
+    }
+    if opt.graphics.is_none() {
+        // Measured A/B on identical scenes and builds: Vulkan held 15-30 fps in a populated
+        // Battleon and never exceeded 3.0 GB of texture memory, while DX12 fell to 0.8-2.7 fps
+        // and reached 17.4 GB. wgpu's DX12 backend does not return texture memory promptly, so
+        // AQW's cache churn overcommits it into system RAM and every access then pages over
+        // PCIe. Left to itself wgpu picks DX12 on Windows. `--graphics` still overrides this.
+        opt.graphics = Some(GraphicsBackend::Vulkan);
     }
     if opt.quality.is_none() {
         // Preserve vector sharpness by default. Lower quality remains available through --quality.
@@ -187,6 +203,18 @@ mod tests {
     }
 
     #[test]
+    fn aqw_preset_enables_idle_gpu_upload_eviction_by_default() {
+        let opt = parse_and_apply(&["aether"]);
+        assert!(opt.aether_aqw_idle_gpu_upload_eviction);
+    }
+
+    #[test]
+    fn aqw_preset_allows_idle_gpu_upload_eviction_opt_out() {
+        let opt = parse_and_apply(&["aether", "--no-aether-aqw-idle-gpu-upload-eviction"]);
+        assert!(!opt.aether_aqw_idle_gpu_upload_eviction);
+    }
+
+    #[test]
     fn generic_and_explicit_movies_do_not_enable_adaptive_avatar_cache() {
         let generic = parse_and_apply(&["aether", "--generic"]);
         assert!(!generic.aether_aqw_adaptive_avatar_cache);
@@ -201,6 +229,32 @@ mod tests {
         assert!(opt.aether_bounded_offscreen_pool);
         assert_eq!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames, 1);
         assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes <= 128 * 1024 * 1024);
+    }
+
+    #[test]
+    fn aqw_preset_selects_vulkan_because_dx12_overcommits_gpu_memory() {
+        // Measured A/B on the same scene and build: Vulkan never exceeded 3.0 GB of texture
+        // memory and held 15-30 fps in a populated Battleon; DX12 reached 17.4 GB and fell to
+        // 0.8-2.7 fps. wgpu's DX12 backend does not return texture memory promptly, so it
+        // overcommits into system RAM and the card pages on every access. Vulkan hits a real
+        // allocation limit instead, which is recoverable; silent 20x paging is not.
+        let opt = parse_and_apply(&["aether"]);
+        assert_eq!(opt.graphics, Some(GraphicsBackend::Vulkan));
+    }
+
+    #[test]
+    fn an_explicit_graphics_backend_still_wins() {
+        let opt = parse_and_apply(&["aether", "--graphics", "dx12"]);
+        assert_eq!(opt.graphics, Some(GraphicsBackend::Dx12));
+    }
+
+    #[test]
+    fn generic_and_explicit_movies_do_not_force_a_graphics_backend() {
+        assert_eq!(parse_and_apply(&["aether", "--generic"]).graphics, None);
+        assert_eq!(
+            parse_and_apply(&["aether", "https://example.invalid/movie.swf"]).graphics,
+            None
+        );
     }
 
     #[test]

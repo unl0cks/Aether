@@ -20,3 +20,9 @@ RECOVER_*.fla
 
 # A developers local Flash Player harness config
 .flash_players.toml
+
+# Installer build output and staging
+/installer/.build/
+/installer/dist/
+/installer/**/bin/
+/installer/**/obj/

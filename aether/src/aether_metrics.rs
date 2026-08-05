@@ -517,6 +517,147 @@ struct Distribution {
     max_ms: f64,
 }
 
+/// How many distinct allocation labels a census reports before collapsing the rest.
+const MAX_ALLOCATION_BUCKETS: usize = 12;
+
+/// The label wgpu allocations carry when the renderer did not name them.
+const UNLABELLED_ALLOCATION: &str = "<unlabelled>";
+
+/// Replace every run of digits with `#`, so per-object labels collapse to their class.
+///
+/// Ruffle names resources after the object that owns them ("Shape 4821 vertices"), which
+/// makes every allocation its own group and attributes nothing.
+fn collapse_identifiers(label: &str) -> String {
+    let mut collapsed = String::with_capacity(label.len());
+    let mut in_digits = false;
+    for character in label.chars() {
+        if character.is_ascii_digit() {
+            if !in_digits {
+                collapsed.push('#');
+                in_digits = true;
+            }
+        } else {
+            collapsed.push(character);
+            in_digits = false;
+        }
+    }
+    collapsed
+}
+
+/// A named group of live GPU allocations.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct AllocationBucket {
+    name: String,
+    count: usize,
+    bytes: u64,
+}
+
+/// Group live GPU allocations by their label, largest total first.
+///
+/// The driver reports every allocation individually and AQW produces tens of thousands of
+/// them, so the useful output is which label owns the bytes rather than the raw blocks.
+fn summarize_allocations(
+    allocations: impl IntoIterator<Item = (String, u64)>,
+    limit: usize,
+) -> Vec<AllocationBucket> {
+    let mut totals: std::collections::HashMap<String, (usize, u64)> =
+        std::collections::HashMap::new();
+    for (name, size) in allocations {
+        let name = if name.is_empty() {
+            UNLABELLED_ALLOCATION.to_string()
+        } else {
+            collapse_identifiers(&name)
+        };
+        let entry = totals.entry(name).or_default();
+        entry.0 = entry.0.saturating_add(1);
+        entry.1 = entry.1.saturating_add(size);
+    }
+
+    let mut buckets: Vec<AllocationBucket> = totals
+        .into_iter()
+        .map(|(name, (count, bytes))| AllocationBucket { name, count, bytes })
+        .collect();
+    // Break ties on name so the output is stable across runs and diffable.
+    buckets.sort_by(|a, b| b.bytes.cmp(&a.bytes).then_with(|| a.name.cmp(&b.name)));
+    buckets.truncate(limit);
+    buckets
+}
+
+/// Live wgpu resource counts and byte totals, straight from the driver's own registries.
+///
+/// Counts alone were misleading: 4,700 textures and 37,900 buffers are indistinguishable from
+/// 200 MB and 9.5 GB, and the fix is completely different in each case. The byte fields come
+/// from wgpu-hal's own accounting, and `total_allocated_bytes` is the device allocator's
+/// ground truth to check the attribution against.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WgpuResourceCensus {
+    textures: usize,
+    texture_views: usize,
+    buffers: usize,
+    bind_groups: usize,
+    samplers: usize,
+    render_pipelines: usize,
+    shader_modules: usize,
+    /// Resources the user has released but which the driver has not reclaimed yet.
+    textures_kept_from_user: usize,
+    buffers_kept_from_user: usize,
+    texture_views_kept_from_user: usize,
+    /// GPU memory wgpu-hal attributes to buffers, in bytes. Requires wgpu's `counters`.
+    buffer_memory_bytes: u64,
+    /// GPU memory wgpu-hal attributes to textures, in bytes. Requires wgpu's `counters`.
+    texture_memory_bytes: u64,
+    memory_allocations: u64,
+    /// Sum of live allocations, per the device allocator. Zero on backends without one.
+    total_allocated_bytes: u64,
+    /// Memory reserved by the allocator's blocks, including unallocated slack. The gap
+    /// between this and `total_allocated_bytes` is fragmentation we are paying for.
+    total_reserved_bytes: u64,
+    largest_allocations: Vec<AllocationBucket>,
+}
+
+/// Take a census of live GPU resources. Walks every wgpu registry and the device allocator,
+/// so call it at most once per reporting interval rather than per frame.
+pub fn wgpu_resource_census(
+    instance: &wgpu::Instance,
+    device: &wgpu::Device,
+) -> Option<WgpuResourceCensus> {
+    let report = instance.generate_report()?;
+    let hub = report.hub;
+    let hal = device.get_internal_counters().hal;
+    let allocator = device.generate_allocator_report();
+
+    Some(WgpuResourceCensus {
+        textures: hub.textures.num_allocated,
+        texture_views: hub.texture_views.num_allocated,
+        buffers: hub.buffers.num_allocated,
+        bind_groups: hub.bind_groups.num_allocated,
+        samplers: hub.samplers.num_allocated,
+        render_pipelines: hub.render_pipelines.num_allocated,
+        shader_modules: hub.shader_modules.num_allocated,
+        textures_kept_from_user: hub.textures.num_kept_from_user,
+        buffers_kept_from_user: hub.buffers.num_kept_from_user,
+        texture_views_kept_from_user: hub.texture_views.num_kept_from_user,
+        buffer_memory_bytes: hal.buffer_memory.read().max(0) as u64,
+        texture_memory_bytes: hal.texture_memory.read().max(0) as u64,
+        memory_allocations: hal.memory_allocations.read().max(0) as u64,
+        total_allocated_bytes: allocator
+            .as_ref()
+            .map_or(0, |report| report.total_allocated_bytes),
+        total_reserved_bytes: allocator
+            .as_ref()
+            .map_or(0, |report| report.total_reserved_bytes),
+        largest_allocations: allocator.map_or_else(Vec::new, |report| {
+            summarize_allocations(
+                report
+                    .allocations
+                    .into_iter()
+                    .map(|allocation| (allocation.name, allocation.size)),
+                MAX_ALLOCATION_BUCKETS,
+            )
+        }),
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct MetricsLine {
     unix_time_ms: u128,
@@ -534,6 +675,9 @@ struct MetricsLine {
     enter_frame_handlers: EnterFrameHandlerReport,
     tick_phases: TickPhaseReport,
     wgpu_texture_pools: WgpuTexturePoolTotals,
+    wgpu_resources: Option<WgpuResourceCensus>,
+    /// Total failed AQW class lookups this interval, including repeats the log suppresses.
+    aqw_definition_lookup_misses: u64,
     cache_offenders: Vec<CacheOffenderSummary>,
 }
 
@@ -554,6 +698,7 @@ pub struct AetherMetrics {
     avm2_nested_goto: Avm2NestedGotoTotals,
     tick_phases: TickPhaseTotals,
     wgpu_texture_pools: WgpuTexturePoolTotals,
+    pending_census: Option<WgpuResourceCensus>,
 }
 
 impl AetherMetrics {
@@ -585,6 +730,21 @@ impl AetherMetrics {
             avm2_nested_goto: Avm2NestedGotoTotals::default(),
             tick_phases: TickPhaseTotals::default(),
             wgpu_texture_pools: WgpuTexturePoolTotals::default(),
+            pending_census: None,
+        }
+    }
+
+    /// Whether a new report is about to be written, so the caller should take a GPU
+    /// resource census. Walking the wgpu registries is too costly to do every frame.
+    pub fn census_due(&self) -> bool {
+        self.enabled
+            && self.pending_census.is_none()
+            && self.last_report.elapsed() >= REPORT_INTERVAL
+    }
+
+    pub fn set_resource_census(&mut self, census: Option<WgpuResourceCensus>) {
+        if self.enabled {
+            self.pending_census = census;
         }
     }
 
@@ -691,6 +851,9 @@ impl AetherMetrics {
             ),
             tick_phases: self.tick_phases.take_report(),
             wgpu_texture_pools: self.wgpu_texture_pools.take(),
+            wgpu_resources: self.pending_census.take(),
+            aqw_definition_lookup_misses:
+                ruffle_core::aether_compatibility::take_aqw_definition_lookup_miss_count(),
             cache_offenders: ruffle_core::aether_diagnostics::take_cache_offender_summaries(
                 MAX_CACHE_OFFENDERS_PER_REPORT,
             ),
@@ -1092,6 +1255,115 @@ mod tests {
         assert_eq!(value["avm2_enter_broadcast"]["total_us"], 1);
         assert_eq!(report.other.total_us, 3);
         assert_eq!(report.other.invocations, 1);
+    }
+
+    #[test]
+    fn allocation_summary_groups_by_label_and_keeps_the_biggest_owners() {
+        // The census counted objects, not bytes, so 4,700 textures and 37,900 buffers were
+        // indistinguishable from 200 MB and 9.5 GB. The driver reports every allocation
+        // separately; what decides the fix is which label owns the bytes.
+        let allocations = vec![
+            ("mesh vertex".to_string(), 4_000),
+            ("bitmap".to_string(), 900_000),
+            ("mesh vertex".to_string(), 6_000),
+            (String::new(), 128),
+            ("mesh index".to_string(), 1_000),
+            ("bitmap".to_string(), 100_000),
+        ];
+
+        let summary = summarize_allocations(allocations, 3);
+
+        assert_eq!(
+            summary,
+            vec![
+                AllocationBucket {
+                    name: "bitmap".to_string(),
+                    count: 2,
+                    bytes: 1_000_000,
+                },
+                AllocationBucket {
+                    name: "mesh vertex".to_string(),
+                    count: 2,
+                    bytes: 10_000,
+                },
+                AllocationBucket {
+                    name: "mesh index".to_string(),
+                    count: 1,
+                    bytes: 1_000,
+                },
+            ],
+            "largest total bytes first, grouped by label"
+        );
+    }
+
+    #[test]
+    fn allocation_labels_collapse_per_object_identifiers() {
+        // Ruffle labels these per shape ("Shape 4821 vertices"), so grouping on the raw
+        // label yields one bucket per shape and attributes nothing. The class is the part
+        // that matters; the id is not.
+        let summary = summarize_allocations(
+            vec![
+                ("Shape 12 vertices".to_string(), 3_000),
+                ("Shape 4821 vertices".to_string(), 5_000),
+                ("Shape 12 indices".to_string(), 700),
+                (
+                    "Bitmap BitmapHandle(9) bind group (smoothed: true)".to_string(),
+                    64,
+                ),
+            ],
+            8,
+        );
+
+        assert_eq!(
+            summary,
+            vec![
+                AllocationBucket {
+                    name: "Shape # vertices".to_string(),
+                    count: 2,
+                    bytes: 8_000,
+                },
+                AllocationBucket {
+                    name: "Shape # indices".to_string(),
+                    count: 1,
+                    bytes: 700,
+                },
+                AllocationBucket {
+                    name: "Bitmap BitmapHandle(#) bind group (smoothed: true)".to_string(),
+                    count: 1,
+                    bytes: 64,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn unlabelled_allocations_are_still_attributed_rather_than_dropped() {
+        // Ruffle only labels resources under `render_debug_labels`. Silently discarding
+        // unnamed allocations would under-report exactly the bytes we are hunting.
+        let summary = summarize_allocations(
+            vec![
+                (String::new(), 2_048),
+                ("bitmap".to_string(), 512),
+                (String::new(), 1_024),
+            ],
+            8,
+        );
+
+        assert_eq!(
+            summary,
+            vec![
+                AllocationBucket {
+                    name: "<unlabelled>".to_string(),
+                    count: 2,
+                    bytes: 3_072,
+                },
+                AllocationBucket {
+                    name: "bitmap".to_string(),
+                    count: 1,
+                    bytes: 512,
+                },
+            ]
+        );
     }
 
     #[test]

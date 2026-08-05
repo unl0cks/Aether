@@ -1,0 +1,35 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Aether.Setup</AssemblyName>
+    <RootNamespace>Aether.Setup</RootNamespace>
+    <AvaloniaUseCompiledBindingsByDefault>true</AvaloniaUseCompiledBindingsByDefault>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\Aether.ico</ApplicationIcon>
+  </PropertyGroup>
+
+  <!-- THE PAYLOAD.
+       Built in two passes by build-setup.ps1:
+         1. no AetherPayload  → a bare installer binary. Its only job is to ride along inside the payload as
+                                uninstall.exe, so uninstalling doesn't need the installer kept around.
+         2. AetherPayload=... → the real setup, with Aether (and that uninstall.exe) compressed inside it.
+       A build with no payload still runs; it just uninstalls instead of pretending it can install. -->
+  <ItemGroup Condition="'$(AetherPayload)' != ''">
+    <EmbeddedResource Include="$(AetherPayload)" LogicalName="Aether.payload" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\Aether.png" />
+    <AvaloniaResource Include="Themes\Setup.axaml" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Desktop" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.1" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="12.1.1" />
+  </ItemGroup>
+</Project>

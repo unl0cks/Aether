@@ -28,6 +28,8 @@ fn report_aqw_definition_lookup_miss(domain_address: usize, caller_url: &str, na
         return;
     }
 
+    crate::aether_compatibility::record_definition_lookup_miss();
+
     const MAX_REPORTED_MISSES: usize = 256;
     static REPORTED: StdOnceLock<Mutex<HashSet<(usize, String)>>> = StdOnceLock::new();
     let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));

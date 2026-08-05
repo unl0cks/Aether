@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.3.6"
+version = "0.3.25"
 
 [lints]
 workspace = true
@@ -86,7 +86,9 @@ default = ["software_video", "external_video", "lzma", "fontconfig"]
 jpegxr = ["ruffle_core/jpegxr"]
 
 # core features
-metrics = ["ruffle_core/aether_metrics", "ruffle_render_wgpu/aether_metrics"]
+# `wgpu/counters` is what makes the per-class GPU byte totals non-zero; without it the
+# HalCounters read back as 0 and the census can only report object counts.
+metrics = ["ruffle_core/aether_metrics", "ruffle_render_wgpu/aether_metrics", "wgpu/counters"]
 avm_debug = ["ruffle_core/avm_debug"]
 lzma = ["ruffle_core/lzma"]
 software_video = ["ruffle_video_software"]

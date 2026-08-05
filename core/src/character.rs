@@ -1,4 +1,4 @@
-use std::cell::OnceCell;
+use std::cell::{Cell, RefCell};
 
 use crate::backend::audio::SoundHandle;
 use crate::binary_data::BinaryData;
@@ -36,9 +36,19 @@ pub enum Character<'gc> {
 pub struct BitmapCharacter<'gc> {
     #[collect(require_static)]
     compressed: CompressedBitmap,
-    /// A lazily constructed GPU handle, used when performing fills with this bitmap
+    /// A lazily constructed GPU handle, used when performing fills with this bitmap.
+    ///
+    /// This is a cache, not ownership: [`Self::release_bitmap_handle`] may drop it at any
+    /// time and the next request re-uploads from `compressed`. It has to be releasable
+    /// because a movie's library lives as long as any `Arc<SwfMovie>`, and an application
+    /// domain retains one for every script it has ever exported.
     #[collect(require_static)]
-    handle: OnceCell<BitmapHandle>,
+    handle: RefCell<Option<BitmapHandle>>,
+    /// Whether this bitmap has been drawn since the last eviction sweep. Gives a cached
+    /// upload one sweep of reprieve before it is dropped, so anything actually on screen
+    /// survives while gear for departed players does not.
+    #[collect(require_static)]
+    drawn_since_sweep: Cell<bool>,
     /// The bitmap class set by `SymbolClass` - this is used when we instantaite
     /// a `Bitmap` displayobject.
     avm2_class: Lock<BitmapClass<'gc>>,
@@ -48,7 +58,8 @@ impl<'gc> BitmapCharacter<'gc> {
     pub fn new(compressed: CompressedBitmap) -> Self {
         Self {
             compressed,
-            handle: OnceCell::default(),
+            handle: RefCell::new(None),
+            drawn_since_sweep: Cell::new(false),
             avm2_class: Lock::new(BitmapClass::NoSubclass),
         }
     }
@@ -69,15 +80,35 @@ impl<'gc> BitmapCharacter<'gc> {
         &self,
         backend: &mut dyn RenderBackend,
     ) -> Result<BitmapHandle, RenderError> {
-        // FIXME - use `OnceCell::get_or_try_init` when stabilized.
-        if let Some(handle) = self.handle.get() {
+        self.drawn_since_sweep.set(true);
+        if let Some(handle) = self.handle.borrow().as_ref() {
             return Ok(handle.clone());
         }
         let decoded = self.compressed.decode()?;
         let new_handle = backend.register_bitmap(decoded)?;
-        // FIXME - do we ever want to release this handle, to avoid taking up GPU memory?
-        self.handle.set(new_handle.clone()).unwrap();
+        *self.handle.borrow_mut() = Some(new_handle.clone());
         Ok(new_handle)
+    }
+
+    /// Second-chance eviction: drop this bitmap's cached GPU upload unless it has been drawn
+    /// since the previous sweep. Returns whether an upload was released.
+    ///
+    /// Uploads happen lazily on first draw, so hidden content never uploads -- but nothing
+    /// released them when it stopped being drawn again. Measured on AQW: revealing ten
+    /// players took live textures from 296 to 2,443, and hiding them again freed none.
+    pub fn sweep_idle_gpu_upload(&self) -> bool {
+        if self.drawn_since_sweep.replace(false) {
+            return false;
+        }
+        self.release_bitmap_handle()
+    }
+
+    /// Drop this bitmap's cached GPU upload, returning whether there was one.
+    ///
+    /// Safe to call at any time: the compressed source is retained, so the next request
+    /// simply re-uploads.
+    pub fn release_bitmap_handle(&self) -> bool {
+        self.handle.borrow_mut().take().is_some()
     }
 }
 
@@ -121,5 +152,86 @@ impl CompressedBitmap {
                 ruffle_render::utils::decode_define_bits_lossless(define_bits_lossless)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruffle_render::backend::{ViewportDimensions, null::NullRenderer};
+    use std::borrow::Cow;
+    use swf::BitmapFormat;
+
+    fn one_pixel_bitmap() -> CompressedBitmap {
+        use flate2::{Compression, write::ZlibEncoder};
+        use std::io::Write;
+
+        let mut encoder = ZlibEncoder::new(Vec::new(), Compression::fast());
+        encoder.write_all(&[0xff, 0x11, 0x22, 0x33]).unwrap();
+        CompressedBitmap::Lossless(DefineBitsLossless {
+            version: 2,
+            id: 1,
+            format: BitmapFormat::Rgb32,
+            width: 1,
+            height: 1,
+            data: Cow::Owned(encoder.finish().unwrap()),
+        })
+    }
+
+    #[test]
+    fn an_idle_gpu_upload_is_evicted_but_a_drawn_one_is_spared() {
+        // Bitmaps are only released on Loader.unload, and AQW drops Loaders instead of
+        // reusing them, so most uploads were never reachable by that path. A second-chance
+        // clock evicts anything not drawn since the previous sweep, regardless of whether
+        // the owning movie is ever unloaded.
+        let mut renderer = NullRenderer::new(ViewportDimensions {
+            width: 100,
+            height: 100,
+            scale_factor: 1.0,
+        });
+        let character = BitmapCharacter::new(one_pixel_bitmap());
+        character.bitmap_handle(&mut renderer).expect("upload");
+
+        // Drawn since the last sweep, so it is spared and its reprieve is consumed.
+        assert!(!character.sweep_idle_gpu_upload(), "recently drawn");
+        // Still untouched on the next sweep, so it goes.
+        assert!(
+            character.sweep_idle_gpu_upload(),
+            "idle upload must be evicted"
+        );
+        assert!(!character.sweep_idle_gpu_upload(), "nothing left to evict");
+
+        // Drawing again re-uploads and re-arms the reprieve.
+        character.bitmap_handle(&mut renderer).expect("re-upload");
+        assert!(!character.sweep_idle_gpu_upload());
+        assert!(character.sweep_idle_gpu_upload());
+    }
+
+    #[test]
+    fn a_bitmap_character_can_release_its_cached_gpu_upload() {
+        // Every bitmap in every loaded SWF lazily uploads a GPU texture and caches it here.
+        // AQW exports each loaded SWF's scripts into a shared application domain, and those
+        // entries are never removed, so the movie -- and this cached upload -- lives for the
+        // life of the process. Measured: 4,396 live textures after 100 seconds.
+        let mut renderer = NullRenderer::new(ViewportDimensions {
+            width: 100,
+            height: 100,
+            scale_factor: 1.0,
+        });
+        let character = BitmapCharacter::new(one_pixel_bitmap());
+        assert!(!character.release_bitmap_handle(), "nothing cached yet");
+
+        character
+            .bitmap_handle(&mut renderer)
+            .expect("first upload");
+        assert!(
+            character.release_bitmap_handle(),
+            "a cached upload must be releasable"
+        );
+        assert!(!character.release_bitmap_handle(), "already released");
+
+        // The compressed source is retained, so anything still drawing re-uploads on demand.
+        character.bitmap_handle(&mut renderer).expect("re-upload");
+        assert!(character.release_bitmap_handle());
     }
 }

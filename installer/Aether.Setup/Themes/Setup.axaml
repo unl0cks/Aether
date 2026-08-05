@@ -1,0 +1,241 @@
+<ResourceDictionary xmlns="https://github.com/avaloniaui"
+                    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <!-- Aether's palette, pulled off the mark itself: the accent is the cyan-blue of the flame ring, and the
+         glass is the dark teal of the disc behind the dragon rather than a neutral black. Same structure and
+         the same motion as Lumen's setup theme — only the hues move, so the two installers read as siblings. -->
+    <Color x:Key="AccentColor">#2FB3F0</Color>
+    <SolidColorBrush x:Key="AccentBrush" Color="#2FB3F0"/>
+    <SolidColorBrush x:Key="AccentHoverBrush" Color="#5CC8F7"/>
+    <SolidColorBrush x:Key="AccentSoftBrush" Color="#382FB3F0"/>
+
+    <!-- The gold from the crest. Used sparingly — the wordmark carries it, so anything more competes with it. -->
+    <SolidColorBrush x:Key="CrestGoldBrush" Color="#F2C230"/>
+
+    <!-- Text is very slightly cool rather than pure white, so it sits in the same light as the glass. -->
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="#CCEAF6FF"/>
+    <SolidColorBrush x:Key="TextMutedBrush" Color="#80D2E9F7"/>
+    <SolidColorBrush x:Key="ControlHoverBrush" Color="#22BFE6FF"/>
+    <SolidColorBrush x:Key="CloseHoverBrush" Color="#E81123"/>
+    <SolidColorBrush x:Key="GlassBorderBrush" Color="#33BFE6FF"/>
+
+    <!-- The tint that sits ON the acrylic. It still has to read as glass, but setup is dense text over whatever
+         happens to be on the desktop behind it, so legibility wins over translucency. Blue-black rather than
+         neutral: enough of the logo's teal to be recognisably Aether, not enough to look like a coloured dialog. -->
+    <SolidColorBrush x:Key="GlassTintBrush" Color="#A00A1620"/>
+    <SolidColorBrush x:Key="CardBrush" Color="#30001420"/>
+
+    <FontFamily x:Key="IconFont">Segoe Fluent Icons, Segoe MDL2 Assets</FontFamily>
+
+    <ControlTheme x:Key="CaptionButton" TargetType="Button">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="FontFamily" Value="{StaticResource IconFont}"/>
+        <Setter Property="FontSize" Value="10"/>
+        <Setter Property="Foreground" Value="{StaticResource TextSecondaryBrush}"/>
+        <Setter Property="Width" Value="44"/>
+        <Setter Property="Height" Value="32"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Border x:Name="bg" Background="Transparent" CornerRadius="8">
+                    <Border.Transitions>
+                        <Transitions><BrushTransition Property="Background" Duration="0:0:0.15"/></Transitions>
+                    </Border.Transitions>
+                    <ContentPresenter Content="{TemplateBinding Content}" FontFamily="{TemplateBinding FontFamily}"
+                                      FontSize="{TemplateBinding FontSize}" Foreground="{TemplateBinding Foreground}"
+                                      HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ Border#bg"><Setter Property="Background" Value="{StaticResource ControlHoverBrush}"/></Style>
+        <Style Selector="^:pointerover"><Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/></Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="CloseCaptionButton" TargetType="Button" BasedOn="{StaticResource CaptionButton}">
+        <Style Selector="^:pointerover /template/ Border#bg"><Setter Property="Background" Value="{StaticResource CloseHoverBrush}"/></Style>
+        <Style Selector="^:pointerover"><Setter Property="Foreground" Value="White"/></Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="GhostButton" TargetType="Button">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="13"/>
+        <Setter Property="Padding" Value="14,9"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Border x:Name="bg" Background="#1EBFE6FF" CornerRadius="10" Padding="{TemplateBinding Padding}" RenderTransformOrigin="50%,50%">
+                    <Border.Transitions>
+                        <Transitions>
+                            <BrushTransition Property="Background" Duration="0:0:0.15"/>
+                            <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" Easing="CubicEaseOut"/>
+                        </Transitions>
+                    </Border.Transitions>
+                    <ContentPresenter Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                      Foreground="{TemplateBinding Foreground}"/>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ Border#bg"><Setter Property="Background" Value="#34BFE6FF"/></Style>
+        <Style Selector="^:pressed /template/ Border#bg"><Setter Property="RenderTransform" Value="scale(0.95)"/></Style>
+        <Style Selector="^:disabled"><Setter Property="Opacity" Value="0.4"/></Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="AccentButton" TargetType="Button">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Foreground" Value="#06131C"/>
+        <Setter Property="FontSize" Value="13.5"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Padding" Value="22,10"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Border x:Name="bg" Background="{DynamicResource AccentBrush}" CornerRadius="10" Padding="{TemplateBinding Padding}" RenderTransformOrigin="50%,50%">
+                    <Border.Transitions>
+                        <Transitions>
+                            <BrushTransition Property="Background" Duration="0:0:0.15"/>
+                            <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.12" Easing="CubicEaseOut"/>
+                        </Transitions>
+                    </Border.Transitions>
+                    <ContentPresenter Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                      Foreground="{TemplateBinding Foreground}"/>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ Border#bg"><Setter Property="Background" Value="{DynamicResource AccentHoverBrush}"/></Style>
+        <Style Selector="^:pressed /template/ Border#bg"><Setter Property="RenderTransform" Value="scale(0.96)"/></Style>
+        <Style Selector="^:disabled"><Setter Property="Opacity" Value="0.35"/></Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="SectionHeader" TargetType="TextBlock">
+        <Setter Property="Foreground" Value="{StaticResource TextMutedBrush}"/>
+        <Setter Property="FontSize" Value="11"/>
+        <Setter Property="FontWeight" Value="SemiBold"/>
+        <Setter Property="Margin" Value="2,2,0,7"/>
+    </ControlTheme>
+
+    <!-- Animated check: the box fills with the accent, the tick springs in, and the whole thing dips on press.
+         Fluent's default flips instantly, which reads as unresponsive next to everything else here. -->
+    <ControlTheme x:Key="GlassCheckBox" TargetType="CheckBox">
+        <Setter Property="Foreground" Value="{StaticResource TextPrimaryBrush}"/>
+        <Setter Property="FontSize" Value="12.5"/>
+        <Setter Property="Cursor" Value="Hand"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Grid ColumnDefinitions="Auto,*" Background="Transparent">
+                    <Border x:Name="box" Width="19" Height="19" CornerRadius="6" Background="#18BFE6FF"
+                            BorderBrush="#40BFE6FF" BorderThickness="1" VerticalAlignment="Center"
+                            RenderTransformOrigin="50%,50%">
+                        <Border.Transitions>
+                            <Transitions>
+                                <BrushTransition Property="Background" Duration="0:0:0.16"/>
+                                <BrushTransition Property="BorderBrush" Duration="0:0:0.16"/>
+                                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.13" Easing="CubicEaseOut"/>
+                            </Transitions>
+                        </Border.Transitions>
+                        <TextBlock x:Name="check" Text="&#xE73E;" FontFamily="{StaticResource IconFont}" FontSize="11"
+                                   Foreground="#06131C" HorizontalAlignment="Center" VerticalAlignment="Center"
+                                   Opacity="0" RenderTransformOrigin="50%,50%" RenderTransform="scale(0.4)">
+                            <TextBlock.Transitions>
+                                <Transitions>
+                                    <DoubleTransition Property="Opacity" Duration="0:0:0.14"/>
+                                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.20" Easing="BackEaseOut"/>
+                                </Transitions>
+                            </TextBlock.Transitions>
+                        </TextBlock>
+                    </Border>
+                    <ContentPresenter Grid.Column="1" Content="{TemplateBinding Content}" Margin="9,0,0,0"
+                                      VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}"/>
+                </Grid>
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover /template/ Border#box"><Setter Property="Background" Value="#2CBFE6FF"/></Style>
+        <Style Selector="^:pressed /template/ Border#box"><Setter Property="RenderTransform" Value="scale(0.88)"/></Style>
+        <Style Selector="^:checked /template/ Border#box">
+            <Setter Property="Background" Value="{DynamicResource AccentBrush}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource AccentBrush}"/>
+        </Style>
+        <Style Selector="^:checked /template/ TextBlock#check">
+            <Setter Property="Opacity" Value="1"/>
+            <Setter Property="RenderTransform" Value="scale(1)"/>
+        </Style>
+        <Style Selector="^:disabled"><Setter Property="Opacity" Value="0.4"/></Style>
+    </ControlTheme>
+
+    <!-- ============== Slim glass scrollbars ==============
+         A full ControlTheme REPLACEMENT, not styles layered on the Fluent one: Fluent's scrollbar keeps its
+         chunky expanded state (track plate + arrow RepeatButtons) on hover no matter what plain styles say, so
+         the template is rebuilt from just a Track and a pill Thumb. Clicking the empty track still pages,
+         because the PART_PageUp/PageDown buttons are still there — they're simply invisible. -->
+    <SolidColorBrush x:Key="ScrollThumbBrush" Color="#2EBFE6FF"/>
+    <SolidColorBrush x:Key="ScrollThumbHoverBrush" Color="#52BFE6FF"/>
+    <SolidColorBrush x:Key="ScrollThumbPressedBrush" Color="#70BFE6FF"/>
+
+    <ControlTheme x:Key="SlimScrollPageButton" TargetType="RepeatButton">
+        <Setter Property="Focusable" Value="False"/>
+        <Setter Property="Template">
+            <ControlTemplate><Border Background="Transparent"/></ControlTemplate>
+        </Setter>
+    </ControlTheme>
+
+    <ControlTheme x:Key="SlimScrollThumb" TargetType="Thumb">
+        <Setter Property="Background" Value="{DynamicResource ScrollThumbBrush}"/>
+        <Setter Property="Template">
+            <ControlTemplate>
+                <Border Background="{TemplateBinding Background}" CornerRadius="3">
+                    <Border.Transitions>
+                        <Transitions><BrushTransition Property="Background" Duration="0:0:0.12"/></Transitions>
+                    </Border.Transitions>
+                </Border>
+            </ControlTemplate>
+        </Setter>
+        <Style Selector="^:pointerover"><Setter Property="Background" Value="{DynamicResource ScrollThumbHoverBrush}"/></Style>
+        <Style Selector="^:pressed"><Setter Property="Background" Value="{DynamicResource ScrollThumbPressedBrush}"/></Style>
+    </ControlTheme>
+
+    <ControlTheme x:Key="{x:Type ScrollBar}" TargetType="ScrollBar">
+        <Setter Property="Background" Value="Transparent"/>
+        <Style Selector="^:vertical">
+            <Setter Property="Width" Value="10"/>
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border Background="{TemplateBinding Background}">
+                        <Track Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                               Value="{TemplateBinding Value, Mode=TwoWay}" ViewportSize="{TemplateBinding ViewportSize}"
+                               Orientation="Vertical" IsDirectionReversed="True">
+                            <Track.DecreaseButton>
+                                <RepeatButton Name="PART_PageUpButton" Theme="{StaticResource SlimScrollPageButton}"/>
+                            </Track.DecreaseButton>
+                            <Track.IncreaseButton>
+                                <RepeatButton Name="PART_PageDownButton" Theme="{StaticResource SlimScrollPageButton}"/>
+                            </Track.IncreaseButton>
+                            <Thumb Theme="{StaticResource SlimScrollThumb}" Margin="2,0" MinHeight="24"/>
+                        </Track>
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+        </Style>
+        <Style Selector="^:horizontal">
+            <Setter Property="Height" Value="10"/>
+            <Setter Property="Template">
+                <ControlTemplate>
+                    <Border Background="{TemplateBinding Background}">
+                        <Track Minimum="{TemplateBinding Minimum}" Maximum="{TemplateBinding Maximum}"
+                               Value="{TemplateBinding Value, Mode=TwoWay}" ViewportSize="{TemplateBinding ViewportSize}"
+                               Orientation="Horizontal">
+                            <Track.DecreaseButton>
+                                <RepeatButton Name="PART_PageUpButton" Theme="{StaticResource SlimScrollPageButton}"/>
+                            </Track.DecreaseButton>
+                            <Track.IncreaseButton>
+                                <RepeatButton Name="PART_PageDownButton" Theme="{StaticResource SlimScrollPageButton}"/>
+                            </Track.IncreaseButton>
+                            <Thumb Theme="{StaticResource SlimScrollThumb}" Margin="0,2" MinWidth="24"/>
+                        </Track>
+                    </Border>
+                </ControlTemplate>
+            </Setter>
+        </Style>
+    </ControlTheme>
+
+</ResourceDictionary>

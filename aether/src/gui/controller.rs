@@ -28,20 +28,64 @@ use wgpu::SurfaceError;
 pub(crate) enum GuiRenderOutcome {
     Presented,
     SurfaceUnavailable,
+    /// The graphics device is unusable and Aether should shut down.
+    DeviceUnusable,
 }
+
+/// How many consecutive surface-acquisition failures to tolerate before giving up.
+/// At 60 fps this is roughly two seconds of dropped frames, which is far longer
+/// than any genuinely transient stall.
+const MAX_CONSECUTIVE_SURFACE_FAILURES: u32 = 120;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SurfaceErrorHandling {
     Reconfigure,
     SkipFrame,
-    FatalOutOfMemory,
+    Fatal(SurfaceFailureCause),
 }
 
-fn surface_error_handling(error: &SurfaceError) -> SurfaceErrorHandling {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SurfaceFailureCause {
+    OutOfMemory,
+    DeviceFaulted,
+    TooManyConsecutiveFailures,
+}
+
+impl SurfaceFailureCause {
+    fn summary(self) -> &'static str {
+        match self {
+            SurfaceFailureCause::OutOfMemory => "the graphics device ran out of memory",
+            SurfaceFailureCause::DeviceFaulted => "the graphics device reported a fatal fault",
+            SurfaceFailureCause::TooManyConsecutiveFailures => {
+                "the graphics device stopped producing frames"
+            }
+        }
+    }
+}
+
+/// Decide what to do about a failure to acquire the next surface texture.
+///
+/// `device_faulted` reflects wgpu's own device-loss and uncaptured-error channels.
+/// Once either of those has fired, continuing to render is not merely useless: the
+/// next invalidated resource we touch takes the process down through a wgpu panic
+/// that no error handler can intercept.
+fn surface_error_handling(
+    error: &SurfaceError,
+    consecutive_failures: u32,
+    device_faulted: bool,
+) -> SurfaceErrorHandling {
+    if matches!(error, SurfaceError::OutOfMemory) {
+        return SurfaceErrorHandling::Fatal(SurfaceFailureCause::OutOfMemory);
+    }
+    if device_faulted {
+        return SurfaceErrorHandling::Fatal(SurfaceFailureCause::DeviceFaulted);
+    }
+    if consecutive_failures >= MAX_CONSECUTIVE_SURFACE_FAILURES {
+        return SurfaceErrorHandling::Fatal(SurfaceFailureCause::TooManyConsecutiveFailures);
+    }
     match error {
         SurfaceError::Lost | SurfaceError::Outdated => SurfaceErrorHandling::Reconfigure,
-        SurfaceError::Timeout | SurfaceError::Other => SurfaceErrorHandling::SkipFrame,
-        SurfaceError::OutOfMemory => SurfaceErrorHandling::FatalOutOfMemory,
+        _ => SurfaceErrorHandling::SkipFrame,
     }
 }
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -71,6 +115,10 @@ pub struct GuiController {
     /// If this is set, we should not render the main menu.
     no_gui: bool,
     theme_controller: ThemeController,
+    /// Surface acquisition failures since the last successfully acquired frame.
+    consecutive_surface_failures: u32,
+    /// Whether we have already told the user the device is gone.
+    device_fault_reported: bool,
 }
 
 impl GuiController {
@@ -196,6 +244,8 @@ impl GuiController {
             size,
             no_gui,
             theme_controller,
+            consecutive_surface_failures: 0,
+            device_fault_reported: false,
         })
     }
 
@@ -305,6 +355,24 @@ impl GuiController {
         );
     }
 
+    /// Report the fault once, then tell the caller Aether has to shut down.
+    fn report_device_fault(&mut self) -> GuiRenderOutcome {
+        if !self.device_fault_reported {
+            self.device_fault_reported = true;
+            match self.descriptors.device_status.fault() {
+                Some(fault) => tracing::error!(
+                    "{}. Aether has to close. Details: {}",
+                    fault.kind.summary(),
+                    fault.detail
+                ),
+                None => {
+                    tracing::error!("The graphics device stopped responding. Aether has to close.")
+                }
+            }
+        }
+        GuiRenderOutcome::DeviceUnusable
+    }
+
     pub fn height_offset(&self) -> f64 {
         if self.window.fullscreen().is_some() || self.no_gui {
             0.0
@@ -325,26 +393,46 @@ impl GuiController {
     }
 
     pub fn render(&mut self, mut player: Option<MutexGuard<Player>>) -> GuiRenderOutcome {
+        // A fault reported through wgpu's device-loss or uncaptured-error channels
+        // means every resource we hold may already be invalid. Touching one of them
+        // panics from inside wgpu, so stop before we get there.
+        if self.descriptors.device_status.is_faulted() {
+            return self.report_device_fault();
+        }
+
         let surface_texture = match self.surface.get_current_texture() {
             Ok(surface_texture) => surface_texture,
-            Err(error) => match surface_error_handling(&error) {
-                SurfaceErrorHandling::Reconfigure => {
-                    // Surface loss and format/size changes require a new swap chain.
-                    tracing::warn!("Surface became unavailable: {error:?}, reconfiguring");
-                    self.reconfigure_surface();
-                    return GuiRenderOutcome::SurfaceUnavailable;
-                }
-                SurfaceErrorHandling::SkipFrame => {
-                    // Timeouts and generic acquisition failures can be transient under GPU load.
-                    // Dropping one presentation lets the next frame retry without killing Aether.
-                    tracing::warn!("Surface became unavailable: {error:?}, skipping a frame");
-                    return GuiRenderOutcome::SurfaceUnavailable;
-                }
-                SurfaceErrorHandling::FatalOutOfMemory => {
-                    panic!("wgpu: Out of memory: no more memory left to allocate a new frame");
-                }
-            },
+            Err(error) => {
+                self.consecutive_surface_failures =
+                    self.consecutive_surface_failures.saturating_add(1);
+                return match surface_error_handling(
+                    &error,
+                    self.consecutive_surface_failures,
+                    self.descriptors.device_status.is_faulted(),
+                ) {
+                    SurfaceErrorHandling::Reconfigure => {
+                        // Surface loss and format/size changes require a new swap chain.
+                        tracing::warn!("Surface became unavailable: {error:?}, reconfiguring");
+                        self.reconfigure_surface();
+                        GuiRenderOutcome::SurfaceUnavailable
+                    }
+                    SurfaceErrorHandling::SkipFrame => {
+                        // Timeouts and generic acquisition failures can be transient under GPU load.
+                        // Dropping one presentation lets the next frame retry without killing Aether.
+                        tracing::warn!("Surface became unavailable: {error:?}, skipping a frame");
+                        GuiRenderOutcome::SurfaceUnavailable
+                    }
+                    SurfaceErrorHandling::Fatal(cause) => {
+                        tracing::error!(
+                            "Giving up on the graphics device because {}: {error:?}",
+                            cause.summary()
+                        );
+                        self.report_device_fault()
+                    }
+                };
+            }
         };
+        self.consecutive_surface_failures = 0;
 
         let raw_input = self.egui_winit.take_egui_input(&self.window);
         let show_menu = self.window.fullscreen().is_none() && !self.no_gui;
@@ -455,6 +543,19 @@ impl GuiController {
 
         command_buffers.push(encoder.finish());
         self.descriptors.queue.submit(command_buffers);
+
+        // If the device faulted while we were building this frame, there is no safe way
+        // to dispose of the acquired surface texture: `Surface::present` and the
+        // `discard` that `SurfaceTexture::drop` performs both begin with a device
+        // validity check, and both route failure through wgpu's `handle_error_fatal`,
+        // which panics unconditionally. Leaking the texture skips `drop` and lets us
+        // shut down and report the fault instead of aborting the process. The leak is
+        // bounded by the exit that follows.
+        if self.descriptors.device_status.is_faulted() {
+            std::mem::forget(surface_texture);
+            return self.report_device_fault();
+        }
+
         self.window.pre_present_notify();
         surface_texture.present();
         GuiRenderOutcome::Presented
@@ -748,14 +849,79 @@ fn mmap_system_font(path: &Path) -> anyhow::Result<memmap2::Mmap> {
 
 #[cfg(test)]
 mod tests {
-    use super::{SurfaceErrorHandling, surface_error_handling};
+    use super::{
+        MAX_CONSECUTIVE_SURFACE_FAILURES, SurfaceErrorHandling, SurfaceFailureCause,
+        surface_error_handling,
+    };
     use wgpu::SurfaceError;
 
     #[test]
     fn generic_surface_error_skips_only_the_current_frame() {
         assert_eq!(
-            surface_error_handling(&SurfaceError::Other),
+            surface_error_handling(&SurfaceError::Other, 0, false),
             SurfaceErrorHandling::SkipFrame
+        );
+    }
+
+    #[test]
+    fn timeout_skips_only_the_current_frame() {
+        assert_eq!(
+            surface_error_handling(&SurfaceError::Timeout, 0, false),
+            SurfaceErrorHandling::SkipFrame
+        );
+    }
+
+    #[test]
+    fn lost_and_outdated_surfaces_are_reconfigured() {
+        assert_eq!(
+            surface_error_handling(&SurfaceError::Lost, 0, false),
+            SurfaceErrorHandling::Reconfigure
+        );
+        assert_eq!(
+            surface_error_handling(&SurfaceError::Outdated, 0, false),
+            SurfaceErrorHandling::Reconfigure
+        );
+    }
+
+    #[test]
+    fn out_of_memory_is_always_fatal() {
+        assert_eq!(
+            surface_error_handling(&SurfaceError::OutOfMemory, 0, false),
+            SurfaceErrorHandling::Fatal(SurfaceFailureCause::OutOfMemory)
+        );
+    }
+
+    #[test]
+    fn a_faulted_device_makes_any_surface_error_fatal() {
+        // Once the device is gone, retrying only walks us into an unrecoverable
+        // panic inside wgpu on the next resource we touch.
+        assert_eq!(
+            surface_error_handling(&SurfaceError::Other, 0, true),
+            SurfaceErrorHandling::Fatal(SurfaceFailureCause::DeviceFaulted)
+        );
+        assert_eq!(
+            surface_error_handling(&SurfaceError::Lost, 0, true),
+            SurfaceErrorHandling::Fatal(SurfaceFailureCause::DeviceFaulted)
+        );
+    }
+
+    #[test]
+    fn transient_failures_stop_being_treated_as_transient_eventually() {
+        assert_eq!(
+            surface_error_handling(
+                &SurfaceError::Other,
+                MAX_CONSECUTIVE_SURFACE_FAILURES - 1,
+                false
+            ),
+            SurfaceErrorHandling::SkipFrame
+        );
+        assert_eq!(
+            surface_error_handling(
+                &SurfaceError::Other,
+                MAX_CONSECUTIVE_SURFACE_FAILURES,
+                false
+            ),
+            SurfaceErrorHandling::Fatal(SurfaceFailureCause::TooManyConsecutiveFailures)
         );
     }
 }

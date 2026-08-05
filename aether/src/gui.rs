@@ -9,7 +9,6 @@ mod theme;
 mod widgets;
 
 pub use controller::GuiController;
-#[cfg(feature = "metrics")]
 pub(crate) use controller::GuiRenderOutcome;
 pub use dialogs::DialogDescriptor;
 pub use locale::LocalizableText;

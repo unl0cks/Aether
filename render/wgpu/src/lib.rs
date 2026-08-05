@@ -47,6 +47,7 @@ mod buffer_pool;
 #[cfg(feature = "clap")]
 pub mod clap;
 pub mod descriptors;
+pub mod device_status;
 mod dynamic_transforms;
 mod filters;
 mod layouts;
@@ -173,7 +174,7 @@ impl QueueSyncHandle {
         self,
         with_rgba: F,
         frame: &mut ActiveFrame,
-    ) -> R {
+    ) -> Option<R> {
         match self {
             QueueSyncHandle::AlreadyCopied {
                 index,

@@ -1,0 +1,339 @@
+<#
+.SYNOPSIS
+    Builds Aether's self-contained Windows x64 setup executable and a portable ZIP.
+
+.DESCRIPTION
+    Three passes, in this order, because each one needs the previous:
+
+      1. cargo build --release            -> aether.exe, the thing being installed
+      2. dotnet publish Aether.Setup      -> a payload-LESS installer. It is not thrown away: it becomes
+         (no AetherPayload)                  uninstall.exe inside the payload, so removing Aether never
+                                             depends on keeping setup.exe around. It also packs the archive,
+                                             via its own --pack mode, so packing and unpacking are the same code.
+      3. dotnet publish Aether.Setup      -> the real setup.exe, single-file, with the archive embedded
+         (AetherPayload=<archive>)
+
+    The staging directory IS the payload: whatever ends up in it is what gets installed, so new runtime files
+    are picked up without editing a file list.
+
+.EXAMPLE
+    pwsh .\installer\build-setup.ps1 -OpenOutputFolder
+
+.EXAMPLE
+    pwsh .\installer\build-setup.ps1 -Version 0.3.24 -SkipCargo
+#>
+
+[CmdletBinding()]
+param(
+    [string] $Version,
+
+    # Reuse whatever is already in target\release instead of rebuilding the client. Handy while iterating on
+    # the installer itself, where the Rust side hasn't changed.
+    [switch] $SkipCargo,
+
+    [switch] $SkipPortableZip,
+
+    [switch] $OpenOutputFolder,
+
+    # Brotli quality 11 instead of the default. Worth it for a build you actually publish; not worth the
+    # several extra minutes while iterating, because the payload is mostly incompressible binaries already.
+    [switch] $MaxCompression,
+
+    # Features passed to cargo. `metrics` is deliberately NOT the default: it is a diagnostic build.
+    [string] $CargoFeatures = ''
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+function Write-Step {
+    param([string] $Text)
+    Write-Host ''
+    Write-Host "== $Text ==" -ForegroundColor Cyan
+}
+
+function Invoke-NativeCommand {
+    param(
+        [Parameter(Mandatory = $true)] [string] $FilePath,
+        [Parameter(Mandatory = $true)] [string[]] $Arguments,
+        [Parameter(Mandatory = $true)] [string] $FailureMessage,
+        [string] $WorkingDirectory
+    )
+
+    if ($WorkingDirectory) { Push-Location -LiteralPath $WorkingDirectory }
+    try {
+        & $FilePath @Arguments
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        if ($WorkingDirectory) { Pop-Location }
+    }
+    if ($exitCode -ne 0) { throw "$FailureMessage Exit code: $exitCode" }
+}
+
+function New-PayloadArchive {
+    <#
+      tar + Brotli, the exact pair Payload.ExtractAsync reads back: TarFile.CreateFromDirectory with no base
+      directory, wrapped in a BrotliStream.
+
+      This is done here, in-process, rather than by a --pack mode on the installer itself. That was the first
+      design and it was wrong: app.manifest asks for administrator, so building the setup raised a UAC prompt
+      merely to compress a folder, and the elevated packer then held the staging directory open where this
+      script could neither wait on it nor clean up after it.
+
+      Compression level is a real choice, not a default. Aether's payload is two already-compressed binaries —
+      a Rust release build and a .NET single-file bundle — so SmallestSize (Brotli quality 11) spends minutes
+      to save low single-digit percent. Optimal is the sane default; -MaxCompression is there for the build
+      that actually gets published. Either is readable by the installer; Brotli decompression doesn't care
+      what quality produced the stream.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $SourceDirectory,
+        [Parameter(Mandatory = $true)] [string] $DestinationFile,
+        [Parameter(Mandatory = $true)] [bool] $Maximum
+    )
+
+    $level = if ($Maximum) {
+        [System.IO.Compression.CompressionLevel]::SmallestSize
+    } else {
+        [System.IO.Compression.CompressionLevel]::Optimal
+    }
+
+    [void](New-Item -ItemType Directory -Path (Split-Path -Parent $DestinationFile) -Force)
+    if (Test-Path -LiteralPath $DestinationFile) { Remove-Item -LiteralPath $DestinationFile -Force }
+
+    $outFile = [System.IO.File]::Create($DestinationFile)
+    try {
+        $brotli = [System.IO.Compression.BrotliStream]::new($outFile, $level)
+        try {
+            [System.Formats.Tar.TarFile]::CreateFromDirectory($SourceDirectory, $brotli, $false)
+        }
+        finally { $brotli.Dispose() }
+    }
+    finally { $outFile.Dispose() }
+}
+
+function Find-DotNet10 {
+    $command = Get-Command dotnet.exe -ErrorAction SilentlyContinue
+    if (-not $command) { $command = Get-Command dotnet -ErrorAction SilentlyContinue }
+    if (-not $command) { throw '.NET SDK was not found. Install the .NET 10 SDK first.' }
+
+    $sdkList = & $command.Source --list-sdks
+    if ($LASTEXITCODE -ne 0) { throw 'dotnet --list-sdks failed.' }
+    if (-not ($sdkList -match '(?m)^10\.')) {
+        throw ".NET 10 SDK was not found.`nInstalled SDKs:`n$($sdkList -join "`n")"
+    }
+    return $command.Source
+}
+
+function Get-VersionFromCargoToml {
+    param([string] $Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $null }
+    $text = Get-Content -LiteralPath $Path -Raw
+    # The first `version = "..."` after [package], which is aether_player's own.
+    $match = [regex]::Match($text, '(?ms)^\s*\[package\].*?^\s*version\s*=\s*"([^"]+)"')
+    if ($match.Success) { return $match.Groups[1].Value.Trim() }
+    return $null
+}
+
+function Convert-ToFileVersion {
+    param([string] $SemanticVersion)
+    $base = ($SemanticVersion -split '[-+]')[0]
+    $parts = @()
+    foreach ($part in @($base -split '\.')) {
+        if ($part -match '^\d+$') {
+            $number = [int]$part
+            if ($number -lt 0) { $number = 0 }
+            if ($number -gt 65535) { $number = 65535 }
+            $parts += $number
+        }
+        else { $parts += 0 }
+    }
+    while ($parts.Count -lt 4) { $parts += 0 }
+    return ($parts[0..3] -join '.')
+}
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+$installerDir = $PSScriptRoot
+$root = Split-Path -Parent $installerDir
+$setupProject = Join-Path $installerDir 'Aether.Setup\Aether.Setup.csproj'
+$cargoToml = Join-Path $root 'aether\Cargo.toml'
+
+if (-not (Test-Path -LiteralPath $setupProject -PathType Leaf)) {
+    throw "Setup project not found: $setupProject"
+}
+
+if (-not $Version) { $Version = Get-VersionFromCargoToml -Path $cargoToml }
+if (-not $Version) { throw "Could not read a version from $cargoToml. Pass -Version." }
+if ($Version -notmatch '^[0-9A-Za-z][0-9A-Za-z._+\-]*$') { throw "Invalid version '$Version'." }
+
+$fileVersion = Convert-ToFileVersion -SemanticVersion $Version
+
+$buildRoot = Join-Path $installerDir '.build'
+$configRoot = Join-Path $buildRoot 'Release'
+$payloadDir = Join-Path $configRoot 'payload'      # <- this directory IS what gets installed
+$bareDir = Join-Path $configRoot 'bare'            # <- payload-less installer / packer / uninstall.exe
+$setupDir = Join-Path $configRoot 'setup'
+$archive = Join-Path $configRoot 'Aether.payload'
+$distDir = Join-Path $installerDir 'dist'
+$setupPath = Join-Path $distDir "Aether-Setup-$Version-win-x64.exe"
+$portablePath = Join-Path $distDir "Aether-Portable-$Version-win-x64.zip"
+$hashPath = Join-Path $distDir 'SHA256SUMS.txt'
+
+Write-Host ''
+Write-Host 'Aether Setup Builder' -ForegroundColor Green
+Write-Host "  Root:         $root"
+Write-Host "  Version:      $Version"
+Write-Host "  File version: $fileVersion"
+Write-Host "  Staging:      $payloadDir"
+Write-Host "  Output:       $distDir"
+
+$dotnet = Find-DotNet10
+
+Write-Step 'Cleaning staging directory'
+if (Test-Path -LiteralPath $configRoot) { Remove-Item -LiteralPath $configRoot -Recurse -Force }
+[void](New-Item -ItemType Directory -Path $payloadDir -Force)
+[void](New-Item -ItemType Directory -Path $distDir -Force)
+
+# ---------------------------------------------------------------------------
+# Pass 1 — the client
+# ---------------------------------------------------------------------------
+
+$releaseExe = Join-Path $root 'target\release\aether.exe'
+
+if (-not $SkipCargo) {
+    Write-Step "Building Aether ($Version, release)"
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) { throw 'cargo was not found. Install the Rust toolchain, or pass -SkipCargo.' }
+
+    $cargoArgs = @('build', '--release', '-p', 'aether_player')
+    if ($CargoFeatures) { $cargoArgs += @('--features', $CargoFeatures) }
+    Invoke-NativeCommand -FilePath $cargo.Source -Arguments $cargoArgs `
+        -FailureMessage 'cargo build failed.' -WorkingDirectory $root
+}
+else {
+    Write-Step 'Skipping cargo build (-SkipCargo)'
+}
+
+if (-not (Test-Path -LiteralPath $releaseExe -PathType Leaf)) {
+    throw "aether.exe was not found at $releaseExe. Build it, or drop -SkipCargo."
+}
+
+Write-Step 'Staging the install payload'
+Copy-Item -LiteralPath $releaseExe -Destination (Join-Path $payloadDir 'aether.exe') -Force
+
+# Anything else the client needs at run time goes in beside it. Aether is a single static binary today, so
+# this loop is usually a no-op — it exists so that adding a DLL later needs no change here.
+foreach ($extra in @('LICENSE.md', 'README.md')) {
+    $src = Join-Path $root $extra
+    if (Test-Path -LiteralPath $src -PathType Leaf) {
+        Copy-Item -LiteralPath $src -Destination (Join-Path $payloadDir $extra) -Force
+    }
+}
+
+# ---------------------------------------------------------------------------
+# Pass 2 — the payload-less installer: uninstall.exe, and the packer
+# ---------------------------------------------------------------------------
+
+Write-Step 'Publishing the bare installer (becomes uninstall.exe)'
+Invoke-NativeCommand -FilePath $dotnet -Arguments @(
+    'publish', $setupProject,
+    '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+    '-o', $bareDir,
+    '-p:PublishSingleFile=true',
+    '-p:EnableCompressionInSingleFile=true',
+    # NOT optional. Without it a single-file publish still drops libSkiaSharp/av_libglesv2/libHarfBuzzSharp
+    # NEXT TO the exe, and since only the .exe is copied the installer starts with no renderer and dies
+    # instantly — with no console to say why.
+    '-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:PublishTrimmed=false', '-p:PublishReadyToRun=false',
+    '-p:DebugType=none', '-p:DebugSymbols=false',
+    "-p:Version=$Version", "-p:AssemblyVersion=$fileVersion",
+    "-p:FileVersion=$fileVersion", "-p:InformationalVersion=$Version"
+) -FailureMessage 'Publishing the bare installer failed.'
+
+$bareExe = Join-Path $bareDir 'Aether.Setup.exe'
+if (-not (Test-Path -LiteralPath $bareExe -PathType Leaf)) {
+    throw "Expected $bareExe after publishing the bare installer."
+}
+
+Copy-Item -LiteralPath $bareExe -Destination (Join-Path $payloadDir 'uninstall.exe') -Force
+
+$payloadFiles = @(Get-ChildItem -LiteralPath $payloadDir -File -Recurse)
+$payloadBytes = ($payloadFiles | Measure-Object -Property Length -Sum).Sum
+Write-Host ("Payload: {0} file(s), {1:0.0} MiB uncompressed" -f $payloadFiles.Count, ($payloadBytes / 1MB))
+
+Write-Step ('Compressing the payload ({0})' -f $(if ($MaxCompression) { 'maximum' } else { 'balanced' }))
+New-PayloadArchive -SourceDirectory $payloadDir -DestinationFile $archive -Maximum $MaxCompression.IsPresent
+
+if (-not (Test-Path -LiteralPath $archive -PathType Leaf)) {
+    throw "Packing reported success but $archive is not there."
+}
+$archiveBytes = (Get-Item -LiteralPath $archive).Length
+if ($archiveBytes -le 0) { throw "The payload archive is empty: $archive" }
+Write-Host ("Archive: {0:0.0} MiB compressed ({1:0}% of {2:0.0} MiB)" -f `
+    ($archiveBytes / 1MB), (100 * $archiveBytes / $payloadBytes), ($payloadBytes / 1MB))
+
+# ---------------------------------------------------------------------------
+# Pass 3 — the real setup
+# ---------------------------------------------------------------------------
+
+Write-Step 'Publishing setup.exe with the payload embedded'
+Invoke-NativeCommand -FilePath $dotnet -Arguments @(
+    'publish', $setupProject,
+    '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+    '-o', $setupDir,
+    '-p:PublishSingleFile=true',
+    '-p:EnableCompressionInSingleFile=true',
+    '-p:IncludeNativeLibrariesForSelfExtract=true',
+    '-p:PublishTrimmed=false', '-p:PublishReadyToRun=false',
+    '-p:DebugType=none', '-p:DebugSymbols=false',
+    "-p:Version=$Version", "-p:AssemblyVersion=$fileVersion",
+    "-p:FileVersion=$fileVersion", "-p:InformationalVersion=$Version",
+    "-p:AetherPayload=$archive"
+) -FailureMessage 'Publishing setup.exe failed.'
+
+$builtSetup = Join-Path $setupDir 'Aether.Setup.exe'
+if (-not (Test-Path -LiteralPath $builtSetup -PathType Leaf)) {
+    throw "Expected $builtSetup after publishing setup.exe."
+}
+
+if (Test-Path -LiteralPath $setupPath) { Remove-Item -LiteralPath $setupPath -Force }
+Copy-Item -LiteralPath $builtSetup -Destination $setupPath -Force
+
+# ---------------------------------------------------------------------------
+# Portable ZIP + hashes
+# ---------------------------------------------------------------------------
+
+if (-not $SkipPortableZip) {
+    Write-Step 'Creating portable ZIP'
+    if (Test-Path -LiteralPath $portablePath) { Remove-Item -LiteralPath $portablePath -Force }
+    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    [System.IO.Compression.ZipFile]::CreateFromDirectory(
+        $payloadDir, $portablePath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+}
+
+Write-Step 'Writing SHA256 checksums'
+$hashTargets = @($setupPath)
+if (-not $SkipPortableZip -and (Test-Path -LiteralPath $portablePath -PathType Leaf)) {
+    $hashTargets += $portablePath
+}
+$hashLines = foreach ($target in $hashTargets) {
+    $hash = Get-FileHash -LiteralPath $target -Algorithm SHA256
+    "$($hash.Hash.ToLowerInvariant())  $(Split-Path -Leaf $target)"
+}
+$hashLines | Set-Content -LiteralPath $hashPath -Encoding ASCII
+
+$setupMiB = (Get-Item -LiteralPath $setupPath).Length / 1MB
+
+Write-Host ''
+Write-Host 'BUILD SUCCEEDED' -ForegroundColor Green
+Write-Host ("  Setup:    $setupPath ({0:0.0} MiB)" -f $setupMiB)
+if (-not $SkipPortableZip) { Write-Host "  Portable: $portablePath" }
+Write-Host "  SHA256:   $hashPath"
+Write-Host ''
+
+if ($OpenOutputFolder) { Start-Process explorer.exe "/select,`"$setupPath`"" }

@@ -298,6 +298,14 @@ fn main() -> Result<(), Error> {
         );
     }
 
+    let idle_gpu_upload_eviction = aqw_mode && preferences.cli.aether_aqw_idle_gpu_upload_eviction;
+    ruffle_core::aether_performance::set_idle_gpu_upload_eviction_enabled(idle_gpu_upload_eviction);
+    if idle_gpu_upload_eviction {
+        tracing::info!(
+            "AQW idle GPU uploads are evicted periodically; bitmaps re-upload when drawn again"
+        );
+    }
+
     ruffle_core::aether_performance::set_filterless_hot_cache_bypass_enabled(aqw_mode);
     if aqw_mode {
         tracing::info!(
@@ -323,7 +331,7 @@ fn main() -> Result<(), Error> {
     }
 
     if preferences.cli.aether_aqw_mouse_motion_coalescing {
-        tracing::info!("AQW mouse-motion coalescing is enabled at 60 Hz");
+        tracing::info!("AQW mouse motion is coalesced to rendered frames during gameplay");
     }
 
     tracing::info!(

@@ -525,14 +525,17 @@ mod wrapper {
                 .borrow_mut();
             match std::mem::replace(&mut write.dirty_state, DirtyState::Clean) {
                 DirtyState::GpuModified(sync_handle, bounds) => {
-                    renderer
-                        .resolve_sync_handle(
-                            sync_handle,
-                            Box::new(|buffer, buffer_width| {
-                                copy_pixels_to_bitmapdata(&mut write, buffer, buffer_width, bounds)
-                            }),
-                        )
-                        .expect("Failed to sync BitmapData");
+                    if let Err(error) = renderer.resolve_sync_handle(
+                        sync_handle,
+                        Box::new(|buffer, buffer_width| {
+                            copy_pixels_to_bitmapdata(&mut write, buffer, buffer_width, bounds)
+                        }),
+                    ) {
+                        // The GPU could not hand the pixels back, which normally means the
+                        // device was lost. Keeping the pixels we already have is far better
+                        // than aborting the process mid-frame.
+                        tracing::warn!("Could not sync BitmapData from the GPU: {error}");
+                    }
                     write.dirty_state = DirtyState::Clean;
                     #[cfg(feature = "egui")]
                     write.egui_texture.borrow_mut().take();

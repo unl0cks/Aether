@@ -34,6 +34,7 @@ const STALE_CACHE_FRAMES: u64 = 24 * 60 * 5;
 const INPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_FLUSH_EVENT_COUNT: usize = 32;
 const AQW_MOVEMENT_NO_PROGRESS_DELAY_MS: f64 = 50.0;
+const AQW_DELAYED_MOUSE_STOP_GRACE: Duration = Duration::from_millis(50);
 const MOVEMENT_PROGRESS_EPSILON_PX: f64 = 0.25;
 const MAX_MOVEMENT_CALLBACKS_WITHOUT_PROGRESS: u32 = 120;
 const MAX_MOVEMENT_COLLISIONS_PER_SEQUENCE: usize = 128;
@@ -1304,6 +1305,7 @@ struct MovementTraceRuntime {
     enter_frame_start_position: Option<MovementPoint>,
     enter_frame_stop_suppressed: bool,
     mouse_move_depth: usize,
+    last_mouse_move_at: Option<Instant>,
     suppressed_stop_count: usize,
 }
 
@@ -1394,6 +1396,7 @@ impl MovementTraceRuntime {
         self.enter_frame_depth = 0;
         self.enter_frame_start_position = None;
         self.enter_frame_stop_suppressed = false;
+        self.last_mouse_move_at = None;
         true
     }
 
@@ -1453,7 +1456,12 @@ impl MovementTraceRuntime {
     }
 
     fn enter_mouse_move(&mut self) {
+        self.enter_mouse_move_at(Instant::now());
+    }
+
+    fn enter_mouse_move_at(&mut self, now: Instant) {
         self.mouse_move_depth = self.mouse_move_depth.saturating_add(1);
+        self.last_mouse_move_at = Some(now);
     }
 
     fn exit_mouse_move(&mut self) {
@@ -1466,11 +1474,43 @@ impl MovementTraceRuntime {
         remaining_distance: f64,
         walk_elapsed_ms: f64,
     ) -> Option<usize> {
+        self.try_record_suppressed_stop_at(
+            receiver_position,
+            remaining_distance,
+            walk_elapsed_ms,
+            Instant::now(),
+        )
+    }
+
+    /// The three callback scopes in which a `stopWalking` call is eligible for suppression:
+    /// inside `onEnterFrameWalk`, inside a live `Mouse.onMouseMove` dispatch, or inside the
+    /// one-frame-delayed callback that immediately follows such a dispatch.
+    ///
+    /// Shared by the suppression decision and its decline telemetry so the two cannot disagree.
+    fn guarded_callback_scope(&self, now: Instant) -> (bool, bool, bool) {
         let in_enter_frame = self.enter_frame_depth != 0;
         let in_mouse_move = self.mouse_move_depth != 0;
+        let in_delayed_mouse_callback = !in_mouse_move
+            && self.blocking_collision_count == 0
+            && self.last_mouse_move_at.is_some_and(|last_mouse_move_at| {
+                now.checked_duration_since(last_mouse_move_at)
+                    .is_some_and(|elapsed| elapsed <= AQW_DELAYED_MOUSE_STOP_GRACE)
+            });
+        (in_enter_frame, in_mouse_move, in_delayed_mouse_callback)
+    }
+
+    fn try_record_suppressed_stop_at(
+        &mut self,
+        receiver_position: MovementPoint,
+        remaining_distance: f64,
+        walk_elapsed_ms: f64,
+        now: Instant,
+    ) -> Option<usize> {
+        let (in_enter_frame, in_mouse_move, in_delayed_mouse_callback) =
+            self.guarded_callback_scope(now);
         if !self.active
             || !self.guard_eligible
-            || (!in_enter_frame && !in_mouse_move)
+            || (!in_enter_frame && !in_mouse_move && !in_delayed_mouse_callback)
             || !movement_stop_guard_should_suppress(
                 remaining_distance,
                 walk_elapsed_ms,
@@ -1792,6 +1832,186 @@ fn movement_stop_guard_action(
     }
 }
 
+/// Why the AQW premature-stop guard declined to suppress a `stopWalking` call.
+///
+/// The guard has several independent preconditions but previously emitted telemetry only when it
+/// succeeded. A live capture could therefore not distinguish "the guard ran and disagreed" from
+/// "the guard was never reachable", which is why repeated scope widenings could not be evaluated
+/// against evidence. Each decline is attributed to its first failing gate.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum MovementStopGuardDecline {
+    GuardDisabled,
+    NoCharacterMoveFlag,
+    NoReceiverPosition,
+    NoActiveSequence,
+    NotGuardEligible,
+    ForeignReceiver,
+    NoTarget,
+    NoWalkStart,
+    NotInGuardedCallback,
+    StopLooksLegitimate,
+}
+
+impl MovementStopGuardDecline {
+    const KINDS: usize = 10;
+
+    fn index(self) -> usize {
+        match self {
+            Self::GuardDisabled => 0,
+            Self::NoCharacterMoveFlag => 1,
+            Self::NoReceiverPosition => 2,
+            Self::NoActiveSequence => 3,
+            Self::NotGuardEligible => 4,
+            Self::ForeignReceiver => 5,
+            Self::NoTarget => 6,
+            Self::NoWalkStart => 7,
+            Self::NotInGuardedCallback => 8,
+            Self::StopLooksLegitimate => 9,
+        }
+    }
+}
+
+/// A populated map calls `stopWalking` for every visible avatar, so an unbounded decline record
+/// would reproduce the trace-volume stalls this project already hit. One answer per reason is
+/// enough to identify a blocking gate; this caps each reason for the whole session.
+const MAX_MOVEMENT_STOP_GUARD_DECLINE_REPORTS: u8 = 32;
+
+#[derive(Clone, Debug, Default)]
+struct MovementStopGuardDeclineBudget {
+    reported: [u8; MovementStopGuardDecline::KINDS],
+}
+
+impl MovementStopGuardDeclineBudget {
+    fn admit(&mut self, reason: MovementStopGuardDecline) -> bool {
+        let slot = &mut self.reported[reason.index()];
+        if *slot >= MAX_MOVEMENT_STOP_GUARD_DECLINE_REPORTS {
+            return false;
+        }
+        *slot += 1;
+        true
+    }
+}
+
+fn movement_stop_guard_decline_budget() -> &'static Mutex<MovementStopGuardDeclineBudget> {
+    static BUDGET: OnceLock<Mutex<MovementStopGuardDeclineBudget>> = OnceLock::new();
+    BUDGET.get_or_init(|| Mutex::new(MovementStopGuardDeclineBudget::default()))
+}
+
+#[derive(Serialize)]
+struct MovementStopGuardDeclineRecord {
+    record_type: &'static str,
+    unix_time_ms: u128,
+    elapsed_ms: f64,
+    event: &'static str,
+    sequence_id: u64,
+    reason: MovementStopGuardDecline,
+    receiver: Option<DisplayObjectDescriptor>,
+    receiver_position: Option<MovementPoint>,
+}
+
+/// Record why the guard let a `stopWalking` through, then allow it.
+///
+/// Must not be called while the movement runtime lock is held; it takes its own budget lock.
+fn movement_stop_guard_declined(
+    reason: MovementStopGuardDecline,
+    sequence_id: u64,
+    receiver: Option<DisplayObjectDescriptor>,
+    receiver_position: Option<MovementPoint>,
+) -> MovementStopGuardAction {
+    if input_trace_enabled() {
+        let admitted = {
+            let mut budget = match movement_stop_guard_decline_budget().lock() {
+                Ok(budget) => budget,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            budget.admit(reason)
+        };
+        if admitted {
+            let record = MovementStopGuardDeclineRecord {
+                record_type: "movement",
+                unix_time_ms: unix_time_ms(),
+                elapsed_ms: input_trace_elapsed_ms(),
+                event: "stop_guard_declined",
+                sequence_id,
+                reason,
+                receiver,
+                receiver_position,
+            };
+            write_input_trace(&record);
+        }
+    }
+    MovementStopGuardAction::Allow
+}
+
+/// Classify the callback-scope and suppression-predicate gates.
+///
+/// `NotInGuardedCallback` means AQW called `stopWalking` outside `onEnterFrameWalk`, outside a
+/// live `Mouse.onMouseMove` dispatch, and outside the delayed-callback grace window that follows
+/// one. `StopLooksLegitimate` means the guard was reachable and decided the stop was real.
+fn movement_stop_guard_callback_decline(
+    in_enter_frame: bool,
+    in_mouse_move: bool,
+    in_delayed_mouse_callback: bool,
+    predicate_matched: bool,
+) -> Option<MovementStopGuardDecline> {
+    if !in_enter_frame && !in_mouse_move && !in_delayed_mouse_callback {
+        return Some(MovementStopGuardDecline::NotInGuardedCallback);
+    }
+    if !predicate_matched {
+        return Some(MovementStopGuardDecline::StopLooksLegitimate);
+    }
+    None
+}
+
+/// Classify the caller-supplied preconditions checked before any movement state is inspected.
+///
+/// `mc_char_on_move` is `None` when the receiver exposes no `mcChar`, or when that child's
+/// dynamic `onMove` property cannot be read. That case disables the guard entirely and is
+/// evaluated before every other gate, so it must be distinguishable in a capture.
+fn movement_stop_guard_input_decline(
+    guard_enabled: bool,
+    mc_char_on_move: Option<bool>,
+    receiver_position: Option<MovementPoint>,
+) -> Option<MovementStopGuardDecline> {
+    if !guard_enabled {
+        return Some(MovementStopGuardDecline::GuardDisabled);
+    }
+    if mc_char_on_move.is_none() {
+        return Some(MovementStopGuardDecline::NoCharacterMoveFlag);
+    }
+    if receiver_position.is_none() {
+        return Some(MovementStopGuardDecline::NoReceiverPosition);
+    }
+    None
+}
+
+/// Classify the runtime-state preconditions the guard checks before it evaluates a stop.
+///
+/// Returns `None` when the sequence is fully armed for this receiver and the decision passes to
+/// the suppression predicate.
+fn movement_stop_guard_state_decline(
+    state: &MovementTraceRuntime,
+    receiver_path: Option<&str>,
+) -> Option<MovementStopGuardDecline> {
+    if !state.active {
+        return Some(MovementStopGuardDecline::NoActiveSequence);
+    }
+    if !state.guard_eligible {
+        return Some(MovementStopGuardDecline::NotGuardEligible);
+    }
+    if !movement_receiver_matches_owner(state.owner_path.as_deref(), receiver_path) {
+        return Some(MovementStopGuardDecline::ForeignReceiver);
+    }
+    if state.target.is_none() {
+        return Some(MovementStopGuardDecline::NoTarget);
+    }
+    if state.walk_started_at.is_none() {
+        return Some(MovementStopGuardDecline::NoWalkStart);
+    }
+    None
+}
+
 fn movement_points_have_same_rounded_position(
     start: MovementPoint,
     current: MovementPoint,
@@ -1813,11 +2033,12 @@ fn movement_points_have_same_rounded_position(
 }
 
 /// Return true only for the specific impossible early-stop state observed in AQW:
-/// `stopWalking` is called from `onEnterFrameWalk` or a real `Mouse.onMouseMove` dispatch while
-/// the avatar is still materially short of its target. If the timeline child lost its dynamic
-/// `onMove` flag between callbacks, the caller restores that flag before suppressing the stop. A
-/// bounded authored-callback stall counter prevents an infinite guard without letting rendering
-/// delays consume the movement budget.
+/// `stopWalking` is called from `onEnterFrameWalk`, a real `Mouse.onMouseMove` dispatch, or the
+/// one-frame-delayed callback immediately following that dispatch while the avatar is still
+/// materially short of its target. If the timeline child lost its dynamic `onMove` flag between
+/// callbacks, the caller restores that flag before suppressing the stop. A bounded authored-
+/// callback stall counter prevents an infinite guard without letting rendering delays consume the
+/// movement budget.
 ///
 /// A live collision deliberately does not disqualify the first matching call. AQW's collision
 /// branch restores the old coordinates and calls `stopWalking`, then immediately executes the
@@ -1830,11 +2051,15 @@ pub fn movement_stop_guard_action_for_receiver(
     receiver: Avm2Value<'_>,
     mc_char_on_move: Option<bool>,
 ) -> MovementStopGuardAction {
-    if !movement_stop_guard_enabled() || mc_char_on_move.is_none() {
-        return MovementStopGuardAction::Allow;
-    }
-
     let (receiver_descriptor, receiver_position) = movement_display_position(receiver);
+
+    if let Some(reason) = movement_stop_guard_input_decline(
+        movement_stop_guard_enabled(),
+        mc_char_on_move,
+        receiver_position,
+    ) {
+        return movement_stop_guard_declined(reason, 0, receiver_descriptor, receiver_position);
+    }
     let Some(receiver_position) = receiver_position else {
         return MovementStopGuardAction::Allow;
     };
@@ -1842,55 +2067,69 @@ pub fn movement_stop_guard_action_for_receiver(
         .as_ref()
         .map(|descriptor| descriptor.display_path.as_str());
 
+    // Each `Err` leaves the runtime lock before its record is written; the decline reporter takes
+    // its own budget lock and would otherwise deadlock against this one.
     let decision = {
         let mut state = match movement_trace_runtime().lock() {
             Ok(state) => state,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if !state.active
-            || !state.guard_eligible
-            || !movement_receiver_matches_owner(state.owner_path.as_deref(), receiver_path)
-        {
-            return MovementStopGuardAction::Allow;
+        if let Some(reason) = movement_stop_guard_state_decline(&state, receiver_path) {
+            Err((reason, state.sequence_id))
+        } else {
+            let Some(target) = state.target else {
+                return MovementStopGuardAction::Allow;
+            };
+            let Some(walk_started_at) = state.walk_started_at else {
+                return MovementStopGuardAction::Allow;
+            };
+
+            let remaining_distance =
+                (target.x - receiver_position.x).hypot(target.y - receiver_position.y);
+            let walk_elapsed_ms = walk_started_at.elapsed().as_secs_f64() * 1_000.0;
+
+            // AQW's own completion test uses 0.5 px. Keep a wider distance margin. Wall-clock
+            // time is diagnostic only: dense rendering and mouse input can delay authored
+            // callbacks for seconds while the walk is still valid, so only callbacks without net
+            // target progress consume the bounded stall budget.
+            match state.try_record_suppressed_stop(
+                receiver_position,
+                remaining_distance,
+                walk_elapsed_ms,
+            ) {
+                Some(suppression_index) => Ok((
+                    state.sequence_id,
+                    target,
+                    remaining_distance,
+                    walk_elapsed_ms,
+                    state.expected_duration_ms,
+                    state.best_remaining_distance,
+                    state.callbacks_without_progress,
+                    state.collision_count,
+                    state.blocking_collision_count,
+                    suppression_index,
+                )),
+                None => {
+                    let (in_enter_frame, in_mouse_move, in_delayed_mouse_callback) =
+                        state.guarded_callback_scope(Instant::now());
+                    let reason = movement_stop_guard_callback_decline(
+                        in_enter_frame,
+                        in_mouse_move,
+                        in_delayed_mouse_callback,
+                        movement_stop_guard_should_suppress(
+                            remaining_distance,
+                            walk_elapsed_ms,
+                            state.expected_duration_ms,
+                        ),
+                    )
+                    .unwrap_or(MovementStopGuardDecline::StopLooksLegitimate);
+                    Err((reason, state.sequence_id))
+                }
+            }
         }
-
-        let Some(target) = state.target else {
-            return MovementStopGuardAction::Allow;
-        };
-        let Some(walk_started_at) = state.walk_started_at else {
-            return MovementStopGuardAction::Allow;
-        };
-
-        let remaining_distance =
-            (target.x - receiver_position.x).hypot(target.y - receiver_position.y);
-        let walk_elapsed_ms = walk_started_at.elapsed().as_secs_f64() * 1_000.0;
-
-        // AQW's own completion test uses 0.5 px. Keep a wider distance margin. Wall-clock time is
-        // diagnostic only: dense rendering and mouse input can delay authored callbacks for
-        // seconds while the walk is still valid, so only callbacks without net target progress
-        // consume the bounded stall budget.
-        let Some(suppression_index) = state.try_record_suppressed_stop(
-            receiver_position,
-            remaining_distance,
-            walk_elapsed_ms,
-        ) else {
-            return MovementStopGuardAction::Allow;
-        };
-        Some((
-            state.sequence_id,
-            target,
-            remaining_distance,
-            walk_elapsed_ms,
-            state.expected_duration_ms,
-            state.best_remaining_distance,
-            state.callbacks_without_progress,
-            state.collision_count,
-            state.blocking_collision_count,
-            suppression_index,
-        ))
     };
 
-    let Some((
+    let (
         sequence_id,
         target,
         remaining_distance,
@@ -1901,9 +2140,16 @@ pub fn movement_stop_guard_action_for_receiver(
         collision_count,
         blocking_collision_count,
         suppression_index,
-    )) = decision
-    else {
-        return MovementStopGuardAction::Allow;
+    ) = match decision {
+        Ok(decision) => decision,
+        Err((reason, sequence_id)) => {
+            return movement_stop_guard_declined(
+                reason,
+                sequence_id,
+                receiver_descriptor,
+                Some(receiver_position),
+            );
+        }
     };
 
     if input_trace_enabled() {
@@ -2761,6 +3007,7 @@ mod tests {
             ..MovementTraceRuntime::default()
         };
         let current = MovementPoint { x: 100.0, y: 200.0 };
+        let now = Instant::now();
 
         assert_eq!(
             state.try_record_suppressed_stop(current, 50.0, 100.0),
@@ -2768,7 +3015,7 @@ mod tests {
             "an unrelated scripted stop outside an authored movement or mouse callback must pass through"
         );
 
-        state.enter_mouse_move();
+        state.enter_mouse_move_at(now);
         assert_eq!(
             state.try_record_suppressed_stop(current, 50.0, 100.0),
             Some(1),
@@ -2782,9 +3029,99 @@ mod tests {
         state.exit_mouse_move();
 
         assert_eq!(
-            state.try_record_suppressed_stop(current, 50.0, 100.0),
+            state.try_record_suppressed_stop_at(
+                current,
+                50.0,
+                100.0,
+                now + Duration::from_millis(51),
+            ),
             None,
-            "the cursor-specific guard must end with the mouse dispatch"
+            "the cursor-specific guard must end after the delayed callback grace window"
+        );
+    }
+
+    #[test]
+    fn stop_guard_covers_the_one_frame_delayed_mouse_callback_seen_in_aqw() {
+        let owner = "stage#0/game/avatar";
+        let now = Instant::now();
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            ..MovementTraceRuntime::default()
+        };
+        let current = MovementPoint { x: 100.0, y: 200.0 };
+
+        state.enter_mouse_move_at(now);
+        state.exit_mouse_move();
+
+        assert_eq!(
+            state.try_record_suppressed_stop_at(
+                current,
+                400.0,
+                125.0,
+                now + Duration::from_millis(16),
+            ),
+            Some(1),
+            "captured premature stops arrived 14-16ms after the preceding MouseMove callback"
+        );
+    }
+
+    #[test]
+    fn stop_guard_does_not_claim_unrelated_stops_after_mouse_grace_expires() {
+        let owner = "stage#0/game/avatar";
+        let now = Instant::now();
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            ..MovementTraceRuntime::default()
+        };
+        let current = MovementPoint { x: 100.0, y: 200.0 };
+
+        state.enter_mouse_move_at(now);
+        state.exit_mouse_move();
+
+        assert_eq!(
+            state.try_record_suppressed_stop_at(
+                current,
+                400.0,
+                250.0,
+                now + Duration::from_millis(51),
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn delayed_mouse_guard_does_not_override_a_blocking_collision() {
+        let owner = "stage#0/game/avatar";
+        let now = Instant::now();
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            blocking_collision_count: 1,
+            ..MovementTraceRuntime::default()
+        };
+
+        state.enter_mouse_move_at(now);
+        state.exit_mouse_move();
+
+        assert_eq!(
+            state.try_record_suppressed_stop_at(
+                MovementPoint { x: 100.0, y: 200.0 },
+                400.0,
+                125.0,
+                now + Duration::from_millis(16),
+            ),
+            None
         );
     }
 
@@ -3058,6 +3395,157 @@ mod tests {
         assert_eq!(
             report.total_us,
             report.top.iter().map(|entry| entry.total_us).sum::<u64>() + report.tail_us
+        );
+    }
+
+    #[test]
+    fn stop_guard_state_decline_reports_the_first_failing_gate() {
+        let owner = "stage#0/game/a105661";
+        let ready = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            walk_started_at: Some(Instant::now()),
+            ..MovementTraceRuntime::default()
+        };
+
+        assert_eq!(
+            movement_stop_guard_state_decline(&ready, Some(owner)),
+            None,
+            "a fully armed owner sequence must reach the suppression predicate"
+        );
+
+        assert_eq!(
+            movement_stop_guard_state_decline(&ready, Some("stage#0/game/a105655")),
+            Some(MovementStopGuardDecline::ForeignReceiver),
+            "another avatar's stop must be attributed, not silently allowed"
+        );
+
+        assert_eq!(
+            movement_stop_guard_state_decline(
+                &MovementTraceRuntime {
+                    active: false,
+                    ..ready.clone()
+                },
+                Some(owner)
+            ),
+            Some(MovementStopGuardDecline::NoActiveSequence)
+        );
+
+        assert_eq!(
+            movement_stop_guard_state_decline(
+                &MovementTraceRuntime {
+                    guard_eligible: false,
+                    ..ready.clone()
+                },
+                Some(owner)
+            ),
+            Some(MovementStopGuardDecline::NotGuardEligible)
+        );
+
+        assert_eq!(
+            movement_stop_guard_state_decline(
+                &MovementTraceRuntime {
+                    target: None,
+                    ..ready.clone()
+                },
+                Some(owner)
+            ),
+            Some(MovementStopGuardDecline::NoTarget)
+        );
+
+        assert_eq!(
+            movement_stop_guard_state_decline(
+                &MovementTraceRuntime {
+                    walk_started_at: None,
+                    ..ready.clone()
+                },
+                Some(owner)
+            ),
+            Some(MovementStopGuardDecline::NoWalkStart)
+        );
+    }
+
+    #[test]
+    fn stop_guard_input_decline_separates_a_disabled_switch_from_a_missing_character_flag() {
+        let position = Some(MovementPoint { x: 100.0, y: 200.0 });
+
+        assert_eq!(
+            movement_stop_guard_input_decline(false, Some(true), position),
+            Some(MovementStopGuardDecline::GuardDisabled),
+            "a build or preset that never enabled the guard must say so"
+        );
+
+        assert_eq!(
+            movement_stop_guard_input_decline(true, None, position),
+            Some(MovementStopGuardDecline::NoCharacterMoveFlag),
+            "an AvatarMC whose mcChar.onMove cannot be read disables the guard silently today"
+        );
+
+        assert_eq!(
+            movement_stop_guard_input_decline(true, Some(true), None),
+            Some(MovementStopGuardDecline::NoReceiverPosition)
+        );
+
+        assert_eq!(
+            movement_stop_guard_input_decline(true, Some(false), position),
+            None,
+            "a lost onMove flag is a suppress-and-resume case, not a decline"
+        );
+    }
+
+    #[test]
+    fn stop_guard_callback_decline_separates_callback_scope_from_a_legitimate_stop() {
+        assert_eq!(
+            movement_stop_guard_callback_decline(false, false, false, true),
+            Some(MovementStopGuardDecline::NotInGuardedCallback),
+            "the captured premature stops arrived outside every guarded callback scope"
+        );
+
+        assert_eq!(
+            movement_stop_guard_callback_decline(false, false, true, false),
+            Some(MovementStopGuardDecline::StopLooksLegitimate),
+            "a stop at its destination must be attributed to the predicate, not the scope"
+        );
+
+        for (in_enter_frame, in_mouse_move, in_delayed) in [
+            (true, false, false),
+            (false, true, false),
+            (false, false, true),
+        ] {
+            assert_eq!(
+                movement_stop_guard_callback_decline(
+                    in_enter_frame,
+                    in_mouse_move,
+                    in_delayed,
+                    true
+                ),
+                None,
+                "every guarded scope must reach suppression when the predicate matches"
+            );
+        }
+    }
+
+    #[test]
+    fn stop_guard_decline_budget_caps_each_reason_independently() {
+        let mut budget = MovementStopGuardDeclineBudget::default();
+
+        for attempt in 0..MAX_MOVEMENT_STOP_GUARD_DECLINE_REPORTS {
+            assert!(
+                budget.admit(MovementStopGuardDecline::ForeignReceiver),
+                "report {attempt} within the budget must be admitted"
+            );
+        }
+
+        assert!(
+            !budget.admit(MovementStopGuardDecline::ForeignReceiver),
+            "a crowded room must not be able to flood the trace with one reason"
+        );
+
+        assert!(
+            budget.admit(MovementStopGuardDecline::NoCharacterMoveFlag),
+            "an unrelated reason keeps its own independent budget"
         );
     }
 }

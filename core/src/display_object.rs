@@ -202,6 +202,24 @@ fn bitmap_cache_texture_plan(
     }
 }
 
+/// Whether AQW's own `cacheAsBitmap` surfaces may reuse a slightly oversized cache texture.
+///
+/// AQW avatars shift their bounds by a pixel or two every frame as they animate, and under
+/// `Exact` each shift allocates a fresh texture while the previous one waits for the GPU to
+/// retire it. Measured on a crowded Battleon that reached 300-1,729 MB of cache textures per
+/// second and preceded every framerate collapse. `BoundedReuse` was already implemented and
+/// already applied to Aether's own avatar caches; it was simply never extended to the
+/// authored caches that produce most of the traffic.
+#[cfg(feature = "aether_performance")]
+fn aqw_bounded_cache_texture_reuse() -> bool {
+    crate::aether_performance::adaptive_avatar_cache_enabled()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn aqw_bounded_cache_texture_reuse() -> bool {
+    false
+}
+
 fn adaptive_avatar_cache_dimensions_allowed(width: u32, height: u32) -> bool {
     width <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
         && height <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
@@ -1676,7 +1694,7 @@ pub fn render_base<'gc>(
                                 stage_matrix.a,
                                 stage_matrix.d,
                                 swf_version,
-                                if adaptive_avatar_cache_only {
+                                if adaptive_avatar_cache_only || aqw_bounded_cache_texture_reuse() {
                                     BitmapCacheTexturePolicy::BoundedReuse
                                 } else {
                                     BitmapCacheTexturePolicy::Exact
@@ -4088,6 +4106,38 @@ mod avm2_lifecycle_dirty_tests {
                 height: 584,
             }
         );
+    }
+
+    #[test]
+    fn an_animating_avatar_reuses_its_cache_texture_across_one_pixel_bounds_changes() {
+        // AQW avatars shift their bounds by a pixel or two every frame as they animate. Under
+        // `Exact` that allocates a brand-new texture each time while the old one waits for the
+        // GPU to retire it -- measured at 300-1,729 MB/second of cache textures on a crowded
+        // Battleon. `BoundedReuse` keeps the existing surface when it still contains the
+        // request and has not become wastefully large.
+        for requested in [(462, 583), (461, 580), (400, 500)] {
+            assert_eq!(
+                bitmap_cache_texture_plan(
+                    Some((463, 584)),
+                    requested,
+                    BitmapCacheTexturePolicy::BoundedReuse,
+                ),
+                BitmapCacheTexturePlan::Reuse,
+                "{requested:?} fits inside the existing 463x584 surface"
+            );
+            assert_eq!(
+                bitmap_cache_texture_plan(
+                    Some((463, 584)),
+                    requested,
+                    BitmapCacheTexturePolicy::Exact,
+                ),
+                BitmapCacheTexturePlan::Allocate {
+                    width: requested.0,
+                    height: requested.1,
+                },
+                "Exact reallocates for the same request"
+            );
+        }
     }
 
     #[test]

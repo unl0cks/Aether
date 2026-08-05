@@ -326,6 +326,10 @@ pub struct Player {
     #[cfg(feature = "aether_render_hints")]
     cache_draw_capacity_hint: usize,
 
+    /// Frames remaining before the next idle GPU-upload eviction sweep.
+    #[cfg(feature = "aether_performance")]
+    last_gpu_upload_sweep: Instant,
+
     rng: AvmRng,
 
     gc_arena: Rc<RefCell<GcArena>>,
@@ -403,6 +407,11 @@ pub struct Player {
     #[cfg(feature = "egui")]
     debug_ui: Rc<RefCell<crate::debug_ui::DebugUi>>,
 }
+
+/// How often to run the idle GPU-upload eviction sweep. At 60 fps this is about two
+/// seconds, so a bitmap survives roughly two to four seconds after it was last drawn.
+#[cfg(feature = "aether_performance")]
+const GPU_UPLOAD_SWEEP_INTERVAL: Duration = Duration::from_secs(2);
 
 impl Player {
     // This method will panic if called inside an `enter_arena_mut` call.
@@ -2246,7 +2255,39 @@ impl Player {
     }
 
     #[instrument(level = "debug", skip_all)]
+    /// Periodically drop GPU uploads for bitmaps that are no longer being drawn.
+    ///
+    /// Uploads are created lazily on first draw and, before this, were only ever released
+    /// when a `Loader` was explicitly unloaded. AQW drops its `Loader`s instead, so revealing
+    /// ten players took live textures from 296 to 2,443 and hiding them again freed none.
+    /// Anything still on screen is spared and re-uploads on demand if it is evicted.
+    #[cfg(feature = "aether_performance")]
+    fn sweep_idle_gpu_uploads_if_due(&mut self) {
+        if !crate::aether_performance::idle_gpu_upload_eviction_enabled() {
+            return;
+        }
+        // Deliberately wall-clock, not a frame counter. A frame counter stops sweeping exactly
+        // when it is needed most: once GPU memory pressure drops the renderer to 1 fps, a
+        // 120-frame interval is two minutes, so pressure suppresses the only thing that
+        // relieves it. Elapsed time keeps the sweep running at a fixed rate regardless.
+        let now = Instant::now();
+        if now.duration_since(self.last_gpu_upload_sweep) < GPU_UPLOAD_SWEEP_INTERVAL {
+            return;
+        }
+        self.last_gpu_upload_sweep = now;
+
+        self.update(|context| {
+            let released = context.library.sweep_idle_gpu_uploads();
+            if released > 0 {
+                tracing::debug!("Evicted {released} idle GPU uploads");
+            }
+        });
+    }
+
     pub fn render(&mut self) {
+        #[cfg(feature = "aether_performance")]
+        self.sweep_idle_gpu_uploads_if_due();
+
         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
 
         if invalidated {
@@ -3331,6 +3372,8 @@ impl PlayerBuilder {
                 render_command_capacity_hint: 0,
                 #[cfg(feature = "aether_render_hints")]
                 cache_draw_capacity_hint: 0,
+                #[cfg(feature = "aether_performance")]
+                last_gpu_upload_sweep: Instant::now(),
                 instance_counter: 0,
                 player_version,
                 player_runtime: self.player_runtime,

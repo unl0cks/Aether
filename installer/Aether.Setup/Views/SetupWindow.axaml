@@ -1,0 +1,152 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="Aether.Setup.Views.SetupWindow"
+        Title="Aether Setup"
+        Width="880" Height="720" MinWidth="620" MinHeight="540" CanResize="True"
+        WindowStartupLocation="CenterScreen"
+        Background="Transparent"
+        TransparencyLevelHint="AcrylicBlur, Transparent, None"
+        WindowDecorations="None"
+        Opacity="0"
+        FontFamily="Segoe UI Variable Text, Segoe UI">
+    <Window.Transitions>
+        <Transitions><DoubleTransition Property="Opacity" Duration="0:0:0.16" Easing="CubicEaseOut"/></Transitions>
+    </Window.Transitions>
+
+    <Panel>
+        <Border x:Name="RootCard" Background="{StaticResource GlassTintBrush}" RenderTransformOrigin="50%,50%">
+            <Border.Transitions>
+                <Transitions>
+                    <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.20" Easing="CubicEaseOut"/>
+                </Transitions>
+            </Border.Transitions>
+            <Grid RowDefinitions="Auto,*,Auto">
+
+                <Grid x:Name="TitleBar" Height="40" ColumnDefinitions="Auto,*,Auto,Auto" Background="Transparent">
+                    <!-- No mark in the title bar. The crest is a detailed piece of art — a ring, a dragon, a
+                         flame border and a wordmark — and at the ~17px a title bar allows it collapses into
+                         noise. The window icon in the taskbar carries it instead, where it gets 32px. -->
+                    <StackPanel Orientation="Horizontal" Margin="20,0,0,0" VerticalAlignment="Center">
+                        <TextBlock x:Name="TitleText" Text="Aether Setup" FontSize="12.5" VerticalAlignment="Center"
+                                   Foreground="{StaticResource TextSecondaryBrush}"/>
+                    </StackPanel>
+                    <Button x:Name="MinButton" Grid.Column="2" Theme="{StaticResource CaptionButton}" Content="&#xE921;"/>
+                    <Button x:Name="CloseButton" Grid.Column="3" Theme="{StaticResource CloseCaptionButton}"
+                            Content="&#xE8BB;" Margin="0,0,8,0"/>
+                </Grid>
+
+                <!-- One page visible at a time; PageHost slides + fades between them. -->
+                <Panel Grid.Row="1" ClipToBounds="True">
+                    <Grid x:Name="PageHost" Margin="30,6,30,0" RenderTransformOrigin="50%,50%">
+                        <Grid.Transitions>
+                            <Transitions>
+                                <DoubleTransition Property="Opacity" Duration="0:0:0.16" Easing="CubicEaseOut"/>
+                                <TransformOperationsTransition Property="RenderTransform" Duration="0:0:0.22" Easing="CubicEaseOut"/>
+                            </Transitions>
+                        </Grid.Transitions>
+
+                        <!-- ── page: welcome / options ─────────────────────────────────────── -->
+                        <ScrollViewer x:Name="OptionsPage" HorizontalScrollBarVisibility="Disabled">
+                            <StackPanel x:Name="OptionsPanel">
+                                <TextBlock x:Name="Heading" Text="Install Aether" FontSize="27" FontWeight="SemiBold"
+                                           Foreground="{StaticResource TextPrimaryBrush}"/>
+                                <TextBlock x:Name="Subheading" FontSize="13" TextWrapping="Wrap" LineHeight="19"
+                                           Margin="0,5,0,18" Foreground="{StaticResource TextSecondaryBrush}"/>
+
+                                <Border Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,13,16,14" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <TextBlock Text="INSTALL TO" Theme="{StaticResource SectionHeader}"/>
+                                        <Grid ColumnDefinitions="*,Auto">
+                                            <TextBox x:Name="DirBox" Background="#18BFE6FF" Foreground="{StaticResource TextPrimaryBrush}"
+                                                     CaretBrush="{DynamicResource AccentBrush}" BorderThickness="0" CornerRadius="9"
+                                                     Padding="10,0" Height="34" FontSize="12.5" VerticalContentAlignment="Center"/>
+                                            <Button x:Name="BrowseButton" Grid.Column="1" Theme="{StaticResource GhostButton}"
+                                                    Content="Browse…" Padding="12,7" Margin="8,0,0,0"/>
+                                        </Grid>
+                                        <TextBlock x:Name="DirNote" FontSize="11.5" TextWrapping="Wrap" Margin="2,7,0,0"
+                                                   Foreground="{StaticResource TextMutedBrush}"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,13,16,14" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <TextBlock Text="SHORTCUTS" Theme="{StaticResource SectionHeader}"/>
+                                        <CheckBox x:Name="StartMenuCheck" Theme="{StaticResource GlassCheckBox}"
+                                                  Content="Add Aether to the Start menu" Margin="0,0,0,8"/>
+                                        <CheckBox x:Name="DesktopCheck" Theme="{StaticResource GlassCheckBox}"
+                                                  Content="Create a desktop shortcut"/>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Background="{StaticResource CardBrush}" CornerRadius="12" Padding="16,13,16,14" Margin="0,0,0,12">
+                                    <StackPanel>
+                                        <TextBlock Text="FILE TYPES" Theme="{StaticResource SectionHeader}"/>
+                                        <CheckBox x:Name="FlashCheck" Theme="{StaticResource GlassCheckBox}"
+                                                  Content="Offer Aether for Flash movies (.swf)" Margin="0,0,0,8"/>
+                                        <CheckBox x:Name="ProjectorCheck" Theme="{StaticResource GlassCheckBox}"
+                                                  Content="Offer Aether for Flash projectors (.spl, .ruf)"/>
+                                        <TextBlock x:Name="AssocNote" FontSize="11.5" TextWrapping="Wrap" LineHeight="17"
+                                                   Margin="2,9,0,0" Foreground="{StaticResource TextMutedBrush}"/>
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </ScrollViewer>
+
+                        <!-- ── page: working ───────────────────────────────────────────────── -->
+                        <StackPanel x:Name="ProgressPage" IsVisible="False" VerticalAlignment="Center">
+                            <TextBlock x:Name="ProgressHeading" Text="Installing Aether" FontSize="24" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextPrimaryBrush}" HorizontalAlignment="Center"/>
+                            <TextBlock x:Name="ProgressStage" FontSize="13" Margin="0,8,0,20" HorizontalAlignment="Center"
+                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                            <ProgressBar x:Name="Bar" Height="5" Minimum="0" Maximum="1"
+                                         Foreground="{DynamicResource AccentBrush}" Background="#28BFE6FF"/>
+                            <Button x:Name="DetailsToggle" Theme="{StaticResource GhostButton}" Content="Show details"
+                                    Padding="11,6" FontSize="12" HorizontalAlignment="Center" Margin="0,18,0,0"/>
+                            <Border x:Name="LogPanel" IsVisible="False" Background="#3D000000" CornerRadius="9"
+                                    Padding="12,10" Margin="0,10,0,0" Height="180" ClipToBounds="True">
+                                <ScrollViewer x:Name="LogScroll" HorizontalScrollBarVisibility="Disabled">
+                                    <SelectableTextBlock x:Name="LogText" FontFamily="Cascadia Mono, Consolas, monospace"
+                                                         FontSize="11" TextWrapping="Wrap"
+                                                         Foreground="{StaticResource TextSecondaryBrush}"/>
+                                </ScrollViewer>
+                            </Border>
+                        </StackPanel>
+
+                        <!-- ── page: finished ──────────────────────────────────────────────── -->
+                        <StackPanel x:Name="DonePage" IsVisible="False" VerticalAlignment="Center">
+                            <Image Source="avares://Aether.Setup/Assets/Aether.png" Width="188" Height="188"
+                                   RenderOptions.BitmapInterpolationMode="HighQuality"
+                                   HorizontalAlignment="Center" Margin="0,0,0,20"/>
+                            <TextBlock x:Name="DoneHeading" Text="Aether is installed" FontSize="26" FontWeight="SemiBold"
+                                       Foreground="{StaticResource TextPrimaryBrush}" HorizontalAlignment="Center"/>
+                            <TextBlock x:Name="DoneNote" FontSize="13" TextWrapping="Wrap" LineHeight="19"
+                                       TextAlignment="Center" Margin="0,8,0,20" MaxWidth="440"
+                                       Foreground="{StaticResource TextSecondaryBrush}"/>
+                            <CheckBox x:Name="LaunchCheck" Theme="{StaticResource GlassCheckBox}"
+                                      Content="Open Aether now" HorizontalAlignment="Center"/>
+                        </StackPanel>
+                    </Grid>
+                </Panel>
+
+                <Grid Grid.Row="2" ColumnDefinitions="*,Auto,Auto" Margin="30,14,30,24">
+                    <TextBlock x:Name="Status" FontSize="12" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+                               Margin="0,0,16,0" Foreground="{StaticResource TextMutedBrush}"/>
+                    <Button x:Name="BackButton" Grid.Column="1" Theme="{StaticResource GhostButton}" Content="Cancel"
+                            Margin="0,0,10,0"/>
+                    <Button x:Name="NextButton" Grid.Column="2" Theme="{StaticResource AccentButton}" Content="Install"/>
+                </Grid>
+            </Grid>
+        </Border>
+
+        <Grid x:Name="Grips" RowDefinitions="7,*,7" ColumnDefinitions="7,*,7">
+            <Border x:Name="GripNW" Grid.Row="0" Grid.Column="0" Background="Transparent" Cursor="TopLeftCorner"/>
+            <Border x:Name="GripN"  Grid.Row="0" Grid.Column="1" Background="Transparent" Cursor="TopSide"/>
+            <Border x:Name="GripNE" Grid.Row="0" Grid.Column="2" Background="Transparent" Cursor="TopRightCorner"/>
+            <Border x:Name="GripW"  Grid.Row="1" Grid.Column="0" Background="Transparent" Cursor="LeftSide"/>
+            <Border x:Name="GripE"  Grid.Row="1" Grid.Column="2" Background="Transparent" Cursor="RightSide"/>
+            <Border x:Name="GripSW" Grid.Row="2" Grid.Column="0" Background="Transparent" Cursor="BottomLeftCorner"/>
+            <Border x:Name="GripS"  Grid.Row="2" Grid.Column="1" Background="Transparent" Cursor="BottomSide"/>
+            <Border x:Name="GripSE" Grid.Row="2" Grid.Column="2" Background="Transparent" Cursor="BottomRightCorner"/>
+        </Grid>
+    </Panel>
+</Window>

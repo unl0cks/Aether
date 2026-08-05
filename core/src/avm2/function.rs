@@ -184,13 +184,29 @@ enum AetherMovementMethod {
     StopWalking,
 }
 
+/// Classify a qualified ABC method name of the form `AvatarMC/method`.
+///
+/// AQW publishes private methods with a namespace qualifier on the member half, for example
+/// `AvatarMC/private:onEnterFrameWalk`. The qualifier is stripped so both spellings resolve; the
+/// class half must still be exactly `AvatarMC`.
 #[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method(method_name: &str) -> Option<AetherMovementMethod> {
+    let (class_name, member) = method_name.split_once('/')?;
+    if class_name != "AvatarMC" {
+        return None;
+    }
+    let member = member.rsplit_once(':').map_or(member, |(_, name)| name);
+    classify_bare_aether_movement_method(member)
+}
+
+/// The simple ABC names AQW uses when it does not publish a qualified `AvatarMC/method` name.
+#[cfg(feature = "aether_diagnostics")]
+fn classify_bare_aether_movement_method(method_name: &str) -> Option<AetherMovementMethod> {
     match method_name {
-        "AvatarMC/onEnterFrameWalk" => Some(AetherMovementMethod::EnterFrameWalk),
-        "AvatarMC/simulateTo" => Some(AetherMovementMethod::SimulateTo),
-        "AvatarMC/walkTo" => Some(AetherMovementMethod::WalkTo),
-        "AvatarMC/stopWalking" => Some(AetherMovementMethod::StopWalking),
+        "onEnterFrameWalk" => Some(AetherMovementMethod::EnterFrameWalk),
+        "simulateTo" => Some(AetherMovementMethod::SimulateTo),
+        "walkTo" => Some(AetherMovementMethod::WalkTo),
+        "stopWalking" => Some(AetherMovementMethod::StopWalking),
         _ => None,
     }
 }
@@ -201,8 +217,9 @@ fn classify_aether_movement_method_for_parts(
     bound_class: Option<(&str, bool)>,
 ) -> Option<AetherMovementMethod> {
     classify_aether_movement_method(method_name).or_else(|| {
-        (method_name == "onEnterFrameWalk" && bound_class == Some(("AvatarMC", true)))
-            .then_some(AetherMovementMethod::EnterFrameWalk)
+        (bound_class == Some(("AvatarMC", true)))
+            .then(|| classify_bare_aether_movement_method(method_name))
+            .flatten()
     })
 }
 
@@ -220,7 +237,7 @@ fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
 #[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovementMethod> {
     let method_name = method.method_name();
-    let bound_class = if method_name.as_ref() == "onEnterFrameWalk" {
+    let bound_class = if classify_bare_aether_movement_method(method_name.as_ref()).is_some() {
         method.bound_class().and_then(|class| {
             let class_name = class.name();
             (class_name.local_name().as_wstr() == b"AvatarMC")
@@ -231,7 +248,25 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
     };
     let movement_method =
         classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)?;
-    ascii_contains_ignore_case(method.owner_movie().url(), "spider.swf").then_some(movement_method)
+    let owner_movie = method.owner_movie();
+    let owner_url = owner_movie.url();
+    if ascii_contains_ignore_case(owner_url, "spider.swf") {
+        return Some(movement_method);
+    }
+
+    // A recognised AvatarMC movement method that fails the Spider URL gate would disable both the
+    // movement trace and the stop guard with no other evidence. Report the owning movie once so a
+    // capture can distinguish "AQW moved this class" from "the hook never matched at all".
+    static REPORTED_FOREIGN_OWNER: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if !REPORTED_FOREIGN_OWNER.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        tracing::warn!(
+            method = %method_name,
+            owner_url = %owner_url,
+            "AQW movement method rejected: owning movie is not spider.swf"
+        );
+    }
+    None
 }
 
 /// Execute a method.
@@ -609,6 +644,63 @@ mod aether_movement_tests {
             classify_aether_movement_method_for_parts("onEnterFrameWalk", None),
             None
         );
+    }
+
+    #[test]
+    fn movement_hook_accepts_namespace_qualified_avatar_method_names() {
+        // Ground truth from the live spider.swf ABC constant pool: AQW publishes
+        // `AvatarMC/private:onEnterFrameWalk`, not `AvatarMC/onEnterFrameWalk`.
+        assert_eq!(
+            classify_aether_movement_method("AvatarMC/private:onEnterFrameWalk"),
+            Some(AetherMovementMethod::EnterFrameWalk)
+        );
+        assert_eq!(
+            classify_aether_movement_method("AvatarMC/private:stopWalking"),
+            Some(AetherMovementMethod::StopWalking)
+        );
+        assert_eq!(
+            classify_aether_movement_method("PetMC/private:onEnterFrameWalk"),
+            None,
+            "a qualifier must not let a non-avatar class through"
+        );
+        assert_eq!(
+            classify_aether_movement_method("AvatarMC/private:somethingElse"),
+            None,
+            "only the four movement methods are tracked"
+        );
+    }
+
+    #[test]
+    fn movement_hook_accepts_bare_avatar_method_names() {
+        // AQW does not always publish the qualified `AvatarMC/method` ABC name. When only the
+        // simple name is present, the public `AvatarMC` bound class is the identifying evidence,
+        // exactly as it already is for `onEnterFrameWalk`.
+        for (method_name, expected) in [
+            ("simulateTo", AetherMovementMethod::SimulateTo),
+            ("walkTo", AetherMovementMethod::WalkTo),
+            ("stopWalking", AetherMovementMethod::StopWalking),
+        ] {
+            assert_eq!(
+                classify_aether_movement_method_for_parts(method_name, Some(("AvatarMC", true))),
+                Some(expected),
+                "bare {method_name} on a public AvatarMC must be tracked"
+            );
+            assert_eq!(
+                classify_aether_movement_method_for_parts(method_name, Some(("PetMC", true))),
+                None,
+                "bare {method_name} must not be claimed for a non-avatar class"
+            );
+            assert_eq!(
+                classify_aether_movement_method_for_parts(method_name, Some(("AvatarMC", false))),
+                None,
+                "bare {method_name} must require the public AvatarMC namespace"
+            );
+            assert_eq!(
+                classify_aether_movement_method_for_parts(method_name, None),
+                None,
+                "bare {method_name} without a bound class must not be tracked"
+            );
+        }
     }
 
     #[test]

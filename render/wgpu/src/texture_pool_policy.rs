@@ -13,10 +13,23 @@ pub enum OffscreenTexturePoolPolicy {
     BoundedReuse(BoundedTexturePoolLimits),
 }
 
-/// Keep a much smaller companion pool for transient filter and surface intermediates whenever
-/// the caller explicitly enables bounded offscreen reuse. These textures repeat frequently in
-/// animated Flash content, but retaining every size encountered across maps and login sessions
-/// causes GPU memory to grow without a useful bound.
+/// Budget for the general pool, which holds whole-surface render targets rather than the small
+/// filter intermediates the offscreen pool deals in.
+///
+/// Every `Command::Blend` and every mask in a frame builds its own `Surface` at the *stage* size,
+/// and at `StageQuality::High` that means a 4x MSAA framebuffer alongside its resolved colour
+/// texture. At 2560x1440 that pair is ~70 MiB. Sequential nodes drop their targets before the next
+/// one asks for its own, so one set can serve an entire frame -- but only if the pool is permitted
+/// to hold it in between. Deriving this budget as a fraction of the offscreen pool capped it at
+/// 64 MiB, below the size of a single pair, so retention planning evicted 100% of what it was
+/// handed and every node in the frame allocated fresh. Size it for a realistic nesting depth
+/// instead; the cap still bounds the pool, it just bounds it somewhere useful.
+pub(crate) const GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES: u64 = 384 * 1024 * 1024;
+
+/// Keep a companion pool for the whole-surface render targets that blends and masks allocate,
+/// whenever the caller explicitly enables bounded offscreen reuse. These targets repeat every
+/// frame in animated Flash content, but retaining every size encountered across maps and login
+/// sessions causes GPU memory to grow without a useful bound.
 pub(crate) fn general_texture_pool_policy(
     offscreen_policy: OffscreenTexturePoolPolicy,
 ) -> OffscreenTexturePoolPolicy {
@@ -24,8 +37,7 @@ pub(crate) fn general_texture_pool_policy(
         OffscreenTexturePoolPolicy::Ephemeral => OffscreenTexturePoolPolicy::Ephemeral,
         OffscreenTexturePoolPolicy::BoundedReuse(limits) => {
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
-                max_cached_bytes: (limits.max_cached_bytes / 4)
-                    .clamp(16 * 1024 * 1024, 64 * 1024 * 1024),
+                max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
                 max_cached_entries: (limits.max_cached_entries / 4).clamp(32, 128),
                 max_idle_frames: limits.max_idle_frames.min(1),
                 max_cached_globals: limits.max_cached_globals.min(32),
@@ -270,11 +282,49 @@ mod tests {
                 }
             )),
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
-                max_cached_bytes: 32 * 1024 * 1024,
+                max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
                 max_cached_entries: 128,
                 max_idle_frames: 1,
                 max_cached_globals: 32,
             })
+        );
+    }
+
+    #[test]
+    fn general_pool_budget_retains_a_nested_stack_of_native_resolution_targets() {
+        // Every `Blend` and mask node in a frame gets its own stage-sized render target, and at
+        // StageQuality::High that means a 4x MSAA framebuffer plus its resolved colour texture.
+        // Sequential nodes can share one set, but only if the pool is allowed to keep it between
+        // nodes, so the budget has to clear a realistic nesting depth. A budget below the size of
+        // a single pair makes the pool evict everything it is handed and every node allocates
+        // fresh -- which is what drove resident texture memory past 39 GB at 2560x1440.
+        let stage = wgpu::Extent3d {
+            width: 2560,
+            height: 1440,
+            depth_or_array_layers: 1,
+        };
+        let msaa = estimate_texture_bytes(stage, wgpu::TextureFormat::Rgba8Unorm, 1, 4)
+            .expect("msaa framebuffer is a known size");
+        let resolved = estimate_texture_bytes(stage, wgpu::TextureFormat::Rgba8Unorm, 1, 1)
+            .expect("resolved colour target is a known size");
+
+        let OffscreenTexturePoolPolicy::BoundedReuse(general) = general_texture_pool_policy(
+            OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
+                max_cached_bytes: 128 * 1024 * 1024,
+                max_cached_entries: 512,
+                max_idle_frames: 1,
+                max_cached_globals: 128,
+            }),
+        ) else {
+            panic!("bounded offscreen reuse must derive a bounded general pool");
+        };
+
+        assert!(
+            general.max_cached_bytes >= (msaa + resolved) * 4,
+            "general budget of {} bytes cannot retain four nested {}+{} byte targets",
+            general.max_cached_bytes,
+            msaa,
+            resolved,
         );
     }
 

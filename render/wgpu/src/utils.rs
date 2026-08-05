@@ -128,30 +128,82 @@ impl BufferDescription for BufferDimensions {
     }
 }
 
+/// Whether a buffer that was submitted for readback is actually safe to map.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum BufferReadback {
+    /// The buffer is mapped and can be read.
+    Ready,
+    /// Waiting for the copy to finish failed, so the contents are not ready.
+    PollFailed,
+    /// The map itself failed, which normally means the device was lost.
+    MapFailed,
+    /// The map callback never fired, which means the device was dropped underneath us.
+    MapAbandoned,
+}
+
+/// Decide whether a readback buffer may be mapped.
+///
+/// This has to be decided *before* calling [`wgpu::BufferSlice::get_mapped_range`],
+/// because that call routes failures through wgpu's `handle_error_fatal`, which
+/// panics unconditionally and cannot be intercepted by an error scope or by an
+/// uncaptured-error handler. Reading a buffer whose map failed is therefore an
+/// immediate, unrecoverable process abort.
+pub fn buffer_readback(
+    poll: &Result<wgpu::PollStatus, wgpu::PollError>,
+    map: &Result<Result<(), wgpu::BufferAsyncError>, std::sync::mpsc::RecvError>,
+) -> BufferReadback {
+    if poll.is_err() {
+        return BufferReadback::PollFailed;
+    }
+    match map {
+        Ok(Ok(())) => BufferReadback::Ready,
+        Ok(Err(_)) => BufferReadback::MapFailed,
+        Err(_) => BufferReadback::MapAbandoned,
+    }
+}
+
 pub fn capture_image<R, F: FnOnce(&[u8], u32) -> R>(
     device: &wgpu::Device,
     buffer: &wgpu::Buffer,
     dimensions: &BufferDimensions,
     index: Option<wgpu::SubmissionIndex>,
     with_rgba: F,
-) -> R {
+) -> Option<R> {
     let (sender, receiver) = std::sync::mpsc::channel();
     let buffer_slice = buffer.slice(..);
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
-        sender.send(result).unwrap();
+        // If nothing is waiting any more the readback has been abandoned, which is
+        // handled below. Unwrapping here would panic on wgpu's callback thread.
+        let _ = sender.send(result);
     });
-    device
-        .poll(wgpu::PollType::Wait {
-            submission_index: index,
-            timeout: None,
-        })
-        .expect("Device must not fail to poll");
-    let _ = receiver.recv().expect("MPSC channel must not fail");
+    let poll = device.poll(wgpu::PollType::Wait {
+        submission_index: index,
+        timeout: None,
+    });
+    let map = match &poll {
+        // The wait succeeded, so the map callback is guaranteed to have run.
+        Ok(_) => receiver.recv(),
+        // The wait failed, which usually means the device is gone. The callback may
+        // never fire, so take whatever is already there rather than blocking forever.
+        Err(_) => receiver.try_recv().map_err(|_| std::sync::mpsc::RecvError),
+    };
+
+    let readback = buffer_readback(&poll, &map);
+    if readback != BufferReadback::Ready {
+        // If the map itself succeeded we still hold the mapping, so release it before
+        // the buffer goes back to the pool, or the next user of it will fail to map.
+        if matches!(map, Ok(Ok(()))) {
+            buffer.unmap();
+        }
+        tracing::warn!("Skipping GPU readback: {readback:?}");
+        return None;
+    }
+
     let map = buffer_slice.get_mapped_range();
     let result = with_rgba(&map, dimensions.padded_bytes_per_row);
     drop(map);
     buffer.unmap();
-    result
+    Some(result)
 }
 
 #[cfg(not(target_family = "wasm"))]
@@ -161,7 +213,7 @@ pub fn buffer_to_image(
     dimensions: &BufferDimensions,
     index: Option<wgpu::SubmissionIndex>,
     size: wgpu::Extent3d,
-) -> image::RgbaImage {
+) -> Option<image::RgbaImage> {
     capture_image(device, buffer, dimensions, index, |rgba, _buffer_width| {
         let mut bytes = Vec::with_capacity(dimensions.height * dimensions.unpadded_bytes_per_row);
 
@@ -311,5 +363,46 @@ impl<T> SampleCountMap<std::sync::OnceLock<T>> {
             16 => self.sixteen.get_or_init(init),
             _ => unreachable!("Sample counts must be powers of two between 1..=16"),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{BufferReadback, buffer_readback};
+    use std::sync::mpsc::RecvError;
+
+    #[test]
+    fn successful_map_is_ready() {
+        assert_eq!(
+            buffer_readback(&Ok(wgpu::PollStatus::QueueEmpty), &Ok(Ok(()))),
+            BufferReadback::Ready
+        );
+    }
+
+    #[test]
+    fn failed_map_is_not_readable() {
+        assert_eq!(
+            buffer_readback(
+                &Ok(wgpu::PollStatus::QueueEmpty),
+                &Ok(Err(wgpu::BufferAsyncError))
+            ),
+            BufferReadback::MapFailed
+        );
+    }
+
+    #[test]
+    fn abandoned_callback_is_not_readable() {
+        assert_eq!(
+            buffer_readback(&Ok(wgpu::PollStatus::QueueEmpty), &Err(RecvError)),
+            BufferReadback::MapAbandoned
+        );
+    }
+
+    #[test]
+    fn poll_failure_takes_priority_over_the_map_result() {
+        assert_eq!(
+            buffer_readback(&Err(wgpu::PollError::Timeout), &Ok(Ok(()))),
+            BufferReadback::PollFailed
+        );
     }
 }

@@ -190,13 +190,13 @@ impl WgpuRenderBackend<crate::target::TextureTarget> {
         use crate::utils::buffer_to_image;
         if let Some(buffer) = &self.target.buffer {
             let (buffer, dimensions) = buffer.buffer.inner();
-            Some(buffer_to_image(
+            buffer_to_image(
                 &self.descriptors.device,
                 buffer,
                 dimensions,
                 None,
                 self.target.size,
-            ))
+            )
         } else {
             None
         }
@@ -1183,8 +1183,9 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         with_rgba: RgbaBufRead,
     ) -> Result<(), ruffle_render::error::Error> {
         let handle = Box::<dyn Any>::downcast::<QueueSyncHandle>(handle).unwrap();
-        handle.capture(with_rgba, &mut self.active_frame);
-        Ok(())
+        handle
+            .capture(with_rgba, &mut self.active_frame)
+            .ok_or(ruffle_render::error::Error::GpuReadbackFailed)
     }
 }
 

@@ -44,18 +44,11 @@ impl<T> MouseMotionCoalescer<T> {
             return MouseMotionDecision::dispatch(position, false);
         }
 
-        let due = self
-            .next_dispatch_at
-            .map(|deadline| now >= deadline)
-            .unwrap_or(true);
-        if due {
-            let coalesced = self.pending.take().is_some();
+        let coalesced = self.pending.replace(position).is_some();
+        if !coalesced {
             self.next_dispatch_at = Some(now + MOUSE_MOTION_INTERVAL);
-            MouseMotionDecision::dispatch(position, coalesced)
-        } else {
-            let coalesced = self.pending.replace(position).is_some();
-            MouseMotionDecision::queued(coalesced)
         }
+        MouseMotionDecision::queued(coalesced)
     }
 
     pub fn take_due(&mut self, now: Instant) -> Option<T> {
@@ -64,17 +57,18 @@ impl<T> MouseMotionCoalescer<T> {
             return None;
         }
 
-        self.next_dispatch_at = Some(now + MOUSE_MOTION_INTERVAL);
+        self.next_dispatch_at = None;
         self.pending.take()
     }
 
-    pub fn take_for_render(&mut self, now: Instant) -> Option<T> {
-        self.take_due(now)
+    pub fn take_for_render(&mut self, _now: Instant) -> Option<T> {
+        self.next_dispatch_at = None;
+        self.pending.take()
     }
 
-    pub fn flush(&mut self, now: Instant) -> Option<T> {
+    pub fn flush(&mut self, _now: Instant) -> Option<T> {
         let position = self.pending.take()?;
-        self.next_dispatch_at = Some(now + MOUSE_MOTION_INTERVAL);
+        self.next_dispatch_at = None;
         Some(position)
     }
 
@@ -102,17 +96,14 @@ mod tests {
     }
 
     #[test]
-    fn enabled_policy_dispatches_at_most_once_per_interval_and_keeps_latest() {
+    fn enabled_policy_queues_motion_and_idle_fallback_keeps_latest() {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(
-            policy.push(1, start),
-            MouseMotionDecision::dispatch(1, false)
-        );
+        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
         assert_eq!(
             policy.push(2, start + Duration::from_millis(1)),
-            MouseMotionDecision::queued(false)
+            MouseMotionDecision::queued(true)
         );
         assert_eq!(
             policy.push(3, start + Duration::from_millis(2)),
@@ -127,19 +118,20 @@ mod tests {
     }
 
     #[test]
-    fn a_new_position_at_the_deadline_replaces_one_pending_position() {
+    fn a_new_position_at_the_idle_deadline_replaces_the_pending_position() {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start).dispatch, Some(1));
+        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
         assert_eq!(
             policy.push(2, start + Duration::from_millis(1)),
-            MouseMotionDecision::queued(false)
+            MouseMotionDecision::queued(true)
         );
         assert_eq!(
             policy.push(3, start + MOUSE_MOTION_INTERVAL),
-            MouseMotionDecision::dispatch(3, true)
+            MouseMotionDecision::queued(true)
         );
+        assert_eq!(policy.take_due(start + MOUSE_MOTION_INTERVAL), Some(3));
     }
 
     #[test]
@@ -147,7 +139,7 @@ mod tests {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start).dispatch, Some(1));
+        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
         policy.push(2, start + Duration::from_millis(1));
         policy.push(3, start + Duration::from_millis(2));
 
@@ -156,20 +148,23 @@ mod tests {
     }
 
     #[test]
-    fn render_flush_does_not_bypass_the_dispatch_interval() {
+    fn enabled_motion_is_delivered_once_on_the_next_rendered_frame() {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start).dispatch, Some(1));
-        policy.push(2, start + Duration::from_millis(1));
+        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
+        assert_eq!(
+            policy.push(2, start + Duration::from_millis(1)),
+            MouseMotionDecision::queued(true)
+        );
 
         assert_eq!(
             policy.take_for_render(start + Duration::from_millis(2)),
-            None
+            Some(2)
         );
         assert_eq!(
-            policy.take_for_render(start + MOUSE_MOTION_INTERVAL),
-            Some(2)
+            policy.take_for_render(start + Duration::from_millis(2)),
+            None
         );
     }
 }

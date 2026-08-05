@@ -191,8 +191,17 @@ impl TexturePool {
                 bucket.pool.truncate_available(*keep);
             }
         }
-        self.pools
-            .retain(|_, bucket| bucket.pool.available_len() != 0);
+        // A bucket with nothing available is not necessarily a cold bucket -- it is also what the
+        // hottest size in the frame looks like when every one of its textures is still checked out
+        // at maintenance time. Dropping it here drops the `Arc` behind the free list, so the
+        // `Weak` upgrade in `PoolEntry::drop` fails and those textures are destroyed instead of
+        // returned, guaranteeing a fresh allocation next frame for exactly the size that is reused
+        // the most. Keep buckets that are still within their idle window regardless.
+        let current_frame = self.submitted_frame;
+        self.pools.retain(|_, bucket| {
+            bucket.pool.available_len() != 0
+                || current_frame.saturating_sub(bucket.last_used_frame) <= limits.max_idle_frames
+        });
 
         let globals_keys: Vec<GlobalsKey> = self.globals_cache.keys().copied().collect();
         let globals_last_used: Vec<u64> = globals_keys
@@ -456,6 +465,46 @@ mod tests {
         pool.finish_frame();
 
         assert!(pool.pools.is_empty());
+    }
+
+    #[test]
+    fn bounded_pool_keeps_a_hot_bucket_whose_textures_are_all_still_checked_out() {
+        let mut pool = TexturePool::new(
+            OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
+                max_cached_bytes: 384 * 1024 * 1024,
+                max_cached_entries: 128,
+                max_idle_frames: 1,
+                max_cached_globals: 32,
+            }),
+            #[cfg(feature = "aether_metrics")]
+            TexturePoolKind::General,
+        );
+        let key = TextureKey {
+            size: wgpu::Extent3d {
+                width: 2560,
+                height: 1440,
+                depth_or_array_layers: 1,
+            },
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            sample_count: 4,
+        };
+        // Used this very frame, but every texture is still handed out, so nothing is available.
+        pool.pools.insert(
+            key,
+            TextureBucket {
+                pool: BufferPool::new(Box::new(|_, _| unreachable!())),
+                bytes_per_entry: Some(2560 * 1440 * 4 * 4),
+                last_used_frame: 0,
+            },
+        );
+
+        pool.finish_frame();
+
+        assert!(
+            pool.pools.contains_key(&key),
+            "a bucket used this frame must survive so its textures can return to it"
+        );
     }
 
     #[test]

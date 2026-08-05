@@ -6,6 +6,7 @@ static BITMAP_CACHE_HIT_FAST_PATH: AtomicBool = AtomicBool::new(false);
 static AVM2_BROADCAST_FAST_PATH: AtomicBool = AtomicBool::new(false);
 static FILTERLESS_HOT_CACHE_BYPASS: AtomicBool = AtomicBool::new(false);
 static ADAPTIVE_AVATAR_CACHE: AtomicBool = AtomicBool::new(false);
+static IDLE_GPU_UPLOAD_EVICTION: AtomicBool = AtomicBool::new(false);
 
 /// Enable the experimental clean bitmap-cache hit fast path.
 ///
@@ -54,6 +55,20 @@ pub fn set_adaptive_avatar_cache_enabled(enabled: bool) {
 #[inline]
 pub fn adaptive_avatar_cache_enabled() -> bool {
     ADAPTIVE_AVATAR_CACHE.load(Ordering::Relaxed)
+}
+
+/// Periodically drop GPU uploads for bitmaps that are no longer being drawn.
+///
+/// Uploads are lazy and, without this, were only released when a `Loader` was explicitly
+/// unloaded -- which AQW never does, so every bitmap ever drawn stayed resident.
+#[inline]
+pub fn set_idle_gpu_upload_eviction_enabled(enabled: bool) {
+    IDLE_GPU_UPLOAD_EVICTION.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn idle_gpu_upload_eviction_enabled() -> bool {
+    IDLE_GPU_UPLOAD_EVICTION.load(Ordering::Relaxed)
 }
 
 /// Match the exact public AQW avatar class without allocating a qualified class name or parsing

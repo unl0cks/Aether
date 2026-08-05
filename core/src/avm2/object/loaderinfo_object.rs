@@ -264,6 +264,24 @@ impl<'gc> LoaderInfoObject<'gc> {
     }
 
     pub fn unload(self, context: &mut UpdateContext<'gc>) {
+        // Release the unloaded movie's cached GPU uploads.
+        //
+        // Its library cannot simply be dropped: an application domain holds a strong
+        // reference to the movie for every script it has ever exported, and those entries
+        // are never removed. Without this, every bitmap in every SWF ever loaded keeps a GPU
+        // texture for the life of the process. AQW loads a separate SWF per equipment piece
+        // per player, which measured 4,396 live textures and ~8.5 GB of GPU memory.
+        let unloaded_movie = self.0.loaded_stream.borrow().movie().clone();
+        let released = context
+            .library
+            .release_gpu_resources_for_movie(&unloaded_movie);
+        if released > 0 {
+            tracing::debug!(
+                "Released {released} cached GPU uploads from {}",
+                unloaded_movie.url()
+            );
+        }
+
         // Reset properties
         let movie = &context.root_swf;
         let empty_swf = Arc::new(SwfMovie::empty(movie.version(), Some(movie.url().into())));

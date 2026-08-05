@@ -119,7 +119,12 @@ impl<'gc> Avm2ClassRegistry<'gc> {
 #[derive(Collect)]
 #[collect(no_drop)]
 pub struct MovieLibrary<'gc> {
-    swf: Arc<SwfMovie>,
+    /// Weak on purpose. `MovieLibraries` keys this library by a weak reference to the same
+    /// movie so the library is released once nothing references the movie any more. A strong
+    /// reference here would keep that key alive forever, making every SWF ever loaded — and
+    /// every character and bitmap it owns — resident for the lifetime of the process.
+    #[collect(require_static)]
+    swf: Weak<SwfMovie>,
     characters: HashMap<CharacterId, Character<'gc>>,
     export_characters: Avm1PropertyMap<'gc, CharacterId>,
     imported_assets: HashMap<AvmString<'gc>, CharacterId>,
@@ -131,7 +136,7 @@ pub struct MovieLibrary<'gc> {
 impl<'gc> MovieLibrary<'gc> {
     pub fn new(swf: Arc<SwfMovie>) -> Self {
         Self {
-            swf,
+            swf: Arc::downgrade(&swf),
             characters: HashMap::new(),
             imported_assets: HashMap::new(),
             export_characters: Avm1PropertyMap::new(),
@@ -139,6 +144,34 @@ impl<'gc> MovieLibrary<'gc> {
             fonts: Default::default(),
             avm2_domain: None,
         }
+    }
+
+    /// Drop every cached GPU upload owned by this library, returning how many were released.
+    ///
+    /// The compressed sources are kept, so anything still drawing simply re-uploads. This
+    /// exists because a library cannot be dropped when its movie is unloaded: an application
+    /// domain holds a strong reference to the movie for every script it has ever exported,
+    /// and those entries are never removed.
+    pub fn release_gpu_resources(&self) -> usize {
+        self.characters
+            .values()
+            .filter(|character| match character {
+                Character::Bitmap(bitmap) => bitmap.release_bitmap_handle(),
+                _ => false,
+            })
+            .count()
+    }
+
+    /// Evict cached GPU uploads that have not been drawn since the previous sweep,
+    /// returning how many were released.
+    pub fn sweep_idle_gpu_uploads(&self) -> usize {
+        self.characters
+            .values()
+            .filter(|character| match character {
+                Character::Bitmap(bitmap) => bitmap.sweep_idle_gpu_upload(),
+                _ => false,
+            })
+            .count()
     }
 
     /// Registers a character; returns `true` if successful, or `false` if a character with
@@ -254,9 +287,13 @@ impl<'gc> MovieLibrary<'gc> {
     ) -> Option<DisplayObject<'gc>> {
         match character {
             Character::Bitmap(bitmap) => {
+                // Anything instantiating from this library is holding the movie alive, so
+                // this upgrade succeeds in practice; if the movie is gone there is nothing
+                // sensible to instantiate from.
+                let swf = self.swf.upgrade()?;
                 let avm2_class = bitmap.avm2_class();
                 let bitmap = bitmap.compressed().decode().unwrap();
-                let bitmap = Bitmap::new(mc, id, bitmap, self.swf.clone());
+                let bitmap = Bitmap::new(mc, id, bitmap, swf);
                 bitmap.set_avm2_bitmapdata_class(mc, avm2_class);
                 Some(bitmap.instantiate(mc))
             }
@@ -476,6 +513,31 @@ impl<'gc> Library<'gc> {
 
     pub fn library_for_movie_mut(&mut self, movie: Arc<SwfMovie>) -> &mut MovieLibrary<'gc> {
         self.movie_libraries.get_or_insert_mut(movie)
+    }
+
+    /// Evict cached GPU uploads across every movie that have not been drawn since the
+    /// previous sweep, returning how many were released.
+    ///
+    /// Uploads are lazy, so anything on screen re-uploads within a frame of being drawn
+    /// again. This is the only release path that does not depend on content ever being
+    /// unloaded, which matters because AQW drops its `Loader`s rather than reusing them.
+    pub fn sweep_idle_gpu_uploads(&self) -> usize {
+        self.movie_libraries
+            .0
+            .values()
+            .map(MovieLibrary::sweep_idle_gpu_uploads)
+            .sum()
+    }
+
+    /// Drop the cached GPU uploads belonging to one movie, returning how many were released.
+    ///
+    /// Called when a movie's content is unloaded. The library itself has to stay, because the
+    /// application domain still references the movie, but its GPU textures do not.
+    pub fn release_gpu_resources_for_movie(&self, movie: &Arc<SwfMovie>) -> usize {
+        self.movie_libraries
+            .get(movie)
+            .map(MovieLibrary::release_gpu_resources)
+            .unwrap_or_default()
     }
 
     pub fn known_movies(&self) -> impl Iterator<Item = Arc<SwfMovie>> {
@@ -832,5 +894,31 @@ impl<'gc> FontMap<'gc> {
 
     pub fn all(&self) -> Vec<Font<'gc>> {
         self.0.values().copied().collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_movie_library_does_not_keep_its_own_movie_alive() {
+        // The library map is keyed by a weak reference precisely so that a movie's
+        // characters are released once nothing references the movie any more. A strong
+        // `Arc` stored inside the value defeats that: the entry keeps its own key alive,
+        // so every SWF ever loaded stays resident along with every bitmap it owns. AQW
+        // loads a separate SWF per equipment piece per player, so this accumulates without
+        // bound for as long as the client runs.
+        let mut libraries = MovieLibraries::<'static>::new();
+        let movie = Arc::new(SwfMovie::empty(32, None));
+        libraries.get_or_insert_mut(movie.clone());
+        assert_eq!(libraries.known_movies().count(), 1);
+
+        drop(movie);
+        assert_eq!(
+            libraries.known_movies().count(),
+            0,
+            "a movie library must not outlive the movie it belongs to"
+        );
     }
 }

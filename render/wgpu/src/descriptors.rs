@@ -1,3 +1,4 @@
+use crate::device_status::{DeviceStatus, fault_from_device_lost, fault_from_uncaptured_error};
 use crate::filters::{FilterVertex, Filters};
 use crate::layouts::BindLayouts;
 use crate::pipelines::VERTEX_BUFFERS_DESCRIPTION_POS;
@@ -25,6 +26,31 @@ pub struct Descriptors {
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
     pub filters: Filters,
+    /// Records the first fatal GPU fault so callers can shut down cleanly.
+    pub device_status: DeviceStatus,
+}
+
+/// Route wgpu's device-loss and uncaptured-error channels into `status`.
+///
+/// Without these, wgpu discards device-loss notifications entirely and turns every
+/// uncaptured error into a panic from inside its own default handler.
+fn install_device_fault_handlers(device: &wgpu::Device, status: &DeviceStatus) {
+    let lost_status = status.clone();
+    device.set_device_lost_callback(move |reason, message| {
+        if let Some(fault) = fault_from_device_lost(reason, &message)
+            && lost_status.record(fault)
+        {
+            tracing::error!("Graphics device lost: {message}");
+        }
+    });
+
+    let error_status = status.clone();
+    device.on_uncaptured_error(Arc::new(move |error| {
+        let fault = fault_from_uncaptured_error(&error);
+        if error_status.record(fault) {
+            tracing::error!("Unrecoverable graphics error: {error}");
+        }
+    }));
 }
 
 impl Debug for Descriptors {
@@ -40,6 +66,9 @@ impl Descriptors {
         device: wgpu::Device,
         queue: wgpu::Queue,
     ) -> Self {
+        let device_status = DeviceStatus::new();
+        install_device_fault_handlers(&device, &device_status);
+
         let limits = device.limits();
         let bind_layouts = BindLayouts::new(&device);
         let bitmap_samplers = BitmapSamplers::new(&device);
@@ -62,6 +91,7 @@ impl Descriptors {
             shaders,
             pipelines: Default::default(),
             filters,
+            device_status,
         }
     }
 
