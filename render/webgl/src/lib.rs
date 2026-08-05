@@ -1567,7 +1567,14 @@ impl CommandHandler for WebGlRenderBackend {
         self.mask_state_dirty = true;
     }
 
-    fn blend(&mut self, commands: CommandList, blend: RenderBlendMode) {
+    fn blend(
+        &mut self,
+        commands: CommandList,
+        blend: RenderBlendMode,
+        // This backend blends in place against the current canvas rather than into a sub-target, so
+        // there is no allocation for a region hint to shrink.
+        _bounds: Option<swf::Rectangle<swf::Twips>>,
+    ) {
         self.push_blend_mode(blend);
         commands.execute(self);
         self.pop_blend_mode();

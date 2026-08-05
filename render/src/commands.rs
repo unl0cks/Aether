@@ -3,7 +3,7 @@ use crate::bitmap::{BitmapHandle, BitmapSize, PixelSnapping};
 use crate::matrix::Matrix;
 use crate::pixel_bender::PixelBenderShaderHandle;
 use crate::transform::Transform;
-use swf::{BlendMode, Color};
+use swf::{BlendMode, Color, Rectangle, Twips};
 
 pub trait CommandHandler {
     fn render_bitmap(
@@ -25,7 +25,18 @@ pub trait CommandHandler {
     fn deactivate_mask(&mut self);
     fn pop_mask(&mut self);
 
-    fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode);
+    /// Draw `commands` into a sub-target and composite it back with `blend_mode`.
+    ///
+    /// `bounds` is where those commands land in the CURRENT render target's space, filter growth
+    /// already included, and lets a backend size that sub-target to its contents instead of to the
+    /// whole surface. `None` means the caller could not work it out, and the backend must fall back
+    /// to a full-surface target — correct, just as expensive as it always was.
+    fn blend(
+        &mut self,
+        commands: CommandList,
+        blend_mode: RenderBlendMode,
+        bounds: Option<Rectangle<Twips>>,
+    );
 }
 
 /// Holds either a normal BlendMode, or the shader for BlendMode.SHADER.
@@ -90,7 +101,9 @@ impl CommandList {
                 Command::ActivateMask => handler.activate_mask(),
                 Command::DeactivateMask => handler.deactivate_mask(),
                 Command::PopMask => handler.pop_mask(),
-                Command::Blend(commands, blend_mode) => handler.blend(commands, blend_mode),
+                Command::Blend(commands, blend_mode, bounds) => {
+                    handler.blend(commands, blend_mode, bounds)
+                }
                 Command::RenderAlphaMask {
                     maskee_commands,
                     mask_commands,
@@ -204,9 +217,15 @@ impl CommandHandler for CommandList {
     }
 
     #[inline]
-    fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode) {
+    fn blend(
+        &mut self,
+        commands: CommandList,
+        blend_mode: RenderBlendMode,
+        bounds: Option<Rectangle<Twips>>,
+    ) {
         if self.maskers_in_progress <= 1 {
-            self.commands.push(Command::Blend(commands, blend_mode));
+            self.commands
+                .push(Command::Blend(commands, blend_mode, bounds));
         }
     }
 }
@@ -248,5 +267,5 @@ pub enum Command {
     ActivateMask,
     DeactivateMask,
     PopMask,
-    Blend(CommandList, RenderBlendMode),
+    Blend(CommandList, RenderBlendMode, Option<Rectangle<Twips>>),
 }

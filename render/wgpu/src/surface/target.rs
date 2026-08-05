@@ -206,6 +206,9 @@ pub struct CommandTarget {
 }
 
 impl CommandTarget {
+    /// A target covering the whole space its commands were recorded in. Filters and the main stage
+    /// surface all want this.
+    #[expect(clippy::too_many_arguments)]
     pub fn new(
         descriptors: &Descriptors,
         pool: &mut TexturePool,
@@ -215,7 +218,34 @@ impl CommandTarget {
         render_target_mode: RenderTargetMode,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Self {
-        let globals = pool.get_globals(descriptors, size.width, size.height);
+        Self::new_at(
+            (0, 0),
+            descriptors,
+            pool,
+            size,
+            format,
+            sample_count,
+            render_target_mode,
+            encoder,
+        )
+    }
+
+    /// A target covering only `size` pixels starting at `origin` within that space. Used by blends,
+    /// which otherwise pay for a stage-sized texture per node no matter how small the blended object
+    /// is. `origin` reaches the shader through the globals view matrix, so the commands keep their
+    /// original coordinates.
+    #[expect(clippy::too_many_arguments)]
+    pub fn new_at(
+        origin: (u32, u32),
+        descriptors: &Descriptors,
+        pool: &mut TexturePool,
+        size: wgpu::Extent3d,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        render_target_mode: RenderTargetMode,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Self {
+        let globals = pool.get_globals(descriptors, origin.0, origin.1, size.width, size.height);
 
         let mut make_pooled_frame_buffer = || {
             FrameBuffer::new(

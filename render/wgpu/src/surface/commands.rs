@@ -1,4 +1,5 @@
 use crate::backend::RenderTargetMode;
+use crate::blend_region::{BlendRegion, plan_blend_region};
 use crate::blend::TrivialBlend;
 use crate::blend::{BlendType, ComplexBlend};
 use crate::buffer_builder::BufferBuilder;
@@ -17,7 +18,7 @@ use ruffle_render::pixel_bender::PixelBenderShaderHandle;
 use ruffle_render::quality::StageQuality;
 use ruffle_render::transform::Transform;
 use std::mem;
-use swf::{BlendMode, Color, ColorTransform, Twips};
+use swf::{BlendMode, Color, ColorTransform, Rectangle, Twips};
 use wgpu::Backend;
 
 use super::target::PoolOrArcTexture;
@@ -511,6 +512,7 @@ pub fn chunk_blends<'a>(
     draw_encoder: &mut wgpu::CommandEncoder,
     meshes: &'a Vec<Mesh>,
     quality: StageQuality,
+    origin: (u32, u32),
     width: u32,
     height: u32,
     nearest_layer: LayerRef,
@@ -523,6 +525,7 @@ pub fn chunk_blends<'a>(
         draw_encoder,
         meshes,
         quality,
+        origin,
         width,
         height,
         nearest_layer,
@@ -534,6 +537,9 @@ pub fn chunk_blends<'a>(
 struct WgpuCommandHandler<'a> {
     descriptors: &'a Descriptors,
     quality: StageQuality,
+    /// Where this handler's target sits in the space its commands were recorded in. Zero for the
+    /// stage surface; the region's corner for a blend rendering into a sub-target.
+    origin: (u32, u32),
     width: u32,
     height: u32,
     nearest_layer: LayerRef<'a>,
@@ -560,6 +566,7 @@ impl<'a> WgpuCommandHandler<'a> {
         draw_encoder: &'a mut wgpu::CommandEncoder,
         meshes: &'a Vec<Mesh>,
         quality: StageQuality,
+        origin: (u32, u32),
         width: u32,
         height: u32,
         nearest_layer: LayerRef<'a>,
@@ -575,6 +582,7 @@ impl<'a> WgpuCommandHandler<'a> {
         Self {
             descriptors,
             quality,
+            origin,
             width,
             height,
             nearest_layer,
@@ -690,22 +698,55 @@ impl<'a> WgpuCommandHandler<'a> {
 }
 
 impl CommandHandler for WgpuCommandHandler<'_> {
-    fn blend(&mut self, commands: CommandList, blend_mode: RenderBlendMode) {
-        let surface = Surface::new(
-            self.descriptors,
-            self.quality,
-            self.width,
-            self.height,
-            wgpu::TextureFormat::Rgba8Unorm,
-        );
+    fn blend(
+        &mut self,
+        commands: CommandList,
+        blend_mode: RenderBlendMode,
+        bounds: Option<Rectangle<Twips>>,
+    ) {
         let target_layer = if let RenderBlendMode::Builtin(BlendMode::Layer) = &blend_mode {
             LayerRef::Current
         } else {
             self.nearest_layer
         };
         let blend_type = BlendType::from(blend_mode);
+
+        // Where this blend's sub-target actually has to be. Only trivial blends can move: complex
+        // and shader blends composite against the PARENT's blend buffer through
+        // `whole_frame_bind_group`, which assumes the two are the same size and aligned, so handing
+        // them a smaller target would misplace the result. Those keep a full-surface target, which
+        // is what every blend used to get.
+        let region = match (&blend_type, bounds) {
+            (BlendType::Trivial(_), Some(bounds)) => {
+                // Core has already grown these bounds for the object's filters, so the region is
+                // clamped to the surface and nothing else.
+                match plan_blend_region(
+                    bounds,
+                    &[],
+                    (1.0, 1.0),
+                    self.origin,
+                    self.width,
+                    self.height,
+                ) {
+                    Some(region) => region,
+                    // None of it lands on the surface, so none of it can be seen. Drawing it would
+                    // cost a target, a render pass and a composite to produce nothing.
+                    None => return,
+                }
+            }
+            _ => BlendRegion::at(self.origin, self.width, self.height),
+        };
+
+        let surface = Surface::new(
+            self.descriptors,
+            self.quality,
+            region.width,
+            region.height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
         let clear_color = blend_type.default_color();
-        let target = surface.draw_commands(
+        let target = surface.draw_commands_at(
+            (region.x, region.y),
             RenderTargetMode::FreshWithColor(clear_color),
             self.descriptors,
             self.meshes,
@@ -732,8 +773,14 @@ impl CommandHandler for WgpuCommandHandler<'_> {
 
         match blend_type {
             BlendType::Trivial(blend_mode) => {
+                // The sub-target is a unit quad scaled to its own size and moved to where it sits
+                // on the surface. With a full-surface region the translation is zero and this is
+                // the matrix it always was.
                 let transform = Transform {
-                    matrix: Matrix::scale(target.width() as f32, target.height() as f32),
+                    matrix: Matrix::translate(
+                        Twips::from_pixels(region.x as f64),
+                        Twips::from_pixels(region.y as f64),
+                    ) * Matrix::scale(region.width as f32, region.height as f32),
                     color_transform: Default::default(),
                     perspective_projection: None,
                 };
@@ -935,7 +982,8 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             wgpu::TextureFormat::Rgba8Unorm,
         );
 
-        let maskee = surface.draw_commands(
+        let maskee = surface.draw_commands_at(
+            self.origin,
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             self.descriptors,
             self.meshes,
@@ -947,10 +995,14 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.texture_pool,
         );
         maskee.ensure_cleared(self.draw_encoder);
-        let matrix = Matrix::scale(maskee.width() as f32, maskee.height() as f32);
+        let matrix = Matrix::translate(
+            Twips::from_pixels(self.origin.0 as f64),
+            Twips::from_pixels(self.origin.1 as f64),
+        ) * Matrix::scale(maskee.width() as f32, maskee.height() as f32);
         let maskee = maskee.take_color_texture();
 
-        let mask = surface.draw_commands(
+        let mask = surface.draw_commands_at(
+            self.origin,
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             self.descriptors,
             self.meshes,

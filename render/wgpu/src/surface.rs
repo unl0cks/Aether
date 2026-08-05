@@ -115,7 +115,40 @@ impl Surface {
         nearest_layer: LayerRef<'frame>,
         texture_pool: &mut TexturePool,
     ) -> CommandTarget {
-        let target = CommandTarget::new(
+        self.draw_commands_at(
+            (0, 0),
+            render_target_mode,
+            descriptors,
+            meshes,
+            commands,
+            staging_belt,
+            dynamic_transforms,
+            draw_encoder,
+            nearest_layer,
+            texture_pool,
+        )
+    }
+
+    /// As `draw_commands`, but the target covers only this surface's size starting at `origin` in
+    /// the space the commands were recorded in. Blends use this to get a target the size of the
+    /// blended object rather than the size of the stage.
+    #[expect(clippy::too_many_arguments)]
+    #[instrument(level = "debug", skip_all)]
+    pub fn draw_commands_at<'frame, 'global: 'frame>(
+        &self,
+        origin: (u32, u32),
+        render_target_mode: RenderTargetMode,
+        descriptors: &'global Descriptors,
+        meshes: &'global Vec<Mesh>,
+        commands: CommandList,
+        staging_belt: &'global mut wgpu::util::StagingBelt,
+        dynamic_transforms: &'global DynamicTransforms,
+        draw_encoder: &'frame mut wgpu::CommandEncoder,
+        nearest_layer: LayerRef<'frame>,
+        texture_pool: &mut TexturePool,
+    ) -> CommandTarget {
+        let target = CommandTarget::new_at(
+            origin,
             descriptors,
             texture_pool,
             self.size,
@@ -135,6 +168,7 @@ impl Surface {
             draw_encoder,
             meshes,
             self.quality,
+            origin,
             target.width(),
             target.height(),
             match nearest_layer {

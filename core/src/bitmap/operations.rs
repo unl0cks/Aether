@@ -1593,9 +1593,13 @@ pub fn draw<'gc>(
         render_context.commands
     } else {
         let mut commands = CommandList::new();
+        // No bounds: this is BitmapData.draw, where the commands are the caller's entire display
+        // object rendered into a bitmap of its own. There is no cheaper region to find — the target
+        // is already exactly the size of the thing being drawn — so the backend uses all of it.
         commands.blend(
             render_context.commands,
             RenderBlendMode::Builtin(blend_mode),
+            None,
         );
         commands
     };

@@ -133,9 +133,15 @@ impl TexturePool {
         }
     }
 
+    /// Globals for a target covering `[offset_x, offset_x + viewport_width]` by
+    /// `[offset_y, offset_y + viewport_height]`. The offset is part of the cache key: two targets of
+    /// the same size looking at different parts of the stage need different view matrices, and
+    /// sharing one would draw every blend in the wrong place.
     pub fn get_globals(
         &mut self,
         descriptors: &Descriptors,
+        offset_x: u32,
+        offset_y: u32,
         viewport_width: u32,
         viewport_height: u32,
     ) -> Arc<Globals> {
@@ -143,6 +149,8 @@ impl TexturePool {
         let entry = self
             .globals_cache
             .entry(GlobalsKey {
+                offset_x,
+                offset_y,
                 viewport_width,
                 viewport_height,
             })
@@ -150,6 +158,8 @@ impl TexturePool {
                 globals: Arc::new(Globals::new(
                     &descriptors.device,
                     &descriptors.bind_layouts.globals,
+                    offset_x,
+                    offset_y,
                     viewport_width,
                     viewport_height,
                 )),
@@ -245,6 +255,8 @@ struct TextureKey {
 
 #[derive(Copy, Clone, Debug, Hash, Eq, PartialEq)]
 struct GlobalsKey {
+    offset_x: u32,
+    offset_y: u32,
     viewport_width: u32,
     viewport_height: u32,
 }

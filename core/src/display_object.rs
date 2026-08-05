@@ -1890,7 +1890,20 @@ pub fn render_base<'gc>(
             } else {
                 RenderBlendMode::Builtin(blend_mode.try_into().unwrap())
             };
-            context.commands.blend(sub_commands, render_blend_mode);
+            // Where these commands actually land, so the backend can size the blend's sub-target to
+            // them instead of to the whole stage. Measured before the transform stack is popped, so
+            // it is in the current render target's space — the same space the commands were recorded
+            // in. `true` includes this object's own filters: a glow draws OUTSIDE the object, and a
+            // target sized to the bare bounds would clip it.
+            let stage_matrix = context.stage.view_matrix();
+            let blend_bounds = this.render_bounds_with_transform(
+                &context.transform_stack.transform().matrix,
+                true,
+                &stage_matrix,
+            );
+            context
+                .commands
+                .blend(sub_commands, render_blend_mode, Some(blend_bounds));
         }
     }
 
