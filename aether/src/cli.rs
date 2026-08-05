@@ -87,13 +87,6 @@ pub struct Opt {
     #[clap(long, conflicts_with = "aether_aqw_timeline_child_rebind")]
     pub no_aether_aqw_timeline_child_rebind: bool,
 
-    /// Skip recursive bounds/filter preparation for clean AQW bitmap-cache hits.
-    #[clap(long, conflicts_with = "no_aether_aqw_cache_hit_fast_path")]
-    pub aether_aqw_cache_hit_fast_path: bool,
-
-    /// Disable AQW's conservative clean bitmap-cache hit fast path.
-    #[clap(long, conflicts_with = "aether_aqw_cache_hit_fast_path")]
-    pub no_aether_aqw_cache_hit_fast_path: bool,
 
     /// Disable internal bitmap reuse for visually stable AQW AvatarMC roots.
     #[clap(long)]

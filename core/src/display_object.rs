@@ -312,33 +312,6 @@ impl BitmapCache {
             .then_some("stage_scale_change")
     }
 
-    /// Return the geometry needed to draw an unquestionably clean cache hit without walking the
-    /// display subtree again. Translation is intentionally ignored, matching Flash cache behavior.
-    #[cfg(feature = "aether_performance")]
-    fn fast_hit_info(
-        &self,
-        other: &Matrix,
-        stage_matrix: &Matrix,
-    ) -> Option<(BitmapHandle, Point<Twips>, Point<i32>, (u32, u32))> {
-        if self.bitmap.is_none()
-            || self.matrix_a.is_nan()
-            || self.matrix_a != other.a
-            || self.matrix_b != other.b
-            || self.matrix_c != other.c
-            || self.matrix_d != other.d
-            || self.stage_scale_a != stage_matrix.a
-            || self.stage_scale_d != stage_matrix.d
-        {
-            return None;
-        }
-
-        Some((
-            self.handle()?,
-            self.bounds_offset,
-            self.draw_offset,
-            self.output_size(),
-        ))
-    }
 
     /// Clears any dirtiness and ensure there's an appropriately sized texture allocated
     #[expect(clippy::too_many_arguments)]
@@ -1529,47 +1502,8 @@ pub fn render_base<'gc>(
         let base_transform = context.transform_stack.transform();
         let stage_matrix = context.stage.view_matrix();
 
-        #[cfg(feature = "aether_performance")]
-        let fast_hit = if crate::aether_performance::bitmap_cache_hit_fast_path_enabled() {
-            // Keep the base wrapper alive for at least as long as the RefMut returned by
-            // bitmap_cache_mut. Calling this.base().bitmap_cache_mut() directly creates a
-            // temporary base value that Rust correctly rejects as too short-lived.
-            let base = this.base();
-            let mut cache = base.bitmap_cache_mut();
-            cache.as_mut().and_then(|cache| {
-                cache
-                    .fast_hit_info(&base_transform.matrix, &stage_matrix)
-                    .map(|(handle, bounds_offset, draw_offset, logical_size)| {
-                        cache.note_cache_hit();
-                        DrawCacheInfo {
-                            handle,
-                            dirty: false,
-                            // The full-evaluation path below still needs this transform when the
-                            // fast path misses, so retain the original and clone only on a hit.
-                            base_transform: base_transform.clone(),
-                            bounds_offset,
-                            draw_offset,
-                            logical_width: logical_size.0,
-                            logical_height: logical_size.1,
-                            // Filters are only consumed when rebuilding the offscreen cache.
-                            filters: Vec::new(),
-                        }
-                    })
-            })
-        } else {
-            None
-        };
-        #[cfg(not(feature = "aether_performance"))]
-        let fast_hit: Option<DrawCacheInfo> = None;
 
-        if let Some(cache_info) = fast_hit {
-            #[cfg(feature = "aether_metrics")]
-            {
-                crate::aether_metrics::bitmap_cache_hit();
-                crate::aether_metrics::bitmap_cache_fast_hit();
-            }
-            Some(cache_info)
-        } else {
+        {
             #[cfg(feature = "aether_metrics")]
             crate::aether_metrics::bitmap_cache_full_evaluation();
 
@@ -4093,6 +4027,48 @@ mod avm2_lifecycle_dirty_tests {
                 .is_some_and(|cache| cache.matrix_a.is_nan())
         );
         assert!(base.contains_flag(DisplayObjectFlags::CACHE_INVALIDATED));
+    }
+
+    #[test]
+    #[cfg(feature = "aether_performance")]
+    fn a_content_size_change_alone_invalidates_the_cache() {
+        // A glow whose radius animates, a drop shadow, or damage text growing from three digits to
+        // four changes the cache's SOURCE SIZE while its transform stays identical. The full path
+        // calls that "size_change" and rebuilds. The fast path has to agree, or it hands back the
+        // previous frame's bitmap along with its stale draw_offset and output size — which is drawn
+        // clipped to the old rectangle and shifted by the old offset.
+        #[derive(Debug)]
+        struct FakeHandle;
+        impl ruffle_render::bitmap::BitmapHandleImpl for FakeHandle {}
+
+        let mut cache = BitmapCache::default();
+        let matrix = Matrix::scale(1.0, 1.0);
+        let stage = Matrix::scale(1.0, 1.0);
+        cache.bitmap = Some(ruffle_render::bitmap::BitmapInfo {
+            handle: BitmapHandle(std::sync::Arc::new(FakeHandle)),
+            width: 168,
+            height: 40,
+        });
+
+        cache.matrix_a = matrix.a;
+        cache.matrix_b = matrix.b;
+        cache.matrix_c = matrix.c;
+        cache.matrix_d = matrix.d;
+        cache.stage_scale_a = stage.a;
+        cache.stage_scale_d = stage.d;
+        cache.source_width = 120;
+        cache.source_height = 40;
+
+        // Same transform, larger content.
+        assert_eq!(
+            cache.dirty_reason(&matrix, 168, 40, &stage),
+            Some("size_change"),
+            "the full path must rebuild when the content grew"
+        );
+        // There is deliberately no fast path left to ask. `fast_hit_info` validated the transform
+        // and the stage scale but not this, so it answered "clean hit" here and served the previous
+        // frame's bitmap with its stale draw_offset and output size.
+
     }
 
     #[test]

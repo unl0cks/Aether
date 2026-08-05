@@ -277,15 +277,6 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    let cache_hit_fast_path_enabled = aqw_mode && preferences.cli.aether_aqw_cache_hit_fast_path;
-    ruffle_core::aether_performance::set_bitmap_cache_hit_fast_path_enabled(
-        cache_hit_fast_path_enabled,
-    );
-    if cache_hit_fast_path_enabled {
-        tracing::warn!(
-            "Experimental AQW bitmap-cache clean-hit fast path is enabled; compare visuals and metrics against a baseline"
-        );
-    }
 
     let adaptive_avatar_cache_enabled =
         aqw_mode && preferences.cli.aether_aqw_adaptive_avatar_cache;

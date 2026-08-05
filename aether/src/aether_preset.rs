@@ -38,7 +38,6 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     opt.aether_aqw_timeline_child_rebind = !opt.no_aether_aqw_timeline_child_rebind;
     opt.aether_aqw_mouse_motion_coalescing = !opt.no_aether_aqw_mouse_motion_coalescing;
     opt.aether_aqw_avm2_broadcast_fast_path = !opt.no_aether_aqw_avm2_broadcast_fast_path;
-    opt.aether_aqw_cache_hit_fast_path = !opt.no_aether_aqw_cache_hit_fast_path;
     opt.aether_aqw_adaptive_avatar_cache = !opt.no_aether_aqw_adaptive_avatar_cache;
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
@@ -153,42 +152,10 @@ mod tests {
         assert!(!movie.aether_aqw_timeline_child_rebind);
     }
 
-    #[test]
-    fn aqw_preset_enables_bitmap_cache_hit_fast_path_by_default() {
-        let opt = parse_and_apply(&["aether"]);
-        assert!(opt.aether_aqw_cache_hit_fast_path);
-    }
 
-    #[test]
-    fn aqw_preset_allows_bitmap_cache_hit_fast_path_opt_out() {
-        let opt = parse_and_apply(&["aether", "--no-aether-aqw-cache-hit-fast-path"]);
-        assert!(!opt.aether_aqw_cache_hit_fast_path);
-    }
 
-    #[test]
-    fn aqw_preset_accepts_retained_positive_bitmap_cache_hit_fast_path_flag() {
-        let opt = parse_and_apply(&["aether", "--aether-aqw-cache-hit-fast-path"]);
-        assert!(opt.aether_aqw_cache_hit_fast_path);
-    }
 
-    #[test]
-    fn bitmap_cache_hit_fast_path_flags_conflict() {
-        let parsed = Opt::try_parse_from([
-            "aether",
-            "--aether-aqw-cache-hit-fast-path",
-            "--no-aether-aqw-cache-hit-fast-path",
-        ]);
-        assert!(parsed.is_err());
-    }
 
-    #[test]
-    fn generic_and_explicit_movies_do_not_enable_bitmap_cache_hit_fast_path() {
-        let generic = parse_and_apply(&["aether", "--generic"]);
-        assert!(!generic.aether_aqw_cache_hit_fast_path);
-
-        let movie = parse_and_apply(&["aether", "https://example.invalid/movie.swf"]);
-        assert!(!movie.aether_aqw_cache_hit_fast_path);
-    }
 
     #[test]
     fn aqw_preset_enables_adaptive_avatar_cache_by_default() {

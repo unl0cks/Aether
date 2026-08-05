@@ -2,26 +2,11 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
-static BITMAP_CACHE_HIT_FAST_PATH: AtomicBool = AtomicBool::new(false);
 static AVM2_BROADCAST_FAST_PATH: AtomicBool = AtomicBool::new(false);
 static FILTERLESS_HOT_CACHE_BYPASS: AtomicBool = AtomicBool::new(false);
 static ADAPTIVE_AVATAR_CACHE: AtomicBool = AtomicBool::new(false);
 static IDLE_GPU_UPLOAD_EVICTION: AtomicBool = AtomicBool::new(false);
 
-/// Enable the experimental clean bitmap-cache hit fast path.
-///
-/// The optimization reuses cache geometry recorded at the last rebuild when the cache is
-/// still clean and its non-translation transform and stage scale are unchanged. This avoids
-/// recursively recomputing render bounds and preparing filters for a cache hit.
-#[inline]
-pub fn set_bitmap_cache_hit_fast_path_enabled(enabled: bool) {
-    BITMAP_CACHE_HIT_FAST_PATH.store(enabled, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn bitmap_cache_hit_fast_path_enabled() -> bool {
-    BITMAP_CACHE_HIT_FAST_PATH.load(Ordering::Relaxed)
-}
 
 #[inline]
 pub fn set_avm2_broadcast_fast_path_enabled(enabled: bool) {
@@ -102,25 +87,20 @@ mod tests {
 
     #[test]
     fn performance_switches_are_independent() {
-        set_bitmap_cache_hit_fast_path_enabled(false);
         set_avm2_broadcast_fast_path_enabled(true);
         set_filterless_hot_cache_bypass_enabled(false);
         set_adaptive_avatar_cache_enabled(false);
         assert!(avm2_broadcast_fast_path_enabled());
-        assert!(!bitmap_cache_hit_fast_path_enabled());
         assert!(!filterless_hot_cache_bypass_enabled());
         assert!(!adaptive_avatar_cache_enabled());
 
         set_avm2_broadcast_fast_path_enabled(false);
-        set_bitmap_cache_hit_fast_path_enabled(true);
         set_filterless_hot_cache_bypass_enabled(true);
         set_adaptive_avatar_cache_enabled(true);
         assert!(!avm2_broadcast_fast_path_enabled());
-        assert!(bitmap_cache_hit_fast_path_enabled());
         assert!(filterless_hot_cache_bypass_enabled());
         assert!(adaptive_avatar_cache_enabled());
 
-        set_bitmap_cache_hit_fast_path_enabled(false);
         set_filterless_hot_cache_bypass_enabled(false);
         set_adaptive_avatar_cache_enabled(false);
     }
