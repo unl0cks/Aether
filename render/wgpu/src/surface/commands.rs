@@ -445,6 +445,9 @@ pub enum Chunk {
         texture: PoolOrArcTexture,
         blend_mode: ChunkBlendMode,
         needs_stencil: bool,
+        /// Where this child sits in the target, when it covers less than all of it. `None` is a
+        /// full-surface child and composites exactly as it always has.
+        region: Option<(u32, u32, u32, u32)>,
     },
 }
 
@@ -697,6 +700,16 @@ impl<'a> WgpuCommandHandler<'a> {
     }
 }
 
+/// Whether COMPLEX and shader blends may shrink too, on top of `SHRINK_BLEND_TARGETS`.
+///
+/// Separate because the risk is different. A trivial blend is composited as a plain textured quad,
+/// so a region is just a smaller quad. A complex blend samples the parent's blend buffer alongside
+/// its own child texture, and the shaders derive one UV from clip position for both -- correct for
+/// the parent, wrong for a child that no longer covers the whole target. `region_frame_bind_group`
+/// supplies the remap. If an aura or a Multiply/Overlay/Alpha/Erase effect ever appears in the
+/// wrong place or at the wrong scale, this is the switch to try first.
+const SHRINK_COMPLEX_BLEND_TARGETS: bool = true;
+
 /// Grid that blend and mask sub-target regions snap out to.
 ///
 /// The pool keys buckets on exact dimensions, so content that drifts a pixel or two per frame while
@@ -743,8 +756,15 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // `whole_frame_bind_group`, which assumes the two are the same size and aligned, so handing
         // them a smaller target would misplace the result. Those keep a full-surface target, which
         // is what every blend used to get.
-        let region = match (&blend_type, bounds.filter(|_| SHRINK_BLEND_TARGETS)) {
-            (BlendType::Trivial(_), Some(bounds)) => {
+        let may_shrink = match blend_type {
+            BlendType::Trivial(_) => SHRINK_BLEND_TARGETS,
+            // Complex and shader blends composite against the parent's blend buffer, so the shader
+            // has to remap the child's UV -- see `region_frame_bind_group`. Separately switchable
+            // because that path is the one that can misplace an effect if the remap is wrong.
+            _ => SHRINK_BLEND_TARGETS && SHRINK_COMPLEX_BLEND_TARGETS,
+        };
+        let region = match (may_shrink, bounds.filter(|_| may_shrink)) {
+            (true, Some(bounds)) => {
                 // Core has already grown these bounds for the object's filters, so the region is
                 // clamped to the surface and nothing else.
                 match plan_blend_region(
@@ -878,6 +898,12 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                     texture: target.take_color_texture(),
                     blend_mode: chunk_blend_mode,
                     needs_stencil: self.num_masks > 0,
+                    region: (!region.is_full(self.origin, self.width, self.height)).then_some((
+                        region.x,
+                        region.y,
+                        region.width,
+                        region.height,
+                    )),
                 });
                 self.needs_stencil = self.num_masks > 0;
             }

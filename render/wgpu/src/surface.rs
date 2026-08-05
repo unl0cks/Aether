@@ -232,6 +232,9 @@ impl Surface {
                     texture,
                     blend_mode: ChunkBlendMode::Shader(shader),
                     needs_stencil,
+                    // PixelBender blends run through their own shader, which does not read the
+                    // region transform, so those are still allocated full-surface upstream.
+                    region: _,
                 } => {
                     assert!(!needs_stencil, "Shader blend mode not implemented in masks");
                     let parent_blend_buffer =
@@ -273,6 +276,7 @@ impl Surface {
                     texture,
                     blend_mode: ChunkBlendMode::Complex(blend_mode),
                     needs_stencil,
+                    region,
                 } => {
                     let parent = match blend_mode {
                         ComplexBlend::Alpha | ComplexBlend::Erase => {
@@ -372,7 +376,17 @@ impl Surface {
                         );
                     }
 
-                    render_pass.set_bind_group(1, target.whole_frame_bind_group(descriptors), &[0]);
+                    // A child covering only part of the target needs its quad placed there and its
+                    // own UV remap; a full-surface child keeps the cached whole-frame group.
+                    let region_bind_group = region
+                        .map(|region| target.region_frame_bind_group(descriptors, region));
+                    render_pass.set_bind_group(
+                        1,
+                        region_bind_group
+                            .as_ref()
+                            .unwrap_or_else(|| target.whole_frame_bind_group(descriptors)),
+                        &[0],
+                    );
                     render_pass.set_bind_group(2, &blend_bind_group, &[]);
 
                     render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));

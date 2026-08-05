@@ -26,7 +26,11 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
     // dst is the parent pixel we're blending onto
     var dst: vec4<f32> = textureSample(parent_texture, texture_sampler, in.uv);
     // src is the pixel that we want to apply
-    var src: vec4<f32> = textureSample(current_texture, texture_sampler, in.uv);
+    // `in.uv` is the position within the TARGET, which is what parent_texture wants. The child may
+    // be a smaller texture covering only part of that target, so it gets its own UV. The transform
+    // defaults to (1, 1, 0, 0) -- identity -- for every full-surface blend.
+    let src_uv = in.uv * transforms.bitmap_uv_scale.xy + transforms.bitmap_uv_scale.zw;
+    var src: vec4<f32> = textureSample(current_texture, texture_sampler, src_uv);
 
     // Flash does the following, which makes this not a pure multiply:
     // If src.a is 0, don't write anything

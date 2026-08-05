@@ -197,6 +197,10 @@ pub struct CommandTarget {
     resolve_buffer: Option<ResolveBuffer>,
     depth: OnceCell<StencilBuffer>,
     globals: Arc<Globals>,
+    /// Where this target sits in the space its commands were recorded in. Zero for the stage
+    /// surface and for filters; a region's corner for a blend or mask sub-target. The globals view
+    /// matrix is built around it, so any quad drawn over this target has to agree.
+    origin: (u32, u32),
     size: wgpu::Extent3d,
     format: wgpu::TextureFormat,
     sample_count: u32,
@@ -317,7 +321,7 @@ impl CommandTarget {
                     format,
                     frame_buffer.texture.view(),
                     &texture.create_view(&Default::default()),
-                    get_whole_frame_bind_group(&whole_frame_bind_group, descriptors, size),
+                    get_whole_frame_bind_group(&whole_frame_bind_group, descriptors, origin, size),
                     &globals,
                     sample_count,
                     encoder,
@@ -337,6 +341,7 @@ impl CommandTarget {
             resolve_buffer,
             depth: OnceCell::new(),
             globals,
+            origin,
             size,
             format,
             sample_count,
@@ -380,7 +385,64 @@ impl CommandTarget {
     }
 
     pub fn whole_frame_bind_group(&self, descriptors: &Descriptors) -> &wgpu::BindGroup {
-        get_whole_frame_bind_group(&self.whole_frame_bind_group, descriptors, self.size)
+        get_whole_frame_bind_group(
+            &self.whole_frame_bind_group,
+            descriptors,
+            self.origin,
+            self.size,
+        )
+    }
+
+    /// Transforms for compositing a child that covers only `region` of this target.
+    ///
+    /// Two things have to be right at once. The quad must land on the right part of the target, so
+    /// `world_matrix` places it there. And the blend shaders derive their UV from clip position --
+    /// which is the position within the TARGET, correct for sampling the parent -- so the child,
+    /// being a smaller texture, needs that UV remapped onto its own [0, 1]. That remap rides in
+    /// `bitmap_uv_scale` as `(scale, offset)`, which every other draw type leaves at the identity
+    /// `(1, 1, 0, 0)`.
+    ///
+    /// Not cached: unlike the whole-frame group there is a different region per blend.
+    pub fn region_frame_bind_group(
+        &self,
+        descriptors: &Descriptors,
+        region: (u32, u32, u32, u32),
+    ) -> wgpu::BindGroup {
+        let (rx, ry, rw, rh) = region;
+        let (local_x, local_y) = (
+            rx.saturating_sub(self.origin.0) as f32,
+            ry.saturating_sub(self.origin.1) as f32,
+        );
+        let (rw, rh) = (rw.max(1) as f32, rh.max(1) as f32);
+        let (tw, th) = (self.size.width.max(1) as f32, self.size.height.max(1) as f32);
+
+        let transform = Transforms {
+            world_matrix: [
+                [rw, 0.0, 0.0, 0.0],
+                [0.0, rh, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [rx as f32, ry as f32, 0.0, 1.0],
+            ],
+            mult_color: [1.0, 1.0, 1.0, 1.0],
+            add_color: [0.0, 0.0, 0.0, 0.0],
+            bitmap_uv_scale: [tw / rw, th / rh, -local_x / rw, -local_y / rh],
+        };
+        let buffer = create_buffer_with_data(
+            &descriptors.device,
+            bytemuck::cast_slice(&[transform]),
+            wgpu::BufferUsages::UNIFORM,
+            create_debug_label!("Region-frame transforms buffer"),
+        );
+        descriptors
+            .device
+            .create_bind_group(&wgpu::BindGroupDescriptor {
+                layout: &descriptors.bind_layouts.transforms,
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                }],
+                label: create_debug_label!("Region-frame transforms bind group").as_deref(),
+            })
     }
 
     pub fn color_attachments(&self) -> Option<wgpu::RenderPassColorAttachment<'_>> {
@@ -486,16 +548,21 @@ impl CommandTarget {
 fn get_whole_frame_bind_group<'a>(
     once_cell: &'a OnceCell<(wgpu::Buffer, wgpu::BindGroup)>,
     descriptors: &Descriptors,
+    origin: (u32, u32),
     size: wgpu::Extent3d,
 ) -> &'a wgpu::BindGroup {
     &once_cell
         .get_or_init(|| {
+            // The quad has to land on the target in the SAME space the globals view matrix was
+            // built for, so it starts at the target's origin rather than at zero. That is always
+            // zero for the stage surface, which is why this went unnoticed until sub-targets
+            // acquired origins of their own.
             let transform = Transforms {
                 world_matrix: [
                     [size.width as f32, 0.0, 0.0, 0.0],
                     [0.0, size.height as f32, 0.0, 0.0],
                     [0.0, 0.0, 1.0, 0.0],
-                    [0.0, 0.0, 0.0, 1.0],
+                    [origin.0 as f32, origin.1 as f32, 0.0, 1.0],
                 ],
                 mult_color: [1.0, 1.0, 1.0, 1.0],
                 add_color: [0.0, 0.0, 0.0, 0.0],
