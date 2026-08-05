@@ -41,6 +41,10 @@ fn install_device_fault_handlers(device: &wgpu::Device, status: &DeviceStatus) {
             && lost_status.record(fault)
         {
             tracing::error!("Graphics device lost: {message}");
+            #[cfg(feature = "aether_metrics")]
+            for line in crate::aether_metrics::texture_census_report(14) {
+                tracing::error!("{line}");
+            }
         }
     });
 
@@ -49,6 +53,10 @@ fn install_device_fault_handlers(device: &wgpu::Device, status: &DeviceStatus) {
         let fault = fault_from_uncaptured_error(&error);
         if error_status.record(fault) {
             tracing::error!("Unrecoverable graphics error: {error}");
+            #[cfg(feature = "aether_metrics")]
+            for line in crate::aether_metrics::texture_census_report(14) {
+                tracing::error!("{line}");
+            }
         }
     }));
 }

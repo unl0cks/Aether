@@ -697,6 +697,22 @@ impl<'a> WgpuCommandHandler<'a> {
     }
 }
 
+/// Whether a blend may render into a target sized to its contents rather than to the whole surface.
+///
+/// OFF, on evidence. The reasoning for turning it on was that AQW's effects are built from hundreds
+/// of blended clips each paying for a stage-sized target — but the general texture pool's own
+/// counters refute that: 854 stage-sized allocations across a 198-second session, 4.3 per second,
+/// which at that session's frame rate is about one per frame. That one is the main surface. Blend
+/// sub-targets were never the bulk, so shrinking them cannot move peak memory, and measurement
+/// after the fact agreed: no change in frame rate, and the graphics device started reporting "lost"
+/// rather than "out of memory" — consistent with the extra pressure of a distinct pool bucket and a
+/// distinct globals entry per region, since both caches are keyed by size.
+///
+/// The machinery is kept, and is correct as far as its tests go, because it becomes worth having
+/// the moment a scene really is blend-heavy. It should not be switched back on without a
+/// measurement showing blend nodes are a meaningful share of texture allocations.
+const SHRINK_BLEND_TARGETS: bool = false;
+
 impl CommandHandler for WgpuCommandHandler<'_> {
     fn blend(
         &mut self,
@@ -716,7 +732,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         // `whole_frame_bind_group`, which assumes the two are the same size and aligned, so handing
         // them a smaller target would misplace the result. Those keep a full-surface target, which
         // is what every blend used to get.
-        let region = match (&blend_type, bounds) {
+        let region = match (&blend_type, bounds.filter(|_| SHRINK_BLEND_TARGETS)) {
             (BlendType::Trivial(_), Some(bounds)) => {
                 // Core has already grown these bounds for the object's filters, so the region is
                 // clamped to the surface and nothing else.

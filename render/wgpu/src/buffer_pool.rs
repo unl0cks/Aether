@@ -108,6 +108,14 @@ impl TexturePool {
                         view_formats: &[format],
                         usage,
                     });
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_texture_created(
+                        crate::aether_metrics::TextureOrigin::Pool,
+                        size.width,
+                        size.height,
+                        sample_count,
+                        estimate_texture_bytes(size, format, 1, sample_count).unwrap_or(0),
+                    );
                     let view = texture.create_view(&Default::default());
                     (texture, view)
                 })),

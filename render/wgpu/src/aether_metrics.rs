@@ -367,3 +367,148 @@ mod tests {
         assert_eq!(reset.globals_available_after_maintenance, 0);
     }
 }
+
+// ---- texture allocation census -------------------------------------------------------------
+//
+// Everything above counts pool activity, which turned out to describe only a small share of what
+// the GPU actually holds: a 198-second session reported 39.6 GB resident across 1,185 live
+// textures — an average of 33 MB each — while the general pool accounted for 854 stage-sized
+// allocations, about one per frame. The bytes are being created somewhere these counters never
+// looked, and every attempt to reason about WHERE from aggregate totals has been wrong.
+//
+// So: record every texture as it is created, bucketed by size and by the call site that asked for
+// it, and print the biggest buckets when the device dies. Not a sampling profile and not another
+// metrics session — a dozen lines that name the allocator.
+
+/// Which part of the renderer asked for a texture.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TextureOrigin {
+    /// Render targets and filter intermediates, via the texture pools.
+    Pool,
+    /// Decoded SWF images and BitmapData surfaces, via `register_bitmap`.
+    Bitmap,
+}
+
+impl TextureOrigin {
+    fn name(self) -> &'static str {
+        match self {
+            TextureOrigin::Pool => "pool",
+            TextureOrigin::Bitmap => "bitmap",
+        }
+    }
+}
+
+struct TextureBucketCounters {
+    /// Packed key: origin << 62 | samples << 58 | width << 29 | height.
+    key: AtomicU64,
+    count: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl TextureBucketCounters {
+    const fn new() -> Self {
+        Self {
+            key: AtomicU64::new(0),
+            count: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+        }
+    }
+}
+
+/// Fixed table, probed linearly. A texture allocation is already an expensive operation, so the
+/// cost of a short scan here is irrelevant, and a fixed table means no allocation on this path and
+/// no lock to contend.
+const TEXTURE_BUCKETS: usize = 512;
+static TEXTURE_CENSUS: [TextureBucketCounters; TEXTURE_BUCKETS] =
+    [const { TextureBucketCounters::new() }; TEXTURE_BUCKETS];
+static TEXTURE_CENSUS_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> u64 {
+    let origin = match origin {
+        TextureOrigin::Pool => 1_u64,
+        TextureOrigin::Bitmap => 2_u64,
+    };
+    // Never zero, so an untouched slot is distinguishable from a real bucket.
+    (origin << 62) | ((samples.min(15) as u64) << 58) | ((width.min(0x1FFF_FFFF) as u64) << 29)
+        | (height.min(0x1FFF_FFFF) as u64)
+}
+
+pub fn record_texture_created(
+    origin: TextureOrigin,
+    width: u32,
+    height: u32,
+    samples: u32,
+    bytes: u64,
+) {
+    let key = texture_key(origin, width, height, samples);
+    let start = (key % TEXTURE_BUCKETS as u64) as usize;
+    for probe in 0..TEXTURE_BUCKETS {
+        let slot = &TEXTURE_CENSUS[(start + probe) % TEXTURE_BUCKETS];
+        let existing = slot.key.load(Ordering::Relaxed);
+        if existing == key
+            || (existing == 0
+                && slot
+                    .key
+                    .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+                    .is_ok())
+        {
+            slot.count.fetch_add(1, Ordering::Relaxed);
+            slot.bytes.fetch_add(bytes, Ordering::Relaxed);
+            return;
+        }
+    }
+    TEXTURE_CENSUS_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+}
+
+/// One line per size bucket, biggest total bytes first. Safe to call from a device-loss handler.
+pub fn texture_census_report(limit: usize) -> Vec<String> {
+    let mut rows: Vec<(u64, u64, String)> = TEXTURE_CENSUS
+        .iter()
+        .filter_map(|slot| {
+            let key = slot.key.load(Ordering::Relaxed);
+            if key == 0 {
+                return None;
+            }
+            let count = slot.count.load(Ordering::Relaxed);
+            let bytes = slot.bytes.load(Ordering::Relaxed);
+            let origin = match key >> 62 {
+                1 => TextureOrigin::Pool,
+                _ => TextureOrigin::Bitmap,
+            };
+            let samples = (key >> 58) & 0xF;
+            let width = (key >> 29) & 0x1FFF_FFFF;
+            let height = key & 0x1FFF_FFFF;
+            Some((
+                bytes,
+                count,
+                format!(
+                    "{:>6} {:>5}x{:<5} x{}  {:>7} allocs  {:>9.1} MB",
+                    origin.name(),
+                    width,
+                    height,
+                    samples,
+                    count,
+                    bytes as f64 / 1e6,
+                ),
+            ))
+        })
+        .collect();
+    rows.sort_by(|a, b| b.0.cmp(&a.0));
+
+    let total_bytes: u64 = rows.iter().map(|r| r.0).sum();
+    let total_count: u64 = rows.iter().map(|r| r.1).sum();
+    let mut out = vec![format!(
+        "texture census: {} allocations, {:.1} GB created in total, {} distinct sizes",
+        total_count,
+        total_bytes as f64 / 1e9,
+        rows.len(),
+    )];
+    out.extend(rows.into_iter().take(limit).map(|r| r.2));
+    let overflowed = TEXTURE_CENSUS_OVERFLOW.load(Ordering::Relaxed);
+    if overflowed > 0 {
+        out.push(format!(
+            "  (+{overflowed} allocations in sizes beyond the {TEXTURE_BUCKETS}-bucket table)"
+        ));
+    }
+    out
+}

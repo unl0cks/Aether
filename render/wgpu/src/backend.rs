@@ -720,6 +720,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     | wgpu::TextureUsages::RENDER_ATTACHMENT
                     | wgpu::TextureUsages::COPY_SRC,
             });
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_texture_created(
+            crate::aether_metrics::TextureOrigin::Bitmap,
+            extent.width,
+            extent.height,
+            1,
+            u64::from(extent.width) * u64::from(extent.height) * 4,
+        );
 
         self.descriptors.queue.write_texture(
             wgpu::TexelCopyTextureInfo {
