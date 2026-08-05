@@ -62,6 +62,9 @@ pub(crate) struct TextureRetentionCandidate {
     pub last_used_frame: u64,
     pub available_entries: usize,
     pub bytes_per_entry: Option<u64>,
+    /// How many times this size has ever been requested. Breaks ties between buckets last used on
+    /// the same frame, which in a busy frame is nearly all of them.
+    pub uses: u64,
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -178,7 +181,18 @@ pub(crate) fn plan_texture_retention(
     let (mut available_entries, mut available_bytes) = totals(&decision.keep_entries);
     let max_entries = u64::try_from(limits.max_cached_entries).unwrap_or(u64::MAX);
     let mut order: Vec<usize> = (0..candidates.len()).collect();
-    order.sort_by_key(|index| (candidates[*index].last_used_frame, *index));
+    // Least recently used first, then least often used. The second key is load-bearing rather than
+    // decorative: a frame touches hundreds of buckets, so hundreds share a `last_used_frame`, and
+    // ordering those by array index alone means the choice of what to evict is arbitrary. A census
+    // of a real session showed the consequence -- one 2560x1365 surface, requested every single
+    // frame, allocated 141 times in twelve seconds because single-use buckets kept displacing it.
+    order.sort_by_key(|index| {
+        (
+            candidates[*index].last_used_frame,
+            candidates[*index].uses,
+            *index,
+        )
+    });
 
     for index in order {
         if available_entries <= max_entries && available_bytes <= limits.max_cached_bytes {
@@ -407,16 +421,19 @@ mod tests {
                     last_used_frame: 10,
                     available_entries: 2,
                     bytes_per_entry: Some(100),
+                    uses: 1,
                 },
                 TextureRetentionCandidate {
                     last_used_frame: 7,
                     available_entries: 1,
                     bytes_per_entry: Some(50),
+                uses: 1,
                 },
                 TextureRetentionCandidate {
                     last_used_frame: 10,
                     available_entries: 1,
                     bytes_per_entry: None,
+                uses: 1,
                 },
             ],
         );
@@ -440,11 +457,13 @@ mod tests {
                     last_used_frame: 8,
                     available_entries: 3,
                     bytes_per_entry: Some(100),
+                    uses: 1,
                 },
                 TextureRetentionCandidate {
                     last_used_frame: 10,
                     available_entries: 2,
                     bytes_per_entry: Some(100),
+                    uses: 1,
                 },
             ],
         );
@@ -457,6 +476,45 @@ mod tests {
     }
 
     #[test]
+    fn a_bucket_used_every_frame_outranks_one_used_once_on_the_same_frame() {
+        // The failure this exists to prevent: a busy frame touches hundreds of sizes, so they all
+        // share a last_used_frame and the tie broke on array index. A census of a real session
+        // caught the result -- the 2560x1365 stage surface, requested every frame, allocated 141
+        // times in twelve seconds because one-shot buckets kept winning the coin flip.
+        let limits = BoundedTexturePoolLimits {
+            max_cached_bytes: 100,
+            max_cached_entries: 8,
+            max_idle_frames: 1,
+            max_cached_globals: 8,
+        };
+        // The hot bucket is listed FIRST, so index order alone would evict it.
+        let decision = plan_texture_retention(
+            5,
+            limits,
+            &[
+                TextureRetentionCandidate {
+                    last_used_frame: 5,
+                    available_entries: 1,
+                    bytes_per_entry: Some(100),
+                    uses: 900,
+                },
+                TextureRetentionCandidate {
+                    last_used_frame: 5,
+                    available_entries: 1,
+                    bytes_per_entry: Some(100),
+                    uses: 1,
+                },
+            ],
+        );
+
+        assert_eq!(
+            decision.keep_entries,
+            vec![1, 0],
+            "the size requested every frame must survive and the one-shot must go"
+        );
+    }
+
+    #[test]
     fn retention_partially_trims_one_hot_bucket() {
         let decision = plan_texture_retention(
             4,
@@ -465,6 +523,7 @@ mod tests {
                 last_used_frame: 4,
                 available_entries: 6,
                 bytes_per_entry: Some(100),
+                uses: 1,
             }],
         );
 

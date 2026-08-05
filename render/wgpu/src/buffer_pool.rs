@@ -18,6 +18,9 @@ struct TextureBucket {
     pool: BufferPool<(wgpu::Texture, wgpu::TextureView), AlwaysCompatible>,
     bytes_per_entry: Option<u64>,
     last_used_frame: u64,
+    /// Lifetime request count, used to rank this size against others last touched on the same
+    /// frame. Without it, retention picks between them by hash-map iteration order.
+    uses: u64,
 }
 
 #[derive(Debug)]
@@ -121,9 +124,11 @@ impl TexturePool {
                 })),
                 bytes_per_entry: estimate_texture_bytes(size, format, 1, sample_count),
                 last_used_frame: submitted_frame,
+                uses: 0,
             }
         });
         bucket.last_used_frame = submitted_frame;
+        bucket.uses = bucket.uses.saturating_add(1);
         #[cfg(feature = "aether_metrics")]
         {
             let (entry, reused) = bucket.pool.take_with_reuse(descriptors, AlwaysCompatible);
@@ -200,6 +205,7 @@ impl TexturePool {
                     last_used_frame: bucket.last_used_frame,
                     available_entries: bucket.pool.available_len(),
                     bytes_per_entry: bucket.bytes_per_entry,
+                    uses: bucket.uses,
                 }
             })
             .collect();
@@ -479,6 +485,7 @@ mod tests {
                 pool: BufferPool::new(Box::new(|_, _| unreachable!())),
                 bytes_per_entry: Some(64 * 64 * 4),
                 last_used_frame: 0,
+                uses: 1,
             },
         );
 
@@ -516,6 +523,7 @@ mod tests {
                 pool: BufferPool::new(Box::new(|_, _| unreachable!())),
                 bytes_per_entry: Some(2560 * 1440 * 4 * 4),
                 last_used_frame: 0,
+                uses: 1,
             },
         );
 
