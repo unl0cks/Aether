@@ -41,6 +41,7 @@ pub mod target;
 pub mod texture_pool_policy;
 
 pub mod backend;
+pub mod blend_region;
 mod blend;
 mod buffer_builder;
 mod buffer_pool;
