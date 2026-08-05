@@ -88,12 +88,14 @@ pub struct Opt {
     pub no_aether_aqw_timeline_child_rebind: bool,
 
 
-    /// Disable internal bitmap reuse for visually stable AQW AvatarMC roots.
-    #[clap(long)]
+    /// Disable internal bitmap reuse for visually stable AQW AvatarMC roots. Off already; kept so
+    /// scripts that pass it keep working.
+    #[clap(long, conflicts_with = "aether_aqw_adaptive_avatar_cache")]
     pub no_aether_aqw_adaptive_avatar_cache: bool,
 
-    /// Resolved launch-mode setting; populated by the AQW preset.
-    #[clap(skip)]
+    /// Re-enable internal bitmap reuse for AQW AvatarMC roots. Known to render glow and drop-shadow
+    /// layers, damage numbers and avatars clipped and offset; for reproducing that bug only.
+    #[clap(long, conflicts_with = "no_aether_aqw_adaptive_avatar_cache")]
     pub aether_aqw_adaptive_avatar_cache: bool,
 
     /// Disable eviction of GPU uploads for bitmaps that are no longer being drawn.

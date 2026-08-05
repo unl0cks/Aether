@@ -38,7 +38,19 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     opt.aether_aqw_timeline_child_rebind = !opt.no_aether_aqw_timeline_child_rebind;
     opt.aether_aqw_mouse_motion_coalescing = !opt.no_aether_aqw_mouse_motion_coalescing;
     opt.aether_aqw_avm2_broadcast_fast_path = !opt.no_aether_aqw_avm2_broadcast_fast_path;
-    opt.aether_aqw_adaptive_avatar_cache = !opt.no_aether_aqw_adaptive_avatar_cache;
+    // NOT enabled by the preset: it visibly corrupts what it caches.
+    //
+    // The adaptive avatar cache is what turns on BitmapCacheTexturePolicy::BoundedReuse, which keeps
+    // an existing, slightly oversized cache texture when an object's bounds drift instead of
+    // reallocating. That is exactly the population it goes wrong on -- anything whose size changes
+    // while it animates. Glow and drop-shadow layers on fire effects, weapon and armour trims,
+    // damage and healing numbers, NPC avatars and the Book of Lore's badges all render clipped to a
+    // rectangle and offset from where they belong.
+    //
+    // Confirmed by A/B rather than inference: the same session with
+    // --no-aether-aqw-adaptive-avatar-cache renders all of them correctly. The flag stays so the
+    // underlying bug can be reproduced on demand; the cause is not yet understood, so it does not
+    // belong on by default.
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
@@ -158,15 +170,17 @@ mod tests {
 
 
     #[test]
-    fn aqw_preset_enables_adaptive_avatar_cache_by_default() {
+    fn aqw_preset_leaves_adaptive_avatar_cache_off_by_default() {
+        // Reusing an oversized cache texture clips and offsets whatever it holds.
         let opt = parse_and_apply(&["aether"]);
-        assert!(opt.aether_aqw_adaptive_avatar_cache);
+        assert!(!opt.aether_aqw_adaptive_avatar_cache);
     }
 
     #[test]
-    fn aqw_preset_allows_adaptive_avatar_cache_opt_out() {
-        let opt = parse_and_apply(&["aether", "--no-aether-aqw-adaptive-avatar-cache"]);
-        assert!(!opt.aether_aqw_adaptive_avatar_cache);
+    fn aqw_preset_still_accepts_the_adaptive_avatar_cache_opt_in() {
+        // Kept so the corruption can be reproduced while it is being diagnosed.
+        let opt = parse_and_apply(&["aether", "--aether-aqw-adaptive-avatar-cache"]);
+        assert!(opt.aether_aqw_adaptive_avatar_cache);
     }
 
     #[test]
