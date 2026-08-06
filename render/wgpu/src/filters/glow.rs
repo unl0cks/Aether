@@ -3,7 +3,7 @@ use crate::buffer_pool::TexturePool;
 use crate::descriptors::Descriptors;
 use crate::filters::blur::BlurFilter;
 use crate::filters::{
-    FilterSource, FilterVertexWithBlur, VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_BLUR,
+    FilterRegion, FilterSource, FilterVertexWithBlur, VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_BLUR,
 };
 use crate::surface::target::CommandTarget;
 use crate::utils::SampleCountMap;
@@ -180,6 +180,13 @@ impl GlowFilter {
             .as_ref()
             .map(CommandTarget::color_view)
             .unwrap_or(&source.view);
+        // The blurred layer is its own texture covering exactly the filtered region. When the blur
+        // was a no-op there is no such texture and the source is bound instead, so the region has
+        // to follow whichever one ends up in the bind group.
+        let blur_region = blurred
+            .as_ref()
+            .map(|blurred| FilterRegion::for_whole_texture(blurred.color_texture()))
+            .unwrap_or_else(|| source.region());
 
         let target = CommandTarget::new(
             descriptors,
@@ -223,7 +230,7 @@ impl GlowFilter {
                 &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[
-                source.vertices_with_blur_offset(blur_offset)
+                source.vertices_with_blur_offset(blur_region, blur_offset)
             ]));
         let filter_group = descriptors
             .device

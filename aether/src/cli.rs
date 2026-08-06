@@ -93,8 +93,9 @@ pub struct Opt {
     #[clap(long, conflicts_with = "aether_aqw_adaptive_avatar_cache")]
     pub no_aether_aqw_adaptive_avatar_cache: bool,
 
-    /// Re-enable internal bitmap reuse for AQW AvatarMC roots. Known to render glow and drop-shadow
-    /// layers, damage numbers and avatars clipped and offset; for reproducing that bug only.
+    /// Re-enable internal bitmap reuse for AQW AvatarMC roots. The filter bug that rendered glow
+    /// and drop-shadow layers, damage numbers and avatars clipped and offset is fixed; this stays
+    /// opt-in until that is confirmed in game.
     #[clap(long, conflicts_with = "no_aether_aqw_adaptive_avatar_cache")]
     pub aether_aqw_adaptive_avatar_cache: bool,
 
@@ -143,7 +144,8 @@ pub struct Opt {
     pub aether_bounded_offscreen_pool: bool,
 
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
-    /// every frame.
+    /// every frame. Cuts texture creation by roughly 32x; opt-in until the filter fix that makes
+    /// oversized cache textures render correctly is confirmed in game.
     #[clap(long, conflicts_with = "no_aether_aqw_cache_texture_grid")]
     pub aether_aqw_cache_texture_grid: bool,
 

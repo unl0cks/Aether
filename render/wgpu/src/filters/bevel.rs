@@ -3,7 +3,8 @@ use crate::buffer_pool::TexturePool;
 use crate::descriptors::Descriptors;
 use crate::filters::blur::BlurFilter;
 use crate::filters::{
-    FilterSource, FilterVertexWithDoubleBlur, VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_DOUBLE_BLUR,
+    FilterRegion, FilterSource, FilterVertexWithDoubleBlur,
+    VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_DOUBLE_BLUR,
 };
 use crate::surface::target::CommandTarget;
 use crate::utils::SampleCountMap;
@@ -180,6 +181,12 @@ impl BevelFilter {
             .as_ref()
             .map(CommandTarget::color_view)
             .unwrap_or(&source.view);
+        // See the same block in `GlowFilter::apply`: the blurred layer has its own dimensions, and
+        // falls back to the source when the blur did nothing.
+        let blur_region = blurred
+            .as_ref()
+            .map(|blurred| FilterRegion::for_whole_texture(blurred.color_texture()))
+            .unwrap_or_else(|| source.region());
         let distance = filter.distance.to_f32();
         let angle = filter.angle.to_f32();
         let blur_offset = (angle.cos() * distance, angle.sin() * distance);
@@ -246,7 +253,7 @@ impl BevelFilter {
                 &descriptors.device,
             )
             .copy_from_slice(bytemuck::cast_slice(&[
-                source.vertices_with_highlight_and_shadow(blur_offset)
+                source.vertices_with_highlight_and_shadow(blur_region, blur_offset)
             ]));
         let filter_group = descriptors
             .device

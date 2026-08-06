@@ -101,6 +101,8 @@ impl TexturePool {
             };
             TextureBucket {
                 pool: BufferPool::new(Box::new(move |descriptors, _description| {
+                    #[cfg(feature = "aether_metrics")]
+                    let creation_started = std::time::Instant::now();
                     let texture = descriptors.device.create_texture(&wgpu::TextureDescriptor {
                         label: label.as_deref(),
                         size,
@@ -111,6 +113,8 @@ impl TexturePool {
                         view_formats: &[format],
                         usage,
                     });
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_texture_creation(creation_started.elapsed());
                     #[cfg(feature = "aether_metrics")]
                     crate::aether_metrics::record_texture_created(
                         crate::aether_metrics::TextureOrigin::Pool,

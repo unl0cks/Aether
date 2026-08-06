@@ -34,6 +34,27 @@ pub struct PoolSnapshot {
 pub struct WgpuMetricsSnapshot {
     pub general: PoolSnapshot,
     pub offscreen: PoolSnapshot,
+    /// CPU time spent inside `Device::create_texture` since the last snapshot.
+    ///
+    /// Frame time is reported as the wall time of the render call, which is CPU work: building
+    /// command buffers and creating the GPU objects they reference. A texture creation is a real
+    /// driver allocation on that thread, so if the pools are missing often enough this shows up
+    /// directly in the frame budget rather than on the GPU.
+    pub texture_create_nanos: u64,
+    pub texture_creations: u64,
+    /// CPU time inside `submit_frame`, and the portion of it spent rebuilding `cacheAsBitmap`
+    /// surfaces. Frame time minus this is the core's own display-list traversal and command
+    /// building, which is otherwise invisible.
+    pub submit_nanos: u64,
+    pub cache_entry_nanos: u64,
+    pub cache_entries: u64,
+    /// What one frame's encoding actually consists of. Nearly all frame time is the stage draw,
+    /// and these say whether that is the number of things drawn or the number of times the
+    /// renderer has to stop and set up a new target to draw them into.
+    pub render_passes: u64,
+    pub draw_commands: u64,
+    pub blend_chunks: u64,
+    pub bind_groups: u64,
 }
 
 struct PoolCounters {
@@ -226,10 +247,67 @@ pub(crate) fn record_pool_maintenance(kind: TexturePoolKind, report: PoolMainten
     );
 }
 
+static TEXTURE_CREATE_NANOS: AtomicU64 = AtomicU64::new(0);
+static TEXTURE_CREATIONS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one `Device::create_texture` call and what it cost on the calling thread.
+pub fn record_texture_creation(elapsed: std::time::Duration) {
+    saturating_atomic_add(
+        &TEXTURE_CREATE_NANOS,
+        elapsed.as_nanos().min(u64::MAX as u128) as u64,
+    );
+    saturating_atomic_add(&TEXTURE_CREATIONS, 1);
+}
+
+static SUBMIT_NANOS: AtomicU64 = AtomicU64::new(0);
+static CACHE_ENTRY_NANOS: AtomicU64 = AtomicU64::new(0);
+static CACHE_ENTRIES: AtomicU64 = AtomicU64::new(0);
+
+/// Record one `submit_frame`: its total cost, and the cost and count of the cache surfaces it
+/// rebuilt before drawing the stage.
+pub fn record_submit_frame(total: std::time::Duration, cache: std::time::Duration, entries: u64) {
+    saturating_atomic_add(&SUBMIT_NANOS, nanos(total));
+    saturating_atomic_add(&CACHE_ENTRY_NANOS, nanos(cache));
+    saturating_atomic_add(&CACHE_ENTRIES, entries);
+}
+
+fn nanos(duration: std::time::Duration) -> u64 {
+    duration.as_nanos().min(u64::MAX as u128) as u64
+}
+
+static RENDER_PASSES: AtomicU64 = AtomicU64::new(0);
+static DRAW_COMMANDS: AtomicU64 = AtomicU64::new(0);
+static BLEND_CHUNKS: AtomicU64 = AtomicU64::new(0);
+static BIND_GROUPS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one chunk of encoded work: a render pass, and either the draws it carries or the fact
+/// that it is a blend needing its own target.
+pub fn record_encoded_chunk(draw_commands: u64, is_blend: bool) {
+    saturating_atomic_add(&RENDER_PASSES, 1);
+    saturating_atomic_add(&DRAW_COMMANDS, draw_commands);
+    if is_blend {
+        saturating_atomic_add(&BLEND_CHUNKS, 1);
+    }
+}
+
+/// Record a bind group built during encoding rather than served from a cache.
+pub fn record_bind_group_created() {
+    saturating_atomic_add(&BIND_GROUPS, 1);
+}
+
 pub fn take_snapshot() -> WgpuMetricsSnapshot {
     WgpuMetricsSnapshot {
         general: GENERAL.take(),
         offscreen: OFFSCREEN.take(),
+        texture_create_nanos: TEXTURE_CREATE_NANOS.swap(0, Ordering::Relaxed),
+        texture_creations: TEXTURE_CREATIONS.swap(0, Ordering::Relaxed),
+        submit_nanos: SUBMIT_NANOS.swap(0, Ordering::Relaxed),
+        cache_entry_nanos: CACHE_ENTRY_NANOS.swap(0, Ordering::Relaxed),
+        cache_entries: CACHE_ENTRIES.swap(0, Ordering::Relaxed),
+        render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
+        draw_commands: DRAW_COMMANDS.swap(0, Ordering::Relaxed),
+        blend_chunks: BLEND_CHUNKS.swap(0, Ordering::Relaxed),
+        bind_groups: BIND_GROUPS.swap(0, Ordering::Relaxed),
     }
 }
 

@@ -32,6 +32,81 @@ pub struct FilterSource<'a> {
     pub size: (u32, u32),
 }
 
+/// Where a filter input actually lives: the rectangle being filtered, and the dimensions of the
+/// texture holding it.
+///
+/// The two are not always equal. A `cacheAsBitmap` surface may be allocated larger than its
+/// contents, so its UVs have to be normalised against the texture while its extent comes from the
+/// region. Filters that sample a second texture alongside the source need one of these per input,
+/// because a blurred layer is its own texture and shares neither number with the source.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FilterRegion {
+    pub texture_size: (u32, u32),
+    pub point: (u32, u32),
+    pub size: (u32, u32),
+}
+
+impl FilterRegion {
+    pub fn for_whole_texture(texture: &wgpu::Texture) -> Self {
+        Self {
+            texture_size: (texture.width(), texture.height()),
+            point: (0, 0),
+            size: (texture.width(), texture.height()),
+        }
+    }
+
+    /// UV of a point `offset` pixels from this region's corner, normalised against its texture.
+    fn uv(&self, corner: (f32, f32), offset: (f32, f32)) -> [f32; 2] {
+        [
+            (self.point.0 as f32 + corner.0 + offset.0) / self.texture_size.0.max(1) as f32,
+            (self.point.1 as f32 + corner.1 + offset.1) / self.texture_size.1.max(1) as f32,
+        ]
+    }
+
+    /// The four corners of the region, in pixels relative to its own top left.
+    fn corners(&self) -> [(f32, f32); 4] {
+        let (width, height) = (self.size.0 as f32, self.size.1 as f32);
+        [(0.0, 0.0), (width, 0.0), (width, height), (0.0, height)]
+    }
+}
+
+/// Vertices for a filter that samples the source and one blurred layer.
+///
+/// The blurred layer is a separate texture the size of the filtered region, so its UVs must be
+/// normalised against `blur`, not against the source. Those agree only while the source texture is
+/// exactly its own region, which stopped being true once cache textures could be allocated larger
+/// than their contents.
+fn filter_vertices_with_blur(
+    source: FilterRegion,
+    blur: FilterRegion,
+    blur_offset: (f32, f32),
+) -> [FilterVertexWithBlur; 4] {
+    let positions = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let corners = source.corners();
+    std::array::from_fn(|i| FilterVertexWithBlur {
+        position: positions[i],
+        source_uv: source.uv(corners[i], (0.0, 0.0)),
+        blur_uv: blur.uv(corners[i], blur_offset),
+    })
+}
+
+/// As [`filter_vertices_with_blur`], for filters that sample the blurred layer twice at opposing
+/// offsets.
+fn filter_vertices_with_double_blur(
+    source: FilterRegion,
+    blur: FilterRegion,
+    blur_offset: (f32, f32),
+) -> [FilterVertexWithDoubleBlur; 4] {
+    let positions = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]];
+    let corners = source.corners();
+    std::array::from_fn(|i| FilterVertexWithDoubleBlur {
+        position: positions[i],
+        source_uv: source.uv(corners[i], (0.0, 0.0)),
+        blur_uv_left: blur.uv(corners[i], blur_offset),
+        blur_uv_right: blur.uv(corners[i], (-blur_offset.0, -blur_offset.1)),
+    })
+}
+
 impl<'a> FilterSource<'a> {
     pub fn for_entire_texture(texture: &'a wgpu::Texture) -> Self {
         Self {
@@ -39,6 +114,14 @@ impl<'a> FilterSource<'a> {
             view: texture.create_view(&Default::default()),
             point: (0, 0),
             size: (texture.width(), texture.height()),
+        }
+    }
+
+    pub fn region(&self) -> FilterRegion {
+        FilterRegion {
+            texture_size: (self.texture.width(), self.texture.height()),
+            point: self.point,
+            size: self.size,
         }
     }
 
@@ -69,121 +152,22 @@ impl<'a> FilterSource<'a> {
         ]
     }
 
-    pub fn vertices_with_blur_offset(&self, blur_offset: (f32, f32)) -> [FilterVertexWithBlur; 4] {
-        let source_width = self.texture.width() as f32;
-        let source_height = self.texture.height() as f32;
-        let source_left = self.point.0;
-        let source_top = self.point.1;
-        let source_right = source_left + self.size.0;
-        let source_bottom = source_top + self.size.1;
-        [
-            FilterVertexWithBlur {
-                position: [0.0, 0.0],
-                source_uv: [
-                    source_left as f32 / source_width,
-                    source_top as f32 / source_height,
-                ],
-                blur_uv: [
-                    (source_left as f32 + blur_offset.0) / source_width,
-                    (source_top as f32 + blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithBlur {
-                position: [1.0, 0.0],
-                source_uv: [
-                    source_right as f32 / source_width,
-                    source_top as f32 / source_height,
-                ],
-                blur_uv: [
-                    (source_right as f32 + blur_offset.0) / source_width,
-                    (source_top as f32 + blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithBlur {
-                position: [1.0, 1.0],
-                source_uv: [
-                    source_right as f32 / source_width,
-                    source_bottom as f32 / source_height,
-                ],
-                blur_uv: [
-                    (source_right as f32 + blur_offset.0) / source_width,
-                    (source_bottom as f32 + blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithBlur {
-                position: [0.0, 1.0],
-                source_uv: [
-                    source_left as f32 / source_width,
-                    source_bottom as f32 / source_height,
-                ],
-                blur_uv: [
-                    (source_left as f32 + blur_offset.0) / source_width,
-                    (source_bottom as f32 + blur_offset.1) / source_height,
-                ],
-            },
-        ]
+    /// Vertices for a filter sampling this source plus `blur`, a separate blurred layer.
+    pub fn vertices_with_blur_offset(
+        &self,
+        blur: FilterRegion,
+        blur_offset: (f32, f32),
+    ) -> [FilterVertexWithBlur; 4] {
+        filter_vertices_with_blur(self.region(), blur, blur_offset)
     }
 
+    /// As [`Self::vertices_with_blur_offset`], for filters sampling `blur` at opposing offsets.
     pub fn vertices_with_highlight_and_shadow(
         &self,
+        blur: FilterRegion,
         blur_offset: (f32, f32),
     ) -> [FilterVertexWithDoubleBlur; 4] {
-        let source_width = self.texture.width() as f32;
-        let source_height = self.texture.height() as f32;
-        let source_left = self.point.0 as f32;
-        let source_top = self.point.1 as f32;
-        let source_right = (self.point.0 + self.size.0) as f32;
-        let source_bottom = (self.point.1 + self.size.1) as f32;
-        [
-            FilterVertexWithDoubleBlur {
-                position: [0.0, 0.0],
-                source_uv: [source_left / source_width, source_top / source_height],
-                blur_uv_left: [
-                    (source_left + blur_offset.0) / source_width,
-                    (source_top + blur_offset.1) / source_height,
-                ],
-                blur_uv_right: [
-                    (source_left - blur_offset.0) / source_width,
-                    (source_top - blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithDoubleBlur {
-                position: [1.0, 0.0],
-                source_uv: [source_right / source_width, source_top / source_height],
-                blur_uv_left: [
-                    (source_right + blur_offset.0) / source_width,
-                    (source_top + blur_offset.1) / source_height,
-                ],
-                blur_uv_right: [
-                    (source_right - blur_offset.0) / source_width,
-                    (source_top - blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithDoubleBlur {
-                position: [1.0, 1.0],
-                source_uv: [source_right / source_width, source_bottom / source_height],
-                blur_uv_left: [
-                    (source_right + blur_offset.0) / source_width,
-                    (source_bottom + blur_offset.1) / source_height,
-                ],
-                blur_uv_right: [
-                    (source_right - blur_offset.0) / source_width,
-                    (source_bottom - blur_offset.1) / source_height,
-                ],
-            },
-            FilterVertexWithDoubleBlur {
-                position: [0.0, 1.0],
-                source_uv: [source_left / source_width, source_bottom / source_height],
-                blur_uv_left: [
-                    (source_left + blur_offset.0) / source_width,
-                    (source_bottom + blur_offset.1) / source_height,
-                ],
-                blur_uv_right: [
-                    (source_left - blur_offset.0) / source_width,
-                    (source_bottom - blur_offset.1) / source_height,
-                ],
-            },
-        ]
+        filter_vertices_with_double_blur(self.region(), blur, blur_offset)
     }
 }
 
@@ -379,3 +363,94 @@ pub const VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_DOUBLE_BLUR: [wgpu::VertexBuff
             3 => Float32x2,
         ],
     }];
+
+#[cfg(test)]
+mod blur_layer_uv_tests {
+    use super::*;
+
+    /// A cache texture rounded up to a 64px grid, holding a 247x226 region.
+    const OVERSIZED_SOURCE: FilterRegion = FilterRegion {
+        texture_size: (256, 256),
+        point: (0, 0),
+        size: (247, 226),
+    };
+
+    /// The blur pass allocates its target at exactly the filtered region's size.
+    const BLUR_LAYER: FilterRegion = FilterRegion {
+        texture_size: (247, 226),
+        point: (0, 0),
+        size: (247, 226),
+    };
+
+    #[test]
+    fn a_blur_layer_is_sampled_across_the_whole_of_its_own_texture() {
+        let vertices = filter_vertices_with_blur(OVERSIZED_SOURCE, BLUR_LAYER, (0.0, 0.0));
+
+        assert_eq!(vertices[0].blur_uv, [0.0, 0.0]);
+        assert_eq!(
+            vertices[2].blur_uv,
+            [1.0, 1.0],
+            "the blurred layer fills its own texture, so its far corner is 1,1 however large the \
+             source texture is"
+        );
+    }
+
+    #[test]
+    fn the_source_keeps_its_own_share_of_an_oversized_texture() {
+        let vertices = filter_vertices_with_blur(OVERSIZED_SOURCE, BLUR_LAYER, (0.0, 0.0));
+
+        assert_eq!(vertices[0].source_uv, [0.0, 0.0]);
+        assert_eq!(vertices[2].source_uv, [247.0 / 256.0, 226.0 / 256.0]);
+    }
+
+    #[test]
+    fn a_blur_offset_is_scaled_by_the_layer_it_offsets_into() {
+        let vertices = filter_vertices_with_blur(OVERSIZED_SOURCE, BLUR_LAYER, (4.0, -8.0));
+
+        assert_eq!(vertices[0].blur_uv, [4.0 / 247.0, -8.0 / 226.0]);
+    }
+
+    #[test]
+    fn an_exactly_sized_source_is_unchanged() {
+        // The overwhelmingly common case, and the one that hid this: when the texture is exactly
+        // its region, normalising against either gives the same numbers.
+        let exact = FilterRegion {
+            texture_size: (463, 498),
+            point: (0, 0),
+            size: (463, 498),
+        };
+        let vertices = filter_vertices_with_blur(exact, exact, (0.0, 0.0));
+
+        assert_eq!(vertices[0].source_uv, [0.0, 0.0]);
+        assert_eq!(vertices[0].blur_uv, [0.0, 0.0]);
+        assert_eq!(vertices[2].source_uv, [1.0, 1.0]);
+        assert_eq!(vertices[2].blur_uv, [1.0, 1.0]);
+    }
+
+    #[test]
+    fn a_source_offset_within_a_larger_texture_is_preserved() {
+        // `BitmapData.applyFilter` filters a sub-rect of a bigger texture, so the source origin is
+        // not always zero.
+        let sub_rect = FilterRegion {
+            texture_size: (200, 100),
+            point: (50, 25),
+            size: (100, 50),
+        };
+        let vertices = filter_vertices_with_blur(sub_rect, sub_rect, (0.0, 0.0));
+
+        assert_eq!(vertices[0].source_uv, [50.0 / 200.0, 25.0 / 100.0]);
+        assert_eq!(vertices[2].source_uv, [150.0 / 200.0, 75.0 / 100.0]);
+    }
+
+    #[test]
+    fn a_double_blur_offsets_in_both_directions_within_its_own_layer() {
+        let vertices = filter_vertices_with_double_blur(OVERSIZED_SOURCE, BLUR_LAYER, (4.0, 8.0));
+
+        assert_eq!(vertices[0].blur_uv_left, [4.0 / 247.0, 8.0 / 226.0]);
+        assert_eq!(vertices[0].blur_uv_right, [-4.0 / 247.0, -8.0 / 226.0]);
+        assert_eq!(
+            vertices[2].blur_uv_left,
+            [(247.0 + 4.0) / 247.0, (226.0 + 8.0) / 226.0]
+        );
+    }
+}

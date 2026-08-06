@@ -50,31 +50,31 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     opt.aether_aqw_timeline_child_rebind = !opt.no_aether_aqw_timeline_child_rebind;
     opt.aether_aqw_mouse_motion_coalescing = !opt.no_aether_aqw_mouse_motion_coalescing;
     opt.aether_aqw_avm2_broadcast_fast_path = !opt.no_aether_aqw_avm2_broadcast_fast_path;
-    // NOT enabled by the preset: it visibly corrupts what it caches.
+    // Still opt-in, but the bug that kept it that way is fixed and awaiting confirmation in game.
     //
     // The adaptive avatar cache is what turns on BitmapCacheTexturePolicy::BoundedReuse, which keeps
     // an existing, slightly oversized cache texture when an object's bounds drift instead of
-    // reallocating. That is exactly the population it goes wrong on -- anything whose size changes
-    // while it animates. Glow and drop-shadow layers on fire effects, weapon and armour trims,
-    // damage and healing numbers, NPC avatars and the Book of Lore's badges all render clipped to a
-    // rectangle and offset from where they belong.
+    // reallocating. Everything it corrupted -- glow and drop-shadow layers on fire effects, weapon
+    // and armour trims, damage and healing numbers, NPC avatars, the Book of Lore's badges -- was a
+    // filter drawn onto a texture larger than its contents.
     //
-    // Confirmed by A/B rather than inference: the same session with
-    // --no-aether-aqw-adaptive-avatar-cache renders all of them correctly. The flag stays so the
-    // underlying bug can be reproduced on demand; the cause is not yet understood, so it does not
-    // belong on by default.
+    // Those filters sample two textures at once: the source, and a separately allocated blurred
+    // layer the size of the filtered region. Both sets of UVs were normalised against the source
+    // texture, which is right only while that texture is exactly its own region. Oversize it and
+    // the glow is sampled at region/texture of its correct scale, so it renders shrunk toward the
+    // top left of the object it belongs to. Fixed in filters.rs; see the tests there.
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
-    // NOT enabled by the preset: it corrupts what it renders.
+    // Still opt-in for the same reason, and cleared by the same fix.
     //
-    // The grid is a large win on paper. Enabling it took texture creation from 7.0 GB/s to
-    // 0.22 GB/s and peak resident memory from 4.67 GB to 1.12 GB, because it collapses the
-    // per-frame bounds drift that no pool setting could absorb. But glow layers, text, skill icons
-    // and buttons all render wrong with it on.
+    // The grid is a large win: it took texture creation from 7.0 GB/s to 0.22 GB/s and peak
+    // resident memory from 4.67 GB to 1.12 GB, because it collapses the per-frame bounds drift that
+    // no pool setting could absorb. It cost nothing in frame rate either way, which is what ruled
+    // allocation out as the reason frames are slow.
     //
-    // That is the same population the adaptive avatar cache corrupts, and this narrows the cause
-    // for both: the grid never reuses a texture across a bounds change, it only allocates one
-    // larger than its contents. So the fault is in the oversized-texture path itself, not in
-    // reusing a stale one, which is where that bug was assumed to live.
+    // It is also what located the fault. The grid only ever allocates a texture larger than its
+    // contents; it never reuses one across a bounds change. Corrupting the same things the avatar
+    // cache does proved the oversizing was to blame rather than the reuse, and that is where the
+    // filter UV bug turned out to be.
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment

@@ -408,6 +408,8 @@ impl CommandTarget {
         descriptors: &Descriptors,
         region: (u32, u32, u32, u32),
     ) -> wgpu::BindGroup {
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_bind_group_created();
         let (rx, ry, rw, rh) = region;
         let (local_x, local_y) = (
             rx.saturating_sub(self.origin.0) as f32,

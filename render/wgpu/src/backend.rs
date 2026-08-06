@@ -556,6 +556,13 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             }
         };
 
+        #[cfg(feature = "aether_metrics")]
+        let submit_started = std::time::Instant::now();
+        #[cfg(feature = "aether_metrics")]
+        let cache_entry_count = cache_entries.len() as u64;
+        #[cfg(feature = "aether_metrics")]
+        let cache_started = std::time::Instant::now();
+
         for entry in cache_entries {
             let texture = as_texture(&entry.handle);
             let logical_size = bitmap_cache_filter_source_size(
@@ -653,6 +660,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             // but its hundreds of children each have their own bitmap caches).
             self.active_frame.maybe_flush(&self.descriptors);
         }
+        #[cfg(feature = "aether_metrics")]
+        let cache_elapsed = cache_started.elapsed();
 
         self.surface.draw_commands_and_copy_to(
             frame_output.view(),
@@ -677,6 +686,12 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             .submit_for_target(&self.descriptors, &self.target, frame_output);
         let general_maintenance = self.texture_pool.finish_frame();
         let offscreen_maintenance = self.offscreen_texture_pool.finish_frame();
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_submit_frame(
+            submit_started.elapsed(),
+            cache_elapsed,
+            cache_entry_count,
+        );
         #[cfg(feature = "aether_metrics")]
         crate::aether_metrics::record_pool_maintenance(
             crate::aether_metrics::TexturePoolKind::General,

@@ -185,6 +185,8 @@ impl Surface {
                     needs_stencil,
                     transforms,
                 } => {
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_encoded_chunk(chunk.len() as u64, false);
                     transforms.copy_to(
                         staging_belt,
                         &descriptors.device,
@@ -292,9 +294,13 @@ impl Surface {
                         _ => &target,
                     };
 
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_encoded_chunk(0, true);
                     let parent_blend_buffer =
                         parent.update_blend_buffer(descriptors, texture_pool, draw_encoder);
 
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_bind_group_created();
                     let blend_bind_group =
                         descriptors
                             .device

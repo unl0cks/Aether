@@ -393,12 +393,38 @@ impl WgpuPoolTotals {
 struct WgpuTexturePoolTotals {
     general: WgpuPoolTotals,
     offscreen: WgpuPoolTotals,
+    /// CPU time the interval spent creating textures, and how many it created. This lands inside
+    /// the render time reported below, so the two can be compared directly.
+    texture_create_nanos: u64,
+    texture_creations: u64,
+    submit_nanos: u64,
+    cache_entry_nanos: u64,
+    cache_entries: u64,
+    render_passes: u64,
+    draw_commands: u64,
+    blend_chunks: u64,
+    bind_groups: u64,
 }
 
 impl WgpuTexturePoolTotals {
     fn add(&mut self, sample: WgpuMetricsSnapshot) {
         self.general.add(sample.general);
         self.offscreen.add(sample.offscreen);
+        self.texture_create_nanos = self
+            .texture_create_nanos
+            .saturating_add(sample.texture_create_nanos);
+        self.texture_creations = self
+            .texture_creations
+            .saturating_add(sample.texture_creations);
+        self.submit_nanos = self.submit_nanos.saturating_add(sample.submit_nanos);
+        self.cache_entry_nanos = self
+            .cache_entry_nanos
+            .saturating_add(sample.cache_entry_nanos);
+        self.cache_entries = self.cache_entries.saturating_add(sample.cache_entries);
+        self.render_passes = self.render_passes.saturating_add(sample.render_passes);
+        self.draw_commands = self.draw_commands.saturating_add(sample.draw_commands);
+        self.blend_chunks = self.blend_chunks.saturating_add(sample.blend_chunks);
+        self.bind_groups = self.bind_groups.saturating_add(sample.bind_groups);
     }
 
     fn take(&mut self) -> Self {
@@ -871,6 +897,12 @@ impl AetherMetrics {
                 &line.tick,
                 &line.player_render,
                 &line.gui_present,
+                line.wgpu_texture_pools.texture_create_nanos,
+                line.wgpu_texture_pools.texture_creations,
+                line.wgpu_texture_pools.submit_nanos,
+                line.wgpu_texture_pools.cache_entry_nanos,
+                line.wgpu_texture_pools.cache_entries,
+                &line.wgpu_texture_pools,
             )
         );
 
@@ -908,13 +940,21 @@ fn perf_summary_line(
     tick: &Distribution,
     player_render: &Distribution,
     gui_present: &Distribution,
+    texture_create_nanos: u64,
+    texture_creations: u64,
+    submit_nanos: u64,
+    cache_entry_nanos: u64,
+    cache_entries: u64,
+    encoding: &WgpuTexturePoolTotals,
 ) -> String {
     // Clamping to a microsecond rather than to MIN_POSITIVE: dividing by the latter overflows to
     // infinity, which is not an improvement on dividing by zero.
     let seconds = interval_us.max(1) as f64 / 1_000_000.0;
+    let rendered_frames = render_frames.max(1) as f64;
     format!(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
-         present {:.1}/{:.1} ms (avg/max)",
+         present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries, \
+         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} per frame",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -923,6 +963,17 @@ fn perf_summary_line(
         player_render.max_ms,
         gui_present.mean_ms,
         gui_present.max_ms,
+        // All four are shares of `render` above. `render` minus `submit` is the core's own
+        // display-list traversal and command building, which nothing else reports.
+        submit_nanos as f64 / 1_000_000.0 / rendered_frames,
+        cache_entry_nanos as f64 / 1_000_000.0 / rendered_frames,
+        cache_entries as f64 / rendered_frames,
+        texture_create_nanos as f64 / 1_000_000.0 / rendered_frames,
+        texture_creations as f64 / rendered_frames,
+        encoding.render_passes as f64 / rendered_frames,
+        encoding.draw_commands as f64 / rendered_frames,
+        encoding.blend_chunks as f64 / rendered_frames,
+        encoding.bind_groups as f64 / rendered_frames,
     )
 }
 
