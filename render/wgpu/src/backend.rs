@@ -687,6 +687,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             crate::aether_metrics::TexturePoolKind::Offscreen,
             offscreen_maintenance,
         );
+        // Sampled here rather than read inside the device-lost callback, which must not reach back
+        // into the device it is reporting the death of. These are plain atomic loads.
+        #[cfg(feature = "aether_metrics")]
+        {
+            let hal = self.descriptors.device.get_internal_counters().hal;
+            crate::aether_metrics::record_gpu_residency(
+                hal.texture_memory.read().max(0) as u64,
+                hal.textures.read().max(0) as u64,
+                hal.memory_allocations.read().max(0) as u64,
+            );
+        }
         #[cfg(not(feature = "aether_metrics"))]
         let _ = (general_maintenance, offscreen_maintenance);
     }

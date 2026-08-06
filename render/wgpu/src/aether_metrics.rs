@@ -366,6 +366,55 @@ mod tests {
         assert_eq!(reset.available_bytes_after_maintenance, 0);
         assert_eq!(reset.globals_available_after_maintenance, 0);
     }
+
+    #[test]
+    fn saturated_census_still_attributes_the_overflow_and_counts_its_bytes() {
+        // The table fills within a minute of real play, and once it does every later allocation
+        // lands in the overflow. A session reported 83,252 of 140,258 allocations there, excluded
+        // from the totals and unattributed -- so the visible rows looked like the whole story.
+        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        reset_texture_census();
+        for height in 0..TEXTURE_BUCKETS as u32 {
+            record_texture_created(TextureOrigin::Pool, 1, height + 1, 1, 10);
+        }
+
+        record_texture_created(TextureOrigin::Bitmap, 4096, 4096, 1, 67_108_864);
+
+        let report = texture_census_report(4).join("\n");
+        assert!(
+            report.contains("(table full)"),
+            "a saturated table must say so rather than report 512 as a finding: {report}"
+        );
+        assert!(
+            report.contains("bitmap (sizes past the table)"),
+            "overflow must still name which origin allocated it: {report}"
+        );
+        assert!(
+            report.contains("67.1 MB"),
+            "overflow must carry its bytes: {report}"
+        );
+        assert!(
+            report.contains("513 allocations"),
+            "the header total must include the overflow: {report}"
+        );
+    }
+
+    #[test]
+    fn census_reports_live_residency_so_churn_is_distinguishable_from_retention() {
+        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        reset_texture_census();
+        record_gpu_residency(39_600_000_000, 1185, 812);
+
+        let report = texture_census_report(1).join("\n");
+        assert!(
+            report.contains("1185 textures"),
+            "live texture count must appear: {report}"
+        );
+        assert!(
+            report.contains("39.60 GB resident"),
+            "resident bytes are the figure that explains a device loss: {report}"
+        );
+    }
 }
 
 // ---- texture allocation census -------------------------------------------------------------
@@ -421,7 +470,61 @@ impl TextureBucketCounters {
 const TEXTURE_BUCKETS: usize = 512;
 static TEXTURE_CENSUS: [TextureBucketCounters; TEXTURE_BUCKETS] =
     [const { TextureBucketCounters::new() }; TEXTURE_BUCKETS];
-static TEXTURE_CENSUS_OVERFLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Allocations that arrived after the table filled, split by origin and carrying their bytes.
+///
+/// A single untyped counter was not enough. AQW loads hundreds of distinctly-sized avatar parts in
+/// the first minute, so all 512 slots fill early and everything afterwards lands here: a real
+/// session reported 83,252 of its 140,258 allocations as overflow. Reporting 59% of the census as
+/// one anonymous number, and leaving those bytes out of the totals, made the visible rows look far
+/// more conclusive than they were.
+struct OverflowCounters {
+    count: AtomicU64,
+    bytes: AtomicU64,
+}
+
+impl OverflowCounters {
+    const fn new() -> Self {
+        Self {
+            count: AtomicU64::new(0),
+            bytes: AtomicU64::new(0),
+        }
+    }
+}
+
+static TEXTURE_CENSUS_OVERFLOW: [OverflowCounters; 2] =
+    [const { OverflowCounters::new() }; 2];
+
+/// Last sampled live-resource figures from wgpu-hal. The census above counts textures as they are
+/// *created*, which cannot distinguish per-frame churn that is freed again from memory that is
+/// still held -- and only the second kind loses the device. Recorded from the render loop rather
+/// than read in the device-lost callback, which must not reach back into the dying device.
+static LIVE_TEXTURE_BYTES: AtomicU64 = AtomicU64::new(0);
+static LIVE_TEXTURE_COUNT: AtomicU64 = AtomicU64::new(0);
+static LIVE_MEMORY_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
+static LIVE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+
+/// Sample of live GPU resources, taken once per frame from `Device::get_internal_counters`.
+pub fn record_gpu_residency(texture_bytes: u64, textures: u64, memory_allocations: u64) {
+    LIVE_TEXTURE_BYTES.store(texture_bytes, Ordering::Relaxed);
+    LIVE_TEXTURE_COUNT.store(textures, Ordering::Relaxed);
+    LIVE_MEMORY_ALLOCATIONS.store(memory_allocations, Ordering::Relaxed);
+    LIVE_SAMPLES.fetch_add(1, Ordering::Relaxed);
+}
+
+fn overflow_index(origin: TextureOrigin) -> usize {
+    match origin {
+        TextureOrigin::Pool => 0,
+        TextureOrigin::Bitmap => 1,
+    }
+}
+
+fn overflow_origin(index: usize) -> TextureOrigin {
+    match index {
+        0 => TextureOrigin::Pool,
+        _ => TextureOrigin::Bitmap,
+    }
+}
 
 fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> u64 {
     let origin = match origin {
@@ -457,7 +560,26 @@ pub fn record_texture_created(
             return;
         }
     }
-    TEXTURE_CENSUS_OVERFLOW.fetch_add(1, Ordering::Relaxed);
+    let overflow = &TEXTURE_CENSUS_OVERFLOW[overflow_index(origin)];
+    overflow.count.fetch_add(1, Ordering::Relaxed);
+    overflow.bytes.fetch_add(bytes, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+fn reset_texture_census() {
+    for slot in &TEXTURE_CENSUS {
+        slot.key.store(0, Ordering::Relaxed);
+        slot.count.store(0, Ordering::Relaxed);
+        slot.bytes.store(0, Ordering::Relaxed);
+    }
+    for slot in &TEXTURE_CENSUS_OVERFLOW {
+        slot.count.store(0, Ordering::Relaxed);
+        slot.bytes.store(0, Ordering::Relaxed);
+    }
+    LIVE_TEXTURE_BYTES.store(0, Ordering::Relaxed);
+    LIVE_TEXTURE_COUNT.store(0, Ordering::Relaxed);
+    LIVE_MEMORY_ALLOCATIONS.store(0, Ordering::Relaxed);
+    LIVE_SAMPLES.store(0, Ordering::Relaxed);
 }
 
 /// One line per size bucket, biggest total bytes first. Safe to call from a device-loss handler.
@@ -495,19 +617,55 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
         .collect();
     rows.sort_by(|a, b| b.0.cmp(&a.0));
 
-    let total_bytes: u64 = rows.iter().map(|r| r.0).sum();
-    let total_count: u64 = rows.iter().map(|r| r.1).sum();
+    let overflow_count: u64 = TEXTURE_CENSUS_OVERFLOW
+        .iter()
+        .map(|slot| slot.count.load(Ordering::Relaxed))
+        .sum();
+    let overflow_bytes: u64 = TEXTURE_CENSUS_OVERFLOW
+        .iter()
+        .map(|slot| slot.bytes.load(Ordering::Relaxed))
+        .sum();
+    let total_bytes: u64 =
+        rows.iter().map(|r| r.0).sum::<u64>().saturating_add(overflow_bytes);
+    let total_count: u64 =
+        rows.iter().map(|r| r.1).sum::<u64>().saturating_add(overflow_count);
+    let used_buckets = rows.len();
     let mut out = vec![format!(
-        "texture census: {} allocations, {:.1} GB created in total, {} distinct sizes",
+        "texture census: {} allocations, {:.1} GB created in total, {}/{} size buckets used{}",
         total_count,
         total_bytes as f64 / 1e9,
-        rows.len(),
+        used_buckets,
+        TEXTURE_BUCKETS,
+        if used_buckets >= TEXTURE_BUCKETS {
+            " (table full)"
+        } else {
+            ""
+        },
     )];
-    out.extend(rows.into_iter().take(limit).map(|r| r.2));
-    let overflowed = TEXTURE_CENSUS_OVERFLOW.load(Ordering::Relaxed);
-    if overflowed > 0 {
+
+    // Created-vs-resident is the whole question: churn that is freed again costs frame time, but
+    // only memory still held loses the device. Report it first, above the size breakdown.
+    if LIVE_SAMPLES.load(Ordering::Relaxed) > 0 {
         out.push(format!(
-            "  (+{overflowed} allocations in sizes beyond the {TEXTURE_BUCKETS}-bucket table)"
+            "  live at fault: {} textures, {:.2} GB resident, {} device allocations",
+            LIVE_TEXTURE_COUNT.load(Ordering::Relaxed),
+            LIVE_TEXTURE_BYTES.load(Ordering::Relaxed) as f64 / 1e9,
+            LIVE_MEMORY_ALLOCATIONS.load(Ordering::Relaxed),
+        ));
+    }
+
+    out.extend(rows.into_iter().take(limit).map(|r| r.2));
+
+    for (index, slot) in TEXTURE_CENSUS_OVERFLOW.iter().enumerate() {
+        let count = slot.count.load(Ordering::Relaxed);
+        if count == 0 {
+            continue;
+        }
+        out.push(format!(
+            "{:>6} (sizes past the table)  {:>7} allocs  {:>9.1} MB",
+            overflow_origin(index).name(),
+            count,
+            slot.bytes.load(Ordering::Relaxed) as f64 / 1e6,
         ));
     }
     out
