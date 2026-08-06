@@ -345,13 +345,29 @@ impl<'gc> UpdateContext<'gc> {
             *self.frame_rate = movie.frame_rate().into();
         }
 
-        info!(
-            "Loaded SWF version {}, resolution {}x{} @ {} FPS",
-            movie.version(),
-            movie.width(),
-            movie.height(),
-            self.frame_rate,
-        );
+        // Report the movie's own declared rate as well as the one the player will run at. With a
+        // forced frame rate these differ, and printing only the effective rate made the log look
+        // like evidence about how the content was authored when it was only echoing the override
+        // back -- which is exactly the question asked when animation speed is in doubt.
+        let authored_frame_rate = movie.frame_rate().to_f32();
+        if self.forced_frame_rate {
+            info!(
+                "Loaded SWF version {}, resolution {}x{} @ {} FPS (authored {} FPS, overridden)",
+                movie.version(),
+                movie.width(),
+                movie.height(),
+                self.frame_rate,
+                authored_frame_rate,
+            );
+        } else {
+            info!(
+                "Loaded SWF version {}, resolution {}x{} @ {} FPS",
+                movie.version(),
+                movie.width(),
+                movie.height(),
+                self.frame_rate,
+            );
+        }
 
         *self.root_swf = Arc::new(movie);
         *self.instance_counter = 0;
