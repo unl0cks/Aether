@@ -12,6 +12,7 @@ mod aether_preset;
 mod app;
 mod backends;
 mod cli;
+mod crash_report;
 mod custom_event;
 mod dbus;
 mod gui;
@@ -86,6 +87,26 @@ fn panic_hook(info: &PanicHookInfo) {
     });
 
     let message = info.payload_as_str().unwrap_or("panic occurred");
+
+    if crash_report::is_armed() {
+        let mut avm2 = String::new();
+        CALLSTACK.with(|callstack| {
+            if let Some(callstack) = &*callstack.borrow() {
+                callstack.avm2(|stack| avm2 = stack.to_string());
+            }
+        });
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        if let Some(path) = crash_report::write(
+            "panic",
+            &info.to_string(),
+            &[
+                crash_report::Section::new("AVM2 Callstack", avm2),
+                crash_report::Section::new("Backtrace", backtrace.to_string()),
+            ],
+        ) {
+            eprintln!("Aether crash report written to {}", path.display());
+        }
+    }
 
     if rfd::MessageDialog::new()
         .set_level(rfd::MessageLevel::Error)
@@ -166,6 +187,17 @@ fn main() -> Result<(), Error> {
         tracing::warn!("Failed to migrate logs: {}", err);
     }
 
+    // Armed before the subscriber exists so the ring buffer catches startup as well.
+    if preferences.cli.aether_crash_report {
+        crash_report::arm(
+            preferences
+                .cli
+                .aether_crash_report_dir
+                .clone()
+                .unwrap_or_else(|| logs_path.clone()),
+        );
+    }
+
     // [NA] `_guard` cannot be `_` or it'll immediately drop
     // https://docs.rs/tracing-appender/latest/tracing_appender/non_blocking/index.html
     let (non_blocking_file, _file_guard) = tracing_appender::non_blocking(File::create(log_path)?);
@@ -184,6 +216,7 @@ fn main() -> Result<(), Error> {
 
     let subscriber = tracing_subscriber::registry()
         .with(env_filter)
+        .with(crash_report::RecentLogLayer)
         .with(Layer::new().with_writer(non_blocking_stdout))
         .with(Layer::new().with_writer(non_blocking_file).with_ansi(false));
 

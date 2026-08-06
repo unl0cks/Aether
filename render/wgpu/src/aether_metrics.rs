@@ -503,6 +503,10 @@ static LIVE_TEXTURE_BYTES: AtomicU64 = AtomicU64::new(0);
 static LIVE_TEXTURE_COUNT: AtomicU64 = AtomicU64::new(0);
 static LIVE_MEMORY_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 static LIVE_SAMPLES: AtomicU64 = AtomicU64::new(0);
+/// High-water marks. The per-frame sample alone only says what was resident on the last frame
+/// before the fault, which cannot distinguish "never grew" from "grew and was freed again".
+static PEAK_TEXTURE_BYTES: AtomicU64 = AtomicU64::new(0);
+static PEAK_TEXTURE_COUNT: AtomicU64 = AtomicU64::new(0);
 
 /// Sample of live GPU resources, taken once per frame from `Device::get_internal_counters`.
 pub fn record_gpu_residency(texture_bytes: u64, textures: u64, memory_allocations: u64) {
@@ -510,6 +514,8 @@ pub fn record_gpu_residency(texture_bytes: u64, textures: u64, memory_allocation
     LIVE_TEXTURE_COUNT.store(textures, Ordering::Relaxed);
     LIVE_MEMORY_ALLOCATIONS.store(memory_allocations, Ordering::Relaxed);
     LIVE_SAMPLES.fetch_add(1, Ordering::Relaxed);
+    PEAK_TEXTURE_BYTES.fetch_max(texture_bytes, Ordering::Relaxed);
+    PEAK_TEXTURE_COUNT.fetch_max(textures, Ordering::Relaxed);
 }
 
 fn overflow_index(origin: TextureOrigin) -> usize {
@@ -580,6 +586,8 @@ fn reset_texture_census() {
     LIVE_TEXTURE_COUNT.store(0, Ordering::Relaxed);
     LIVE_MEMORY_ALLOCATIONS.store(0, Ordering::Relaxed);
     LIVE_SAMPLES.store(0, Ordering::Relaxed);
+    PEAK_TEXTURE_BYTES.store(0, Ordering::Relaxed);
+    PEAK_TEXTURE_COUNT.store(0, Ordering::Relaxed);
 }
 
 /// One line per size bucket, biggest total bytes first. Safe to call from a device-loss handler.
@@ -651,6 +659,11 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
             LIVE_TEXTURE_COUNT.load(Ordering::Relaxed),
             LIVE_TEXTURE_BYTES.load(Ordering::Relaxed) as f64 / 1e9,
             LIVE_MEMORY_ALLOCATIONS.load(Ordering::Relaxed),
+        ));
+        out.push(format!(
+            "  peak live:     {} textures, {:.2} GB resident",
+            PEAK_TEXTURE_COUNT.load(Ordering::Relaxed),
+            PEAK_TEXTURE_BYTES.load(Ordering::Relaxed) as f64 / 1e9,
         ));
     }
 

@@ -145,6 +145,10 @@ panic = "unwind"
 
 [profile.release]
 panic = "abort"
+# Without this a release backtrace names functions but no file or line, which is most of what makes
+# a crash report worth reading. Line tables only -- no variables -- so the cost is binary size and
+# link time, not runtime.
+debug = "line-tables-only"
 
 [profile.dist]
 inherits = "release"

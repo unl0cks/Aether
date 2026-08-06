@@ -8,7 +8,7 @@ use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::time::Duration;
 use url::Url;
@@ -145,6 +145,16 @@ pub struct Opt {
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long)]
     pub aether_avm_trace: bool,
+
+    /// Write a self-contained crash report when Aether stops on a fatal error. Covers a lost
+    /// graphics device as well as a panic; the former exits gracefully and is otherwise invisible
+    /// to crash handlers.
+    #[clap(long)]
+    pub aether_crash_report: bool,
+
+    /// Directory to write crash reports into. Defaults to Aether's log directory.
+    #[clap(long, requires = "aether_crash_report")]
+    pub aether_crash_report_dir: Option<PathBuf>,
 
     /// A "flashvars" parameter to provide to the movie.
     /// This can be repeated multiple times, for example -Pkey=value -Pfoo=bar.

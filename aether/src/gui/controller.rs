@@ -359,7 +359,8 @@ impl GuiController {
     fn report_device_fault(&mut self) -> GuiRenderOutcome {
         if !self.device_fault_reported {
             self.device_fault_reported = true;
-            match self.descriptors.device_status.fault() {
+            let fault = self.descriptors.device_status.fault();
+            match &fault {
                 Some(fault) => tracing::error!(
                     "{}. Aether has to close. Details: {}",
                     fault.kind.summary(),
@@ -367,6 +368,28 @@ impl GuiController {
                 ),
                 None => {
                     tracing::error!("The graphics device stopped responding. Aether has to close.")
+                }
+            }
+
+            // A lost device unwinds cleanly and exits, so the panic hook never sees it. This is the
+            // only point where the fault and the renderer's own diagnostics are both still in hand.
+            if crate::crash_report::is_armed() {
+                let detail = match &fault {
+                    Some(fault) => format!("{}: {}", fault.kind.summary(), fault.detail),
+                    None => "the graphics device stopped responding".to_string(),
+                };
+                #[cfg(feature = "metrics")]
+                let sections = vec![crate::crash_report::Section::new(
+                    "Renderer texture census",
+                    ruffle_render_wgpu::aether_metrics::texture_census_report(24).join("\n"),
+                )];
+                #[cfg(not(feature = "metrics"))]
+                let sections: Vec<crate::crash_report::Section> = Vec::new();
+
+                if let Some(path) =
+                    crate::crash_report::write("graphics device lost", &detail, &sections)
+                {
+                    tracing::error!("Crash report written to {}", path.display());
                 }
             }
         }

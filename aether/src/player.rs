@@ -289,6 +289,9 @@ impl ActivePlayer {
         .map_err(|e| anyhow!(e.to_string()))
         .expect("Couldn't create wgpu rendering backend");
         RENDER_INFO.with(|i| *i.borrow_mut() = Some(renderer.debug_info().to_string()));
+        // The thread_local above is only reachable from this thread; a crash report may be written
+        // from wgpu's callback thread, so keep a copy somewhere global.
+        crate::crash_report::record_environment(format!("renderer: {}", renderer.debug_info()));
 
         if opt.player.dummy_external_interface.unwrap_or_default() {
             builder = builder.with_external_interface(Box::new(DesktopExternalInterfaceProvider {
