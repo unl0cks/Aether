@@ -394,6 +394,13 @@ fn main() -> Result<(), Error> {
         ruffle_core::aether_diagnostics::shutdown_input_trace();
         ruffle_core::aether_diagnostics::shutdown_timeline_trace();
         ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(false);
+
+        // The census used to print only on a fault, which made the pool's own reuse figures
+        // reachable only by crashing -- so a session that survived taught us nothing. Emit it at
+        // the end of every run instead; the counters are process globals and outlive the device.
+        for line in ruffle_render_wgpu::aether_metrics::texture_census_report(20) {
+            tracing::info!(target: "aether::session", "{line}");
+        }
     }
     ruffle_core::aether_diagnostics::set_movement_stop_guard_enabled(false);
     ruffle_core::aether_compatibility::set_timeline_child_rebind_enabled(false);
