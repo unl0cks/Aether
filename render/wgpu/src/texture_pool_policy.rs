@@ -26,6 +26,17 @@ pub enum OffscreenTexturePoolPolicy {
 /// instead; the cap still bounds the pool, it just bounds it somewhere useful.
 pub(crate) const GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES: u64 = 384 * 1024 * 1024;
 
+/// Entries the general pool may cache, summed across every size bucket.
+///
+/// This was 128, derived as a quarter of the offscreen pool's 512. The number is a count across
+/// *all* buckets, and quantising blend regions to a 128px grid yields hundreds of distinct sizes on
+/// a 2560x1365 stage -- so 128 could not hold even one texture per size a frame touches, and the
+/// hot buckets were evicted every frame while the 384 MiB budget went largely unspent. A measured
+/// session peaked at 3.15 GB resident on a 10 GB card, so bytes were never the binding constraint;
+/// the entry count was, and it was bounding the wrong thing. Size it so the byte budget is what
+/// bounds the pool, because that is the limit that actually protects memory.
+pub(crate) const GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES: usize = 1024;
+
 /// Keep a companion pool for the whole-surface render targets that blends and masks allocate,
 /// whenever the caller explicitly enables bounded offscreen reuse. These targets repeat every
 /// frame in animated Flash content, but retaining every size encountered across maps and login
@@ -38,7 +49,7 @@ pub(crate) fn general_texture_pool_policy(
         OffscreenTexturePoolPolicy::BoundedReuse(limits) => {
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
                 max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
-                max_cached_entries: (limits.max_cached_entries / 4).clamp(32, 128),
+                max_cached_entries: GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES,
                 max_idle_frames: limits.max_idle_frames.min(1),
                 max_cached_globals: limits.max_cached_globals.min(32),
             })
@@ -89,6 +100,9 @@ pub(crate) struct GlobalsRetentionDecision {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub(crate) struct PoolMaintenanceReport {
+    /// Distinct size buckets the pool is tracking. The entry cap is shared across all of them, so
+    /// this is what says whether that cap can hold anything useful per bucket.
+    pub bucket_count: u64,
     pub available_entries: u64,
     pub available_bytes: u64,
     pub age_evicted_entries: u64,
@@ -297,10 +311,29 @@ mod tests {
             )),
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
                 max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
-                max_cached_entries: 128,
+                max_cached_entries: GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES,
                 max_idle_frames: 1,
                 max_cached_globals: 32,
             })
+        );
+    }
+
+    #[test]
+    fn the_general_pool_entry_cap_clears_one_target_per_size_a_frame_touches() {
+        // Blend regions quantise to a 128px grid, so a 2560x1365 stage can ask for 20x11 distinct
+        // sizes per sample count -- 440 before any unquantised or edge-clamped size joins them. An
+        // entry cap below that cannot keep one texture per size, so the sizes reused every frame
+        // get evicted by the ones used once, which is the churn this budget exists to stop.
+        let widths = 2560_usize.div_ceil(128);
+        let heights = 1365_usize.div_ceil(128);
+        let sizes_per_sample_count = widths * heights;
+        let distinct_sizes = sizes_per_sample_count * 2;
+
+        assert!(
+            GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES >= distinct_sizes,
+            "{} entries cannot hold one texture for each of {} reachable sizes",
+            GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES,
+            distinct_sizes,
         );
     }
 

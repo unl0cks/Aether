@@ -134,6 +134,12 @@ fn saturating_atomic_add(counter: &AtomicU64, value: u64) {
 }
 
 pub fn record_texture_request(kind: TexturePoolKind, reused: bool, allocated_bytes: Option<u64>) {
+    let census = pool_census(kind);
+    census.requests.fetch_add(1, Ordering::Relaxed);
+    if reused {
+        census.reuses.fetch_add(1, Ordering::Relaxed);
+    }
+
     let counters = counters(kind);
     saturating_atomic_add(&counters.requests, 1);
     if reused {
@@ -167,6 +173,21 @@ pub fn record_pool_reset(kind: TexturePoolKind, discarded_available_entries: usi
 }
 
 pub(crate) fn record_pool_maintenance(kind: TexturePoolKind, report: PoolMaintenanceReport) {
+    let census = pool_census(kind);
+    census.buckets.store(report.bucket_count, Ordering::Relaxed);
+    census
+        .available_entries
+        .store(report.available_entries, Ordering::Relaxed);
+    census
+        .available_bytes
+        .store(report.available_bytes, Ordering::Relaxed);
+    census
+        .budget_evicted_entries
+        .fetch_add(report.budget_evicted_entries, Ordering::Relaxed);
+    census
+        .age_evicted_entries
+        .fetch_add(report.age_evicted_entries, Ordering::Relaxed);
+
     let counters = counters(kind);
     saturating_atomic_add(&counters.maintenance_passes, 1);
     counters
@@ -327,6 +348,7 @@ mod tests {
         record_pool_maintenance(
             TexturePoolKind::Offscreen,
             PoolMaintenanceReport {
+                bucket_count: 3,
                 available_entries: 7,
                 available_bytes: 11_000,
                 age_evicted_entries: 2,
@@ -397,6 +419,55 @@ mod tests {
             report.contains("513 allocations"),
             "the header total must include the overflow: {report}"
         );
+    }
+
+    #[test]
+    fn census_reports_pool_reuse_and_how_thinly_the_entry_cap_is_spread() {
+        // Whether the pool reuses anything is the question the entry cap was raised to answer, and
+        // it cannot be read off allocation counts alone -- a request that reuses and a request that
+        // allocates look identical in the size table.
+        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        reset_texture_census();
+        record_texture_request(TexturePoolKind::General, true, Some(64));
+        record_texture_request(TexturePoolKind::General, false, Some(64));
+        record_texture_request(TexturePoolKind::General, false, Some(64));
+        record_texture_request(TexturePoolKind::General, false, Some(64));
+        record_pool_maintenance(
+            TexturePoolKind::General,
+            PoolMaintenanceReport {
+                bucket_count: 412,
+                available_entries: 96,
+                available_bytes: 310_000_000,
+                budget_evicted_entries: 7,
+                age_evicted_entries: 3,
+                ..Default::default()
+            },
+        );
+
+        let report = texture_census_report(1).join("\n");
+        assert!(
+            report.contains("general pool: 1/4 reused (25.0%)"),
+            "reuse ratio must be reported: {report}"
+        );
+        assert!(
+            report.contains("412 buckets"),
+            "bucket count says how thinly the entry cap is divided: {report}"
+        );
+        assert!(
+            report.contains("evicted 7 for budget / 3 for age"),
+            "eviction cause separates a byte limit from an idle limit: {report}"
+        );
+        assert!(
+            !report.contains("offscreen pool:"),
+            "a pool with no requests must not print a line: {report}"
+        );
+
+        // Put the per-interval counters back as they were found. Their post-maintenance figures are
+        // gauges rather than counters, so `take_snapshot` reads without clearing them and the state
+        // this test just wrote would otherwise surface in whichever test runs next.
+        reset_texture_census();
+        record_pool_reset(TexturePoolKind::General, 0);
+        let _ = take_snapshot();
     }
 
     #[test]
@@ -532,6 +603,46 @@ fn overflow_origin(index: usize) -> TextureOrigin {
     }
 }
 
+/// Cumulative pool activity for the crash census.
+///
+/// Deliberately separate from `PoolCounters` above, which the periodic metrics consumer *drains*
+/// every second: a census printed after a fault needs the whole session, not whatever happened to
+/// accrue since the last drain. The reuse ratio is the number that says whether the pool is doing
+/// its job at all, and the bucket count is what says whether the entry cap can hold anything
+/// useful once it is divided across every size a frame touches.
+struct PoolCensusCounters {
+    requests: AtomicU64,
+    reuses: AtomicU64,
+    buckets: AtomicU64,
+    available_entries: AtomicU64,
+    available_bytes: AtomicU64,
+    budget_evicted_entries: AtomicU64,
+    age_evicted_entries: AtomicU64,
+}
+
+impl PoolCensusCounters {
+    const fn new() -> Self {
+        Self {
+            requests: AtomicU64::new(0),
+            reuses: AtomicU64::new(0),
+            buckets: AtomicU64::new(0),
+            available_entries: AtomicU64::new(0),
+            available_bytes: AtomicU64::new(0),
+            budget_evicted_entries: AtomicU64::new(0),
+            age_evicted_entries: AtomicU64::new(0),
+        }
+    }
+}
+
+static POOL_CENSUS: [PoolCensusCounters; 2] = [const { PoolCensusCounters::new() }; 2];
+
+fn pool_census(kind: TexturePoolKind) -> &'static PoolCensusCounters {
+    match kind {
+        TexturePoolKind::General => &POOL_CENSUS[0],
+        TexturePoolKind::Offscreen => &POOL_CENSUS[1],
+    }
+}
+
 fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> u64 {
     let origin = match origin {
         TextureOrigin::Pool => 1_u64,
@@ -588,6 +699,15 @@ fn reset_texture_census() {
     LIVE_SAMPLES.store(0, Ordering::Relaxed);
     PEAK_TEXTURE_BYTES.store(0, Ordering::Relaxed);
     PEAK_TEXTURE_COUNT.store(0, Ordering::Relaxed);
+    for census in &POOL_CENSUS {
+        census.requests.store(0, Ordering::Relaxed);
+        census.reuses.store(0, Ordering::Relaxed);
+        census.buckets.store(0, Ordering::Relaxed);
+        census.available_entries.store(0, Ordering::Relaxed);
+        census.available_bytes.store(0, Ordering::Relaxed);
+        census.budget_evicted_entries.store(0, Ordering::Relaxed);
+        census.age_evicted_entries.store(0, Ordering::Relaxed);
+    }
 }
 
 /// One line per size bucket, biggest total bytes first. Safe to call from a device-loss handler.
@@ -664,6 +784,24 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
             "  peak live:     {} textures, {:.2} GB resident",
             PEAK_TEXTURE_COUNT.load(Ordering::Relaxed),
             PEAK_TEXTURE_BYTES.load(Ordering::Relaxed) as f64 / 1e9,
+        ));
+    }
+
+    for (census, name) in POOL_CENSUS.iter().zip(["general", "offscreen"]) {
+        let requests = census.requests.load(Ordering::Relaxed);
+        if requests == 0 {
+            continue;
+        }
+        let reuses = census.reuses.load(Ordering::Relaxed);
+        out.push(format!(
+            "  {name} pool: {reuses}/{requests} reused ({:.1}%), {} buckets, \
+             {} entries / {:.2} GB retained, evicted {} for budget / {} for age",
+            reuses as f64 * 100.0 / requests as f64,
+            census.buckets.load(Ordering::Relaxed),
+            census.available_entries.load(Ordering::Relaxed),
+            census.available_bytes.load(Ordering::Relaxed) as f64 / 1e9,
+            census.budget_evicted_entries.load(Ordering::Relaxed),
+            census.age_evicted_entries.load(Ordering::Relaxed),
         ));
     }
 

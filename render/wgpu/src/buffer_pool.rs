@@ -245,6 +245,7 @@ impl TexturePool {
         }
 
         PoolMaintenanceReport {
+            bucket_count: u64::try_from(self.pools.len()).unwrap_or(u64::MAX),
             available_entries: textures.available_entries,
             available_bytes: textures.available_bytes,
             age_evicted_entries: textures.age_evicted_entries,
