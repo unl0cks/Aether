@@ -307,6 +307,9 @@ fn main() -> Result<(), Error> {
         );
     }
 
+    let cache_texture_grid = aqw_mode && preferences.cli.aether_aqw_cache_texture_grid;
+    ruffle_core::aether_performance::set_cache_texture_grid_enabled(cache_texture_grid);
+
     let rebind_enabled = aqw_mode && preferences.cli.aether_aqw_timeline_child_rebind;
     ruffle_core::aether_compatibility::set_timeline_child_rebind_enabled(rebind_enabled);
     if rebind_enabled {

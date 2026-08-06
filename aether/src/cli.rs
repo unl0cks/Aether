@@ -142,6 +142,15 @@ pub struct Opt {
     #[clap(skip)]
     pub aether_bounded_offscreen_pool: bool,
 
+    /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
+    /// every frame.
+    #[clap(long, conflicts_with = "no_aether_aqw_cache_texture_grid")]
+    pub aether_aqw_cache_texture_grid: bool,
+
+    /// Allocate cache textures at their exact size, as Ruffle does by default.
+    #[clap(long, conflicts_with = "aether_aqw_cache_texture_grid")]
+    pub no_aether_aqw_cache_texture_grid: bool,
+
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long)]
     pub aether_avm_trace: bool,

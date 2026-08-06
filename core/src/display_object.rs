@@ -157,11 +157,50 @@ enum BitmapCacheTexturePolicy {
     BoundedReuse,
 }
 
+/// Grid that cache texture sizes are rounded up to.
+///
+/// AQW avatars shift their bounds by a pixel or two every frame as they animate, so one object asks
+/// for 247x226, then 248x227, then 249x228. Each is a separate pool bucket that nothing will ever
+/// request again, which is why the offscreen pool sits at 75% reuse however its budget and idle
+/// window are set: raising either just changes whether a doomed entry is discarded for age or for
+/// bytes. Rounding up collapses a whole run of drift into one bucket.
+const BITMAP_CACHE_SIZE_GRID: u32 = 64;
+
+/// Above this, sizes are left exact. A grid cell of slack is cheap on a 200px avatar and wasteful
+/// on a 3000px backdrop, and the very large surfaces are one-offs that never repeat anyway, so
+/// rounding them up buys nothing and costs memory.
+const BITMAP_CACHE_GRID_MAX_DIMENSION: u32 = 1_024;
+
+/// Round a cache texture up to [`BITMAP_CACHE_SIZE_GRID`].
+///
+/// The texture ends up larger than its contents, which the cache already handles: `output_width`
+/// and `output_height` keep the true size, and both drawing and filtering work from that logical
+/// region rather than from the texture's dimensions.
+fn quantise_cache_texture_size(size: (u32, u32)) -> (u32, u32) {
+    if size.0 > BITMAP_CACHE_GRID_MAX_DIMENSION || size.1 > BITMAP_CACHE_GRID_MAX_DIMENSION {
+        return size;
+    }
+
+    let round = |value: u32| {
+        value
+            .div_ceil(BITMAP_CACHE_SIZE_GRID)
+            .saturating_mul(BITMAP_CACHE_SIZE_GRID)
+            .max(value)
+    };
+    (round(size.0), round(size.1))
+}
+
 fn bitmap_cache_texture_plan(
     current: Option<(u32, u32)>,
     requested: (u32, u32),
     policy: BitmapCacheTexturePolicy,
 ) -> BitmapCacheTexturePlan {
+    let requested = if aqw_cache_texture_grid() {
+        quantise_cache_texture_size(requested)
+    } else {
+        requested
+    };
+
     if current == Some(requested) {
         return BitmapCacheTexturePlan::Reuse;
     }
@@ -218,6 +257,64 @@ fn aqw_bounded_cache_texture_reuse() -> bool {
 #[cfg(not(feature = "aether_performance"))]
 fn aqw_bounded_cache_texture_reuse() -> bool {
     false
+}
+
+#[cfg(feature = "aether_performance")]
+fn aqw_cache_texture_grid() -> bool {
+    crate::aether_performance::cache_texture_grid_enabled()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn aqw_cache_texture_grid() -> bool {
+    false
+}
+
+#[cfg(test)]
+mod cache_texture_grid_tests {
+    use super::*;
+
+    #[test]
+    fn a_run_of_drifting_sizes_collapses_to_one_bucket() {
+        // Measured from a real session: one animating object asked for these three sizes in
+        // sequence, and each became a pool bucket nothing ever asked for again.
+        let drift = [(247, 226), (248, 227), (249, 228)];
+        let quantised: Vec<_> = drift
+            .iter()
+            .map(|size| quantise_cache_texture_size(*size))
+            .collect();
+
+        assert!(
+            quantised.windows(2).all(|pair| pair[0] == pair[1]),
+            "a pixel of drift must not change the bucket: {quantised:?}"
+        );
+        assert_eq!(quantised[0], (256, 256));
+    }
+
+    #[test]
+    fn quantising_never_shrinks_a_texture_below_its_contents() {
+        for width in [1_u32, 63, 64, 65, 183, 512, 1023, 1024] {
+            for height in [1_u32, 64, 145, 583, 1024] {
+                let (quantised_width, quantised_height) =
+                    quantise_cache_texture_size((width, height));
+                assert!(
+                    quantised_width >= width && quantised_height >= height,
+                    "{width}x{height} must not shrink to {quantised_width}x{quantised_height}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn oversized_surfaces_are_left_exact() {
+        // These are one-off backdrops and full-stage effects. They never repeat, so rounding them
+        // up buys no reuse and only wastes memory.
+        assert_eq!(
+            quantise_cache_texture_size((3671, 1710)),
+            (3671, 1710),
+            "a surface past the grid limit must be allocated exactly"
+        );
+        assert_eq!(quantise_cache_texture_size((2255, 1763)), (2255, 1763));
+    }
 }
 
 fn adaptive_avatar_cache_dimensions_allowed(width: u32, height: u32) -> bool {

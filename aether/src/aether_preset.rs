@@ -64,6 +64,7 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // underlying bug can be reproduced on demand; the cause is not yet understood, so it does not
     // belong on by default.
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
+    opt.aether_aqw_cache_texture_grid = !opt.no_aether_aqw_cache_texture_grid;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment

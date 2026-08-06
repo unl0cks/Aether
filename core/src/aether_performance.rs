@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 static AVM2_BROADCAST_FAST_PATH: AtomicBool = AtomicBool::new(false);
 static FILTERLESS_HOT_CACHE_BYPASS: AtomicBool = AtomicBool::new(false);
 static ADAPTIVE_AVATAR_CACHE: AtomicBool = AtomicBool::new(false);
+static CACHE_TEXTURE_GRID: AtomicBool = AtomicBool::new(false);
 static IDLE_GPU_UPLOAD_EVICTION: AtomicBool = AtomicBool::new(false);
 
 
@@ -40,6 +41,18 @@ pub fn set_adaptive_avatar_cache_enabled(enabled: bool) {
 #[inline]
 pub fn adaptive_avatar_cache_enabled() -> bool {
     ADAPTIVE_AVATAR_CACHE.load(Ordering::Relaxed)
+}
+
+/// Round cache texture sizes up to a grid so an object whose bounds drift by a pixel per frame
+/// keeps asking the texture pool for the same size instead of a new one every frame.
+#[inline]
+pub fn set_cache_texture_grid_enabled(enabled: bool) {
+    CACHE_TEXTURE_GRID.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn cache_texture_grid_enabled() -> bool {
+    CACHE_TEXTURE_GRID.load(Ordering::Relaxed)
 }
 
 /// Periodically drop GPU uploads for bitmaps that are no longer being drawn.
