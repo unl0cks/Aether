@@ -859,6 +859,21 @@ impl AetherMetrics {
             ),
         };
 
+        // The JSONL carries far more than this, but the first question about any frame-rate
+        // problem is only ever "CPU or GPU", and answering it should not require parsing a file.
+        tracing::info!(
+            target: "aether::perf",
+            "{}",
+            perf_summary_line(
+                line.interval_us,
+                line.cadence.authored_frames_executed,
+                line.render_frames,
+                &line.tick,
+                &line.player_render,
+                &line.gui_present,
+            )
+        );
+
         self.tick_ms.clear();
         self.player_render_ms.clear();
         self.gui_present_ms.clear();
@@ -877,6 +892,38 @@ impl AetherMetrics {
             Err(error) => tracing::warn!("Failed to serialize Aether metrics: {error}"),
         }
     }
+}
+
+/// Condense one reporting interval into a single line.
+///
+/// `tick` is the player's own work for the interval: advancing timelines and running ActionScript.
+/// `render` is building and submitting the frame. `present` is handing it to the compositor. A
+/// scene that is CPU-bound shows a large tick and a small render; one that is GPU-bound shows the
+/// reverse. Separating the SWF's executed frame rate from the host's render rate matters too,
+/// because the two only agree while the player is keeping up with its own frame budget.
+fn perf_summary_line(
+    interval_us: u64,
+    authored_frames_executed: u64,
+    render_frames: usize,
+    tick: &Distribution,
+    player_render: &Distribution,
+    gui_present: &Distribution,
+) -> String {
+    // Clamping to a microsecond rather than to MIN_POSITIVE: dividing by the latter overflows to
+    // infinity, which is not an improvement on dividing by zero.
+    let seconds = interval_us.max(1) as f64 / 1_000_000.0;
+    format!(
+        "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
+         present {:.1}/{:.1} ms (avg/max)",
+        authored_frames_executed as f64 / seconds,
+        render_frames as f64 / seconds,
+        tick.mean_ms,
+        tick.max_ms,
+        player_render.mean_ms,
+        player_render.max_ms,
+        gui_present.mean_ms,
+        gui_present.max_ms,
+    )
 }
 
 impl Drop for AetherMetrics {
@@ -1414,5 +1461,47 @@ mod tests {
         assert_eq!(totals.available_entries_after_maintenance, 7);
         assert_eq!(totals.available_bytes_after_maintenance, 700);
         assert_eq!(totals.globals_available_after_maintenance, 2);
+    }
+
+    fn distribution_of(mean_ms: f64, max_ms: f64) -> Distribution {
+        Distribution {
+            samples: 60,
+            mean_ms,
+            p50_ms: mean_ms,
+            p95_ms: max_ms,
+            p99_ms: max_ms,
+            max_ms,
+        }
+    }
+
+    #[test]
+    fn the_perf_line_tells_a_cpu_bound_interval_from_a_gpu_bound_one() {
+        // The whole point of the line: at 16 fps, is the time in the player or in the renderer?
+        // Identical frame rates, opposite causes.
+        let heavy = distribution_of(48.3, 91.0);
+        let light = distribution_of(8.1, 22.4);
+        let idle = distribution_of(1.2, 3.0);
+
+        let cpu_bound = perf_summary_line(1_000_000, 16, 16, &heavy, &light, &idle);
+        assert!(
+            cpu_bound.contains("swf 16.0/s, render 16.0 fps"),
+            "{cpu_bound}"
+        );
+        assert!(cpu_bound.contains("tick 48.3/91.0 ms"), "{cpu_bound}");
+        assert!(cpu_bound.contains("render 8.1/22.4 ms"), "{cpu_bound}");
+
+        let gpu_bound = perf_summary_line(1_000_000, 16, 16, &light, &heavy, &idle);
+        assert!(gpu_bound.contains("tick 8.1/22.4 ms"), "{gpu_bound}");
+        assert!(gpu_bound.contains("render 48.3/91.0 ms"), "{gpu_bound}");
+    }
+
+    #[test]
+    fn a_zero_length_interval_reports_a_number_rather_than_infinity() {
+        let idle = distribution_of(0.0, 0.0);
+        let line = perf_summary_line(0, 5, 5, &idle, &idle, &idle);
+        assert!(
+            !line.contains("inf") && !line.contains("NaN"),
+            "a flush that lands in the same microsecond must not print infinities: {line}"
+        );
     }
 }

@@ -203,15 +203,21 @@ fn main() -> Result<(), Error> {
     let (non_blocking_file, _file_guard) = tracing_appender::non_blocking(File::create(log_path)?);
     let (non_blocking_stdout, _stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
 
-    let default_log_filter = if preferences.cli.aether_avm_trace {
+    // Aether's own diagnostics are on `aether::*` targets, and the default filter admits `ruffle`
+    // at info but leaves everything else at warn. Without these two, the end-of-session texture
+    // census and the per-interval performance summary are both emitted and then dropped, which
+    // looks exactly like a feature that does not work.
+    let mut default_log_filter = String::from(if preferences.cli.aether_avm_trace {
         "warn,ruffle=info,avm_trace=info"
     } else {
         "warn,ruffle=info,avm_trace=off"
-    };
+    });
+    default_log_filter.push_str(",aether::session=info,aether::perf=info");
+
     let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
         env::var("RUST_LOG")
             .as_deref()
-            .unwrap_or(default_log_filter),
+            .unwrap_or(&default_log_filter),
     );
 
     let subscriber = tracing_subscriber::registry()
