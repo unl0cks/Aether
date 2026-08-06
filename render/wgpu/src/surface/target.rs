@@ -492,11 +492,17 @@ impl CommandTarget {
         })
     }
 
+    /// The parent's pixels a blend will composite against, ready to sample.
+    ///
+    /// `region` is the part of this target the blend covers, in the space its commands were
+    /// recorded in, or `None` for a blend spanning the whole surface. Only that part is refreshed:
+    /// see [`blend_buffer_copy_region`].
     pub fn update_blend_buffer(
         &self,
         descriptors: &Descriptors,
         pool: &mut TexturePool,
         encoder: &mut wgpu::CommandEncoder,
+        region: Option<(u32, u32, u32, u32)>,
     ) -> &BlendBuffer {
         let blend_buffer = self.blend_buffer.get_or_init(|| {
             BlendBuffer::new(
@@ -510,25 +516,29 @@ impl CommandTarget {
             )
         });
         self.ensure_cleared(encoder);
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: self
-                    .resolve_buffer
-                    .as_ref()
-                    .map(|b| b.texture())
-                    .unwrap_or_else(|| self.frame_buffer.texture()),
-                mip_level: 0,
-                origin: Default::default(),
-                aspect: Default::default(),
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: blend_buffer.texture(),
-                mip_level: 0,
-                origin: Default::default(),
-                aspect: Default::default(),
-            },
-            self.frame_buffer.size(),
-        );
+        if let Some((origin, extent)) =
+            blend_buffer_copy_region(self.origin, self.frame_buffer.size(), region)
+        {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: self
+                        .resolve_buffer
+                        .as_ref()
+                        .map(|b| b.texture())
+                        .unwrap_or_else(|| self.frame_buffer.texture()),
+                    mip_level: 0,
+                    origin,
+                    aspect: Default::default(),
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: blend_buffer.texture(),
+                    mip_level: 0,
+                    origin,
+                    aspect: Default::default(),
+                },
+                extent,
+            );
+        }
         blend_buffer
     }
 
@@ -544,6 +554,112 @@ impl CommandTarget {
             .as_ref()
             .map(|b| b.texture())
             .unwrap_or_else(|| self.frame_buffer.texture())
+    }
+}
+
+/// The part of a parent target that a blend actually reads back.
+///
+/// A complex blend composites its child against the parent's blend buffer, sampling it at the
+/// fragment's position within the parent. The child's quad covers only its own region, so those
+/// are the only texels the shader can ever read. The copy that fills the buffer was handing over
+/// the whole parent regardless, which on a crowded stage is one full surface copy per blended
+/// object per frame.
+///
+/// The buffer itself stays full size so the shader can keep indexing it in target space. Only the
+/// copy shrinks. `None` means the region does not land on this target at all, so there is nothing
+/// to copy and a zero-sized copy would be an error rather than a saving.
+fn blend_buffer_copy_region(
+    target_origin: (u32, u32),
+    target_size: wgpu::Extent3d,
+    region: Option<(u32, u32, u32, u32)>,
+) -> Option<(wgpu::Origin3d, wgpu::Extent3d)> {
+    let Some((x, y, width, height)) = region else {
+        return Some((wgpu::Origin3d::ZERO, target_size));
+    };
+
+    // The region is in the space the commands were recorded in; the target may start part way
+    // into it.
+    let local_x = x.saturating_sub(target_origin.0).min(target_size.width);
+    let local_y = y.saturating_sub(target_origin.1).min(target_size.height);
+    let width = width.min(target_size.width - local_x);
+    let height = height.min(target_size.height - local_y);
+    if width == 0 || height == 0 {
+        return None;
+    }
+
+    Some((
+        wgpu::Origin3d {
+            x: local_x,
+            y: local_y,
+            z: 0,
+        },
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
+    ))
+}
+
+#[cfg(test)]
+mod blend_buffer_copy_tests {
+    use super::blend_buffer_copy_region;
+
+    const STAGE: wgpu::Extent3d = wgpu::Extent3d {
+        width: 2560,
+        height: 1365,
+        depth_or_array_layers: 1,
+    };
+
+    #[test]
+    fn a_blend_copies_back_only_the_region_it_composites_over() {
+        // One armour layer on one avatar, against a full stage.
+        let (origin, extent) =
+            blend_buffer_copy_region((0, 0), STAGE, Some((820, 410, 320, 256))).unwrap();
+
+        assert_eq!((origin.x, origin.y), (820, 410));
+        assert_eq!((extent.width, extent.height), (320, 256));
+    }
+
+    #[test]
+    fn a_full_surface_blend_still_copies_the_whole_parent() {
+        let (origin, extent) = blend_buffer_copy_region((0, 0), STAGE, None).unwrap();
+
+        assert_eq!((origin.x, origin.y), (0, 0));
+        assert_eq!((extent.width, extent.height), (STAGE.width, STAGE.height));
+    }
+
+    #[test]
+    fn a_region_is_measured_from_the_targets_own_origin() {
+        // Alpha and Erase composite against the nearest layer, which is its own sub-target sitting
+        // somewhere else on the surface.
+        let target = wgpu::Extent3d {
+            width: 512,
+            height: 512,
+            depth_or_array_layers: 1,
+        };
+        let (origin, extent) =
+            blend_buffer_copy_region((800, 400), target, Some((820, 410, 320, 256))).unwrap();
+
+        assert_eq!((origin.x, origin.y), (20, 10));
+        assert_eq!((extent.width, extent.height), (320, 256));
+    }
+
+    #[test]
+    fn a_region_running_past_the_edge_is_clamped_to_what_exists() {
+        let (origin, extent) =
+            blend_buffer_copy_region((0, 0), STAGE, Some((2400, 1300, 320, 256))).unwrap();
+
+        assert_eq!((origin.x, origin.y), (2400, 1300));
+        assert_eq!((extent.width, extent.height), (160, 65));
+    }
+
+    #[test]
+    fn a_region_entirely_off_the_target_copies_nothing() {
+        assert_eq!(
+            blend_buffer_copy_region((0, 0), STAGE, Some((2560, 1365, 320, 256))),
+            None
+        );
     }
 }
 

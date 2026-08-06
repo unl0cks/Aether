@@ -680,10 +680,14 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             LayerRef::None,
             &mut self.texture_pool,
         );
+        #[cfg(feature = "aether_metrics")]
+        let queue_started = std::time::Instant::now();
         self.active_frame.staging_belt.finish();
 
         self.active_frame
             .submit_for_target(&self.descriptors, &self.target, frame_output);
+        #[cfg(feature = "aether_metrics")]
+        let queue_elapsed = queue_started.elapsed();
         let general_maintenance = self.texture_pool.finish_frame();
         let offscreen_maintenance = self.offscreen_texture_pool.finish_frame();
         #[cfg(feature = "aether_metrics")]
@@ -691,6 +695,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             submit_started.elapsed(),
             cache_elapsed,
             cache_entry_count,
+            queue_elapsed,
         );
         #[cfg(feature = "aether_metrics")]
         crate::aether_metrics::record_pool_maintenance(

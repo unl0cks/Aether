@@ -400,6 +400,7 @@ struct WgpuTexturePoolTotals {
     submit_nanos: u64,
     cache_entry_nanos: u64,
     cache_entries: u64,
+    queue_nanos: u64,
     render_passes: u64,
     draw_commands: u64,
     blend_chunks: u64,
@@ -421,6 +422,7 @@ impl WgpuTexturePoolTotals {
             .cache_entry_nanos
             .saturating_add(sample.cache_entry_nanos);
         self.cache_entries = self.cache_entries.saturating_add(sample.cache_entries);
+        self.queue_nanos = self.queue_nanos.saturating_add(sample.queue_nanos);
         self.render_passes = self.render_passes.saturating_add(sample.render_passes);
         self.draw_commands = self.draw_commands.saturating_add(sample.draw_commands);
         self.blend_chunks = self.blend_chunks.saturating_add(sample.blend_chunks);
@@ -954,7 +956,7 @@ fn perf_summary_line(
     format!(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
          present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries, \
-         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} per frame",
+         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} queue {:.1} ms per frame",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -974,6 +976,7 @@ fn perf_summary_line(
         encoding.draw_commands as f64 / rendered_frames,
         encoding.blend_chunks as f64 / rendered_frames,
         encoding.bind_groups as f64 / rendered_frames,
+        encoding.queue_nanos as f64 / 1_000_000.0 / rendered_frames,
     )
 }
 

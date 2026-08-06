@@ -240,7 +240,7 @@ impl Surface {
                 } => {
                     assert!(!needs_stencil, "Shader blend mode not implemented in masks");
                     let parent_blend_buffer =
-                        target.update_blend_buffer(descriptors, texture_pool, draw_encoder);
+                        target.update_blend_buffer(descriptors, texture_pool, draw_encoder, None);
                     run_pixelbender_shader_impl(
                         descriptors,
                         shader,
@@ -297,7 +297,7 @@ impl Surface {
                     #[cfg(feature = "aether_metrics")]
                     crate::aether_metrics::record_encoded_chunk(0, true);
                     let parent_blend_buffer =
-                        parent.update_blend_buffer(descriptors, texture_pool, draw_encoder);
+                        parent.update_blend_buffer(descriptors, texture_pool, draw_encoder, region);
 
                     #[cfg(feature = "aether_metrics")]
                     crate::aether_metrics::record_bind_group_created();

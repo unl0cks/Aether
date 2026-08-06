@@ -48,6 +48,10 @@ pub struct WgpuMetricsSnapshot {
     pub submit_nanos: u64,
     pub cache_entry_nanos: u64,
     pub cache_entries: u64,
+    /// Time handing the finished frame to the driver. Encoding is CPU work, but a queue submit
+    /// blocks once the GPU falls behind, so this separates "we are slow to describe the frame"
+    /// from "the GPU cannot keep up with the frame we described".
+    pub queue_nanos: u64,
     /// What one frame's encoding actually consists of. Nearly all frame time is the stage draw,
     /// and these say whether that is the number of things drawn or the number of times the
     /// renderer has to stop and set up a new target to draw them into.
@@ -265,11 +269,19 @@ static CACHE_ENTRIES: AtomicU64 = AtomicU64::new(0);
 
 /// Record one `submit_frame`: its total cost, and the cost and count of the cache surfaces it
 /// rebuilt before drawing the stage.
-pub fn record_submit_frame(total: std::time::Duration, cache: std::time::Duration, entries: u64) {
+pub fn record_submit_frame(
+    total: std::time::Duration,
+    cache: std::time::Duration,
+    entries: u64,
+    queue: std::time::Duration,
+) {
     saturating_atomic_add(&SUBMIT_NANOS, nanos(total));
     saturating_atomic_add(&CACHE_ENTRY_NANOS, nanos(cache));
     saturating_atomic_add(&CACHE_ENTRIES, entries);
+    saturating_atomic_add(&QUEUE_NANOS, nanos(queue));
 }
+
+static QUEUE_NANOS: AtomicU64 = AtomicU64::new(0);
 
 fn nanos(duration: std::time::Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
@@ -304,6 +316,7 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         submit_nanos: SUBMIT_NANOS.swap(0, Ordering::Relaxed),
         cache_entry_nanos: CACHE_ENTRY_NANOS.swap(0, Ordering::Relaxed),
         cache_entries: CACHE_ENTRIES.swap(0, Ordering::Relaxed),
+        queue_nanos: QUEUE_NANOS.swap(0, Ordering::Relaxed),
         render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
         draw_commands: DRAW_COMMANDS.swap(0, Ordering::Relaxed),
         blend_chunks: BLEND_CHUNKS.swap(0, Ordering::Relaxed),
