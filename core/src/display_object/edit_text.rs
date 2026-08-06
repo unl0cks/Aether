@@ -1552,6 +1552,50 @@ impl<'gc> EditText<'gc> {
         self.0.render_settings.set(settings)
     }
 
+    /// Scroll horizontally so the caret stays visible, as Flash does while typing.
+    ///
+    /// `hscroll` existed but nothing ever moved it in response to the caret, so typing past the
+    /// right edge of a single-line field carried on off-screen: in AQW's chat bar the text ran
+    /// underneath the HUD while the caret sat still.
+    pub fn scroll_caret_into_view(self) {
+        // Wrapped text has nowhere to scroll to; `maxhscroll` already reports zero for it.
+        if self.0.flags.get().contains(EditTextFlag::WORD_WRAP) {
+            return;
+        }
+        let Some(selection) = self.selection() else {
+            return;
+        };
+
+        let Some(caret_x) = self.caret_x(selection.to()) else {
+            return;
+        };
+        let window_width = (self.0.bounds.get().width() - Self::GUTTER * 2).max(Twips::ZERO);
+        let hscroll = hscroll_showing_caret(
+            caret_x.to_pixels(),
+            window_width.to_pixels(),
+            self.hscroll(),
+            self.maxhscroll(),
+        );
+
+        if hscroll != self.hscroll() {
+            self.set_hscroll(hscroll);
+        }
+    }
+
+    /// Where the caret sits along the line, in text space.
+    ///
+    /// A caret at the end of the text has no character of its own, so it takes the trailing edge
+    /// of the one before it. That is where typing leaves it, and the position that has to stay on
+    /// screen.
+    fn caret_x(self, position: usize) -> Option<Twips> {
+        let layout = self.0.layout.borrow();
+        if let Some(bounds) = layout.char_bounds(position) {
+            return Some(bounds.x_min);
+        }
+        let previous = position.checked_sub(1)?;
+        Some(layout.char_bounds(previous)?.x_max)
+    }
+
     pub fn hscroll(self) -> f64 {
         self.0.hscroll.get()
     }
@@ -1827,6 +1871,10 @@ impl<'gc> EditText<'gc> {
                 }
             }
         }
+        // Arrow keys, Home, End and deletion all move the caret, so the view has to follow them
+        // just as it follows typing.
+        self.scroll_caret_into_view();
+
         if changed {
             let mut activation = Avm1Activation::from_nothing(
                 context,
@@ -2090,6 +2138,7 @@ impl<'gc> EditText<'gc> {
         self.replace_text(selection.start(), selection.end(), text, context);
         let new_pos = selection.start() + text.len();
         self.set_selection(Some(TextSelection::for_position(new_pos)));
+        self.scroll_caret_into_view();
 
         let mut activation = Avm1Activation::from_nothing(
             context,
@@ -3278,6 +3327,61 @@ impl TextSelectionMode {
             1 => Self::Word,
             _ => Self::Line,
         }
+    }
+}
+
+/// Where the view has to sit for a caret at `caret_x` to be visible.
+///
+/// Both coordinates are along the line in text space, so `hscroll` is simply how far the window
+/// has been slid right. The view only moves when the caret has actually left it, which keeps a
+/// click in the middle of a long line from jumping the text around.
+fn hscroll_showing_caret(caret_x: f64, window_width: f64, hscroll: f64, max_hscroll: f64) -> f64 {
+    let wanted = if caret_x < hscroll {
+        caret_x
+    } else if caret_x > hscroll + window_width {
+        caret_x - window_width
+    } else {
+        hscroll
+    };
+
+    wanted.clamp(0.0, max_hscroll.max(0.0))
+}
+
+#[cfg(test)]
+mod caret_scroll_tests {
+    use super::hscroll_showing_caret;
+
+    #[test]
+    fn a_caret_inside_the_window_does_not_move_the_view() {
+        assert_eq!(hscroll_showing_caret(120.0, 200.0, 0.0, 400.0), 0.0);
+        assert_eq!(hscroll_showing_caret(220.0, 200.0, 100.0, 400.0), 100.0);
+    }
+
+    #[test]
+    fn typing_past_the_right_edge_scrolls_to_follow() {
+        // The reported bug: the caret runs off the end of the chat bar and the view stays put.
+        assert_eq!(hscroll_showing_caret(260.0, 200.0, 0.0, 400.0), 60.0);
+    }
+
+    #[test]
+    fn moving_back_before_the_window_scrolls_left() {
+        assert_eq!(hscroll_showing_caret(40.0, 200.0, 100.0, 400.0), 40.0);
+    }
+
+    #[test]
+    fn the_view_never_scrolls_past_what_there_is_to_show() {
+        assert_eq!(hscroll_showing_caret(900.0, 200.0, 0.0, 400.0), 400.0);
+    }
+
+    #[test]
+    fn the_view_never_scrolls_left_of_the_start() {
+        assert_eq!(hscroll_showing_caret(0.0, 200.0, 50.0, 400.0), 0.0);
+    }
+
+    #[test]
+    fn a_field_with_nothing_to_scroll_stays_put() {
+        // Short text in a wide field: maxhscroll is zero, so no caret movement scrolls it.
+        assert_eq!(hscroll_showing_caret(180.0, 60.0, 0.0, 0.0), 0.0);
     }
 }
 
