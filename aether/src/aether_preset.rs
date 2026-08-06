@@ -19,7 +19,12 @@ pub const AQW_PAGE_URL: &str = "https://game.aq.com/";
 /// of allocation churn. Raising it far past the design instead (768 MiB per pool) restored
 /// reuse but pushed a 10 GB card into a device-lost fault, so this is the documented budget.
 pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
-    max_cached_bytes: 128 * 1024 * 1024,
+    // Measured: with 128 MiB the offscreen pool reused 62.2% of its requests and threw away 99,073
+    // entries for budget against 28,372 for age, so the byte limit was the dominant reason a
+    // texture did not survive to be reused. The general pool showed the same signature before its
+    // own limit was raised and now reuses 99.7%. Peak resident GPU memory in that session was
+    // 5.45 GB on a 10 GB card, so there is room to let this pool keep what it is being handed.
+    max_cached_bytes: 512 * 1024 * 1024,
     max_cached_entries: 512,
     max_idle_frames: 1,
     max_cached_globals: 128,
@@ -208,8 +213,19 @@ mod tests {
     fn aqw_preset_keeps_only_immediately_reusable_offscreen_textures() {
         let opt = parse_and_apply(&["aether"]);
         assert!(opt.aether_bounded_offscreen_pool);
+
+        // The idle window is what makes this "immediately reusable": a texture survives one frame,
+        // so work that repeats every frame is reused and work that does not is dropped. That is the
+        // property worth pinning.
         assert_eq!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames, 1);
-        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes <= 128 * 1024 * 1024);
+
+        // The byte budget used to be pinned at 128 MiB as well, on the theory that a short idle
+        // window made a small budget harmless. Measurement disagreed: at 128 MiB the pool reused
+        // 62.2% of requests and discarded 99,073 entries for budget against 28,372 for age, so the
+        // budget, not the idle window, was deciding what got reused. It still has to stay far below
+        // the card, because a pool that can hold everything is not a bounded pool.
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes <= 1024 * 1024 * 1024);
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes >= 256 * 1024 * 1024);
     }
 
     #[test]

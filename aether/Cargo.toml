@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.3.38"
+version = "0.3.39"
 
 [lints]
 workspace = true
