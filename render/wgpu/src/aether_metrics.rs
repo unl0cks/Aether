@@ -56,6 +56,10 @@ pub struct WgpuMetricsSnapshot {
     /// and these say whether that is the number of things drawn or the number of times the
     /// renderer has to stop and set up a new target to draw them into.
     pub render_passes: u64,
+    /// Complex blends this interval, per mode, indexed by [`crate::blend::ComplexBlend`]. Blends
+    /// are what create render passes, and frame time tracks passes, so which modes AQW actually
+    /// uses decides what can be done about them.
+    pub complex_blends: [u64; COMPLEX_BLEND_MODES],
     pub draw_commands: u64,
     pub blend_chunks: u64,
     pub bind_groups: u64,
@@ -287,6 +291,31 @@ fn nanos(duration: std::time::Duration) -> u64 {
     duration.as_nanos().min(u64::MAX as u128) as u64
 }
 
+/// Number of variants in [`crate::blend::ComplexBlend`].
+pub const COMPLEX_BLEND_MODES: usize = 9;
+
+pub const COMPLEX_BLEND_NAMES: [&str; COMPLEX_BLEND_MODES] = [
+    "multiply",
+    "lighten",
+    "darken",
+    "difference",
+    "invert",
+    "alpha",
+    "erase",
+    "overlay",
+    "hardlight",
+];
+
+static COMPLEX_BLENDS: [AtomicU64; COMPLEX_BLEND_MODES] =
+    [const { AtomicU64::new(0) }; COMPLEX_BLEND_MODES];
+
+/// Record one complex blend by its mode index.
+pub fn record_complex_blend(mode: usize) {
+    if let Some(counter) = COMPLEX_BLENDS.get(mode) {
+        saturating_atomic_add(counter, 1);
+    }
+}
+
 static RENDER_PASSES: AtomicU64 = AtomicU64::new(0);
 static DRAW_COMMANDS: AtomicU64 = AtomicU64::new(0);
 static BLEND_CHUNKS: AtomicU64 = AtomicU64::new(0);
@@ -318,6 +347,7 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         cache_entries: CACHE_ENTRIES.swap(0, Ordering::Relaxed),
         queue_nanos: QUEUE_NANOS.swap(0, Ordering::Relaxed),
         render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
+        complex_blends: std::array::from_fn(|i| COMPLEX_BLENDS[i].swap(0, Ordering::Relaxed)),
         draw_commands: DRAW_COMMANDS.swap(0, Ordering::Relaxed),
         blend_chunks: BLEND_CHUNKS.swap(0, Ordering::Relaxed),
         bind_groups: BIND_GROUPS.swap(0, Ordering::Relaxed),

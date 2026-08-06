@@ -16,6 +16,24 @@ pub enum ComplexBlend {
     HardLight,  // Can't be trivial, big math expression
 }
 
+impl ComplexBlend {
+    /// Index into the metrics counters, matching `COMPLEX_BLEND_NAMES`.
+    #[cfg(feature = "aether_metrics")]
+    pub fn metrics_index(self) -> usize {
+        match self {
+            ComplexBlend::Multiply => 0,
+            ComplexBlend::Lighten => 1,
+            ComplexBlend::Darken => 2,
+            ComplexBlend::Difference => 3,
+            ComplexBlend::Invert => 4,
+            ComplexBlend::Alpha => 5,
+            ComplexBlend::Erase => 6,
+            ComplexBlend::Overlay => 7,
+            ComplexBlend::HardLight => 8,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum BlendType {
     /// Trivial blends can be expressed with just a "draw bitmap" with blend states

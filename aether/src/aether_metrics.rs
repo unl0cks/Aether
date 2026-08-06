@@ -402,6 +402,7 @@ struct WgpuTexturePoolTotals {
     cache_entries: u64,
     queue_nanos: u64,
     render_passes: u64,
+    complex_blends: [u64; ruffle_render_wgpu::aether_metrics::COMPLEX_BLEND_MODES],
     draw_commands: u64,
     blend_chunks: u64,
     bind_groups: u64,
@@ -424,6 +425,9 @@ impl WgpuTexturePoolTotals {
         self.cache_entries = self.cache_entries.saturating_add(sample.cache_entries);
         self.queue_nanos = self.queue_nanos.saturating_add(sample.queue_nanos);
         self.render_passes = self.render_passes.saturating_add(sample.render_passes);
+        for (total, sample) in self.complex_blends.iter_mut().zip(sample.complex_blends) {
+            *total = total.saturating_add(sample);
+        }
         self.draw_commands = self.draw_commands.saturating_add(sample.draw_commands);
         self.blend_chunks = self.blend_chunks.saturating_add(sample.blend_chunks);
         self.bind_groups = self.bind_groups.saturating_add(sample.bind_groups);
@@ -928,6 +932,32 @@ impl AetherMetrics {
     }
 }
 
+/// Name the blend modes a frame actually used, loudest first.
+///
+/// Frame time tracks render passes, and complex blends are what create them, so this says which
+/// of the nine modes is worth doing something about. Silent when nothing blended.
+fn complex_blend_breakdown(
+    counts: &[u64; ruffle_render_wgpu::aether_metrics::COMPLEX_BLEND_MODES],
+    rendered_frames: f64,
+) -> String {
+    let names = ruffle_render_wgpu::aether_metrics::COMPLEX_BLEND_NAMES;
+    let mut used: Vec<_> = counts
+        .iter()
+        .enumerate()
+        .filter(|(_, count)| **count > 0)
+        .collect();
+    if used.is_empty() {
+        return String::new();
+    }
+
+    used.sort_by(|a, b| b.1.cmp(a.1));
+    let listed: Vec<String> = used
+        .iter()
+        .map(|(mode, count)| format!("{} {:.0}", names[*mode], **count as f64 / rendered_frames))
+        .collect();
+    format!(" | blends: {}", listed.join(", "))
+}
+
 /// Condense one reporting interval into a single line.
 ///
 /// `tick` is the player's own work for the interval: advancing timelines and running ActionScript.
@@ -956,7 +986,7 @@ fn perf_summary_line(
     format!(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
          present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries, \
-         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} queue {:.1} ms per frame",
+         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} queue {:.1} ms per frame{}",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -977,6 +1007,7 @@ fn perf_summary_line(
         encoding.blend_chunks as f64 / rendered_frames,
         encoding.bind_groups as f64 / rendered_frames,
         encoding.queue_nanos as f64 / 1_000_000.0 / rendered_frames,
+        complex_blend_breakdown(&encoding.complex_blends, rendered_frames),
     )
 }
 

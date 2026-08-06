@@ -295,7 +295,10 @@ impl Surface {
                     };
 
                     #[cfg(feature = "aether_metrics")]
-                    crate::aether_metrics::record_encoded_chunk(0, true);
+                    {
+                        crate::aether_metrics::record_encoded_chunk(0, true);
+                        crate::aether_metrics::record_complex_blend(blend_mode.metrics_index());
+                    }
                     let parent_blend_buffer =
                         parent.update_blend_buffer(descriptors, texture_pool, draw_encoder, region);
 
