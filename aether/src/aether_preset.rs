@@ -64,7 +64,17 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // underlying bug can be reproduced on demand; the cause is not yet understood, so it does not
     // belong on by default.
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
-    opt.aether_aqw_cache_texture_grid = !opt.no_aether_aqw_cache_texture_grid;
+    // NOT enabled by the preset: it corrupts what it renders.
+    //
+    // The grid is a large win on paper. Enabling it took texture creation from 7.0 GB/s to
+    // 0.22 GB/s and peak resident memory from 4.67 GB to 1.12 GB, because it collapses the
+    // per-frame bounds drift that no pool setting could absorb. But glow layers, text, skill icons
+    // and buttons all render wrong with it on.
+    //
+    // That is the same population the adaptive avatar cache corrupts, and this narrows the cause
+    // for both: the grid never reuses a texture across a bounds change, it only allocates one
+    // larger than its contents. So the fault is in the oversized-texture path itself, not in
+    // reusing a stale one, which is where that bug was assumed to live.
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment
