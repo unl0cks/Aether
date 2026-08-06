@@ -26,7 +26,14 @@ pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedT
     // 5.45 GB on a 10 GB card, so there is room to let this pool keep what it is being handed.
     max_cached_bytes: 512 * 1024 * 1024,
     max_cached_entries: 512,
-    max_idle_frames: 1,
+    // Raising the byte budget moved the bottleneck rather than removing it. Budget evictions fell
+    // from 99,073 to 7,380 and reuse rose from 62.2% to 74.7%, but age evictions rose from 28,372
+    // to 52,573 and the pool ended the session holding 9 entries across 6 buckets. A one-frame
+    // window only keeps a size that is used on consecutive frames, and AQW's animations revisit a
+    // size every few frames as a loop comes back around, so the window was throwing away work that
+    // was about to be asked for again. Four frames is still short enough that a size which stops
+    // being used is gone within a tenth of a second.
+    max_idle_frames: 4,
     max_cached_globals: 128,
 };
 
@@ -214,10 +221,13 @@ mod tests {
         let opt = parse_and_apply(&["aether"]);
         assert!(opt.aether_bounded_offscreen_pool);
 
-        // The idle window is what makes this "immediately reusable": a texture survives one frame,
-        // so work that repeats every frame is reused and work that does not is dropped. That is the
-        // property worth pinning.
-        assert_eq!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames, 1);
+        // A one-frame window was pinned here on the reasoning that it is what makes the pool
+        // "immediately reusable". Measurement retired that too: once the byte budget stopped being
+        // the binding limit, age became the dominant eviction by 52,573 to 7,380, and the pool held
+        // 9 entries. The window still has to be short, because its job is to drop sizes that have
+        // stopped being asked for, but one frame was short enough to drop sizes still in use.
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames >= 1);
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames <= 8);
 
         // The byte budget used to be pinned at 128 MiB as well, on the theory that a short idle
         // window made a small budget harmless. Measurement disagreed: at 128 MiB the pool reused
