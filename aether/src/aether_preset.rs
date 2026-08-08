@@ -50,8 +50,9 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     }
 
     opt.aether_aqw_timeline_child_rebind = !opt.no_aether_aqw_timeline_child_rebind;
-    opt.aether_aqw_mouse_motion_coalescing =
-        opt.aether_aqw_mouse_motion_coalescing && !opt.no_aether_aqw_mouse_motion_coalescing;
+    // Immediate dispatch runs Flash mouse callbacks for every host cursor event. Keep the
+    // rendered-frame coalescer on by default so high-rate pointer input cannot flood busy maps.
+    opt.aether_aqw_mouse_motion_coalescing = !opt.no_aether_aqw_mouse_motion_coalescing;
     opt.aether_aqw_avm2_broadcast_fast_path = !opt.no_aether_aqw_avm2_broadcast_fast_path;
     // The adaptive avatar cache is what turns on BitmapCacheTexturePolicy::BoundedReuse, which keeps
     // an existing, slightly oversized cache texture when an object's bounds drift instead of
@@ -291,15 +292,15 @@ mod tests {
     }
 
     #[test]
-    fn aqw_preset_disables_mouse_motion_coalescing_by_default() {
+    fn aqw_preset_enables_mouse_motion_coalescing_by_default() {
         let opt = parse_and_apply(&["aether"]);
-        assert!(!opt.aether_aqw_mouse_motion_coalescing);
+        assert!(opt.aether_aqw_mouse_motion_coalescing);
     }
 
     #[test]
-    fn aqw_preset_allows_mouse_motion_coalescing_opt_in() {
-        let opt = parse_and_apply(&["aether", "--mouse-motion-coalescing"]);
-        assert!(opt.aether_aqw_mouse_motion_coalescing);
+    fn aqw_preset_allows_mouse_motion_coalescing_opt_out() {
+        let opt = parse_and_apply(&["aether", "--no-mouse-motion-coalescing"]);
+        assert!(!opt.aether_aqw_mouse_motion_coalescing);
     }
 
     #[test]
