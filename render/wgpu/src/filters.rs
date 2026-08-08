@@ -107,6 +107,49 @@ fn filter_vertices_with_double_blur(
     })
 }
 
+/// Approximate a gradient glow with the supported single-color glow pipeline.
+///
+/// Prefer a visible chromatic stop so authored state colors survive decorative transparent and
+/// neutral stops. This is intentionally renderer-generic: the selected color always comes from
+/// the SWF rather than from knowledge of a particular movie.
+fn gradient_glow_fallback(filter: &swf::GradientFilter) -> (swf::GlowFilter, (f32, f32)) {
+    let color = filter
+        .colors
+        .iter()
+        .max_by_key(|record| {
+            let max = record.color.r.max(record.color.g).max(record.color.b);
+            let min = record.color.r.min(record.color.g).min(record.color.b);
+            u32::from(record.color.a) * (u32::from(max - min) + 1)
+        })
+        .map(|record| record.color)
+        .unwrap_or(swf::Color::TRANSPARENT);
+
+    let mut flags = swf::GlowFilterFlags::from_passes(filter.num_passes());
+    flags.set(swf::GlowFilterFlags::INNER_GLOW, filter.is_inner());
+    flags.set(swf::GlowFilterFlags::KNOCKOUT, filter.is_knockout());
+    flags.set(
+        swf::GlowFilterFlags::COMPOSITE_SOURCE,
+        filter
+            .flags
+            .contains(swf::GradientFilterFlags::COMPOSITE_SOURCE),
+    );
+
+    let distance = filter.distance.to_f32();
+    let angle = filter.angle.to_f32();
+    let blur_offset = (-angle.cos() * distance, -angle.sin() * distance);
+
+    (
+        swf::GlowFilter {
+            color,
+            blur_x: filter.blur_x,
+            blur_y: filter.blur_y,
+            strength: filter.strength,
+            flags,
+        },
+        blur_offset,
+    )
+}
+
 impl<'a> FilterSource<'a> {
     pub fn for_entire_texture(texture: &'a wgpu::Texture) -> Self {
         Self {
@@ -254,6 +297,19 @@ impl Filters {
                 &filter,
                 &self.blur,
             )),
+            Filter::GradientGlowFilter(filter) => {
+                let (fallback, blur_offset) = gradient_glow_fallback(&filter);
+                Some(descriptors.filters.glow.apply(
+                    descriptors,
+                    texture_pool,
+                    draw_encoder,
+                    staging_belt,
+                    &source,
+                    &fallback,
+                    &self.blur,
+                    blur_offset,
+                ))
+            }
             Filter::DisplacementMapFilter(filter) => descriptors.filters.displacement_map.apply(
                 descriptors,
                 texture_pool,
@@ -267,7 +323,6 @@ impl Filters {
                     LazyLock::new(Default::default);
 
                 let name = match filter {
-                    Filter::GradientGlowFilter(_) => "GradientGlowFilter",
                     Filter::GradientBevelFilter(_) => "GradientBevelFilter",
                     Filter::ConvolutionFilter(_) => "ConvolutionFilter",
                     Filter::ColorMatrixFilter(_)
@@ -275,6 +330,7 @@ impl Filters {
                     | Filter::GlowFilter(_)
                     | Filter::DropShadowFilter(_)
                     | Filter::BevelFilter(_)
+                    | Filter::GradientGlowFilter(_)
                     | Filter::DisplacementMapFilter(_)
                     | Filter::ShaderFilter(_) => unreachable!(),
                 };
@@ -452,5 +508,118 @@ mod blur_layer_uv_tests {
             vertices[2].blur_uv_left,
             [(247.0 + 4.0) / 247.0, (226.0 + 8.0) / 226.0]
         );
+    }
+
+    fn gradient_filter(
+        colors: Vec<swf::GradientRecord>,
+        flags: swf::GradientFilterFlags,
+    ) -> swf::GradientFilter {
+        swf::GradientFilter {
+            colors,
+            blur_x: swf::Fixed16::from_f32(8.0),
+            blur_y: swf::Fixed16::from_f32(6.0),
+            angle: swf::Fixed16::from_f32(std::f32::consts::FRAC_PI_2),
+            distance: swf::Fixed16::from_f32(4.0),
+            strength: swf::Fixed8::from_f32(1.5),
+            flags,
+        }
+    }
+
+    #[test]
+    fn gradient_glow_fallback_preserves_a_visible_red_hue() {
+        let filter = gradient_filter(
+            vec![
+                swf::GradientRecord {
+                    ratio: 0,
+                    color: swf::Color::from_rgb(0xffffff, 0),
+                },
+                swf::GradientRecord {
+                    ratio: 128,
+                    color: swf::Color::from_rgb(0xf04438, 192),
+                },
+                swf::GradientRecord {
+                    ratio: 255,
+                    color: swf::Color::from_rgb(0x666666, 255),
+                },
+            ],
+            swf::GradientFilterFlags::COMPOSITE_SOURCE,
+        );
+
+        let (fallback, _) = gradient_glow_fallback(&filter);
+
+        assert_eq!(fallback.color, swf::Color::from_rgb(0xf04438, 192));
+    }
+
+    #[test]
+    fn gradient_glow_fallback_preserves_a_visible_teal_hue() {
+        let filter = gradient_filter(
+            vec![
+                swf::GradientRecord {
+                    ratio: 0,
+                    color: swf::Color::from_rgb(0xffffff, 0),
+                },
+                swf::GradientRecord {
+                    ratio: 160,
+                    color: swf::Color::from_rgb(0x39c8b0, 180),
+                },
+                swf::GradientRecord {
+                    ratio: 255,
+                    color: swf::Color::from_rgb(0x777777, 255),
+                },
+            ],
+            swf::GradientFilterFlags::COMPOSITE_SOURCE,
+        );
+
+        let (fallback, _) = gradient_glow_fallback(&filter);
+
+        assert_eq!(fallback.color, swf::Color::from_rgb(0x39c8b0, 180));
+    }
+
+    #[test]
+    fn gradient_glow_fallback_uses_the_most_visible_neutral_stop() {
+        let filter = gradient_filter(
+            vec![
+                swf::GradientRecord {
+                    ratio: 0,
+                    color: swf::Color::from_rgb(0xffffff, 0),
+                },
+                swf::GradientRecord {
+                    ratio: 255,
+                    color: swf::Color::from_rgb(0x666666, 255),
+                },
+            ],
+            swf::GradientFilterFlags::COMPOSITE_SOURCE,
+        );
+
+        let (fallback, _) = gradient_glow_fallback(&filter);
+
+        assert_eq!(fallback.color, swf::Color::from_rgb(0x666666, 255));
+    }
+
+    #[test]
+    fn gradient_glow_fallback_preserves_filter_behavior_and_offset() {
+        let flags = swf::GradientFilterFlags::INNER_SHADOW
+            | swf::GradientFilterFlags::KNOCKOUT
+            | swf::GradientFilterFlags::COMPOSITE_SOURCE
+            | swf::GradientFilterFlags::from_passes(3);
+        let filter = gradient_filter(
+            vec![swf::GradientRecord {
+                ratio: 255,
+                color: swf::Color::RED,
+            }],
+            flags,
+        );
+
+        let (fallback, offset) = gradient_glow_fallback(&filter);
+
+        assert_eq!(fallback.blur_x, filter.blur_x);
+        assert_eq!(fallback.blur_y, filter.blur_y);
+        assert_eq!(fallback.strength, filter.strength);
+        assert!(fallback.is_inner());
+        assert!(fallback.is_knockout());
+        assert!(fallback.composite_source());
+        assert_eq!(fallback.num_passes(), 3);
+        assert!(offset.0.abs() < 0.0001);
+        assert!((offset.1 + 4.0).abs() < 0.0001);
     }
 }

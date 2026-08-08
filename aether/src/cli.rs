@@ -52,55 +52,73 @@ pub struct Opt {
     pub show_menu: bool,
 
     /// Write one-second frame-time and render-counter summaries as JSON Lines.
-    #[clap(long)]
+    #[clap(long = "metrics", alias = "aether-metrics")]
     pub aether_metrics: bool,
 
     /// Override the metrics output path. The default is inside Aether's cache directory.
-    #[clap(long)]
+    #[clap(long = "metrics-file", alias = "aether-metrics-file")]
     pub aether_metrics_file: Option<std::path::PathBuf>,
 
     /// Record diagnostic host/core mouse events as JSON Lines. Requires a metrics build.
-    #[clap(long)]
+    #[clap(long = "input-trace", alias = "aether-input-trace")]
     pub aether_input_trace: bool,
 
     /// Override the input trace output path. The default is inside Aether's cache directory.
-    #[clap(long)]
+    #[clap(long = "input-trace-file", alias = "aether-input-trace-file")]
     pub aether_input_trace_file: Option<std::path::PathBuf>,
 
     /// Record targeted AVM2 goto/frame-construction diagnostics as JSON Lines. Requires a metrics build.
-    #[clap(long)]
+    #[clap(long = "timeline-trace", alias = "aether-timeline-trace")]
     pub aether_timeline_trace: bool,
 
     /// Override the timeline trace output path. The default is inside Aether's cache directory.
-    #[clap(long)]
+    #[clap(long = "timeline-trace-file", alias = "aether-timeline-trace-file")]
     pub aether_timeline_trace_file: Option<std::path::PathBuf>,
 
     /// Experimentally retry construction of missing AQW timeline children before a frame script runs.
-    #[clap(long)]
+    #[clap(
+        long = "frame-construction-retry",
+        alias = "aether-aqw-frame-construction-retry"
+    )]
     pub aether_aqw_frame_construction_retry: bool,
 
     /// Enable AQW's targeted Settings timeline-child compatibility repair.
-    #[clap(long, conflicts_with = "no_aether_aqw_timeline_child_rebind")]
+    #[clap(
+        long = "timeline-child-rebind",
+        alias = "aether-aqw-timeline-child-rebind",
+        conflicts_with = "no_aether_aqw_timeline_child_rebind"
+    )]
     pub aether_aqw_timeline_child_rebind: bool,
 
     /// Disable AQW's targeted Settings timeline-child compatibility repair.
-    #[clap(long, conflicts_with = "aether_aqw_timeline_child_rebind")]
+    #[clap(
+        long = "no-timeline-child-rebind",
+        alias = "no-aether-aqw-timeline-child-rebind",
+        conflicts_with = "aether_aqw_timeline_child_rebind"
+    )]
     pub no_aether_aqw_timeline_child_rebind: bool,
 
-
-    /// Disable internal bitmap reuse for visually stable AQW AvatarMC roots. Off already; kept so
-    /// scripts that pass it keep working.
-    #[clap(long, conflicts_with = "aether_aqw_adaptive_avatar_cache")]
+    /// Disable internal bitmap reuse for visually stable AQW AvatarMC roots.
+    #[clap(
+        long = "no-adaptive-avatar-cache",
+        alias = "no-aether-aqw-adaptive-avatar-cache",
+        conflicts_with = "aether_aqw_adaptive_avatar_cache"
+    )]
     pub no_aether_aqw_adaptive_avatar_cache: bool,
 
-    /// Re-enable internal bitmap reuse for AQW AvatarMC roots. The filter bug that rendered glow
-    /// and drop-shadow layers, damage numbers and avatars clipped and offset is fixed; this stays
-    /// opt-in until that is confirmed in game.
-    #[clap(long, conflicts_with = "no_aether_aqw_adaptive_avatar_cache")]
+    /// Enable internal bitmap reuse for visually stable AQW AvatarMC roots.
+    #[clap(
+        long = "adaptive-avatar-cache",
+        alias = "aether-aqw-adaptive-avatar-cache",
+        conflicts_with = "no_aether_aqw_adaptive_avatar_cache"
+    )]
     pub aether_aqw_adaptive_avatar_cache: bool,
 
     /// Disable eviction of GPU uploads for bitmaps that are no longer being drawn.
-    #[clap(long)]
+    #[clap(
+        long = "no-idle-gpu-upload-eviction",
+        alias = "no-aether-aqw-idle-gpu-upload-eviction"
+    )]
     pub no_aether_aqw_idle_gpu_upload_eviction: bool,
 
     /// Resolved launch-mode setting; populated by the AQW preset.
@@ -108,7 +126,10 @@ pub struct Opt {
     pub aether_aqw_idle_gpu_upload_eviction: bool,
 
     /// Disable stale live-entry pruning in AQW's AVM2 broadcast registry.
-    #[clap(long)]
+    #[clap(
+        long = "no-avm2-broadcast-fast-path",
+        alias = "no-aether-aqw-avm2-broadcast-fast-path"
+    )]
     pub no_aether_aqw_avm2_broadcast_fast_path: bool,
 
     /// Resolved launch-mode setting; populated by the AQW preset.
@@ -116,27 +137,54 @@ pub struct Opt {
     pub aether_aqw_avm2_broadcast_fast_path: bool,
 
     /// Enable protection against false premature AvatarMC stopWalking calls during AQW movement.
-    #[clap(long, conflicts_with = "no_aether_aqw_movement_stop_guard")]
+    #[clap(
+        long = "movement-stop-guard",
+        alias = "aether-aqw-movement-stop-guard",
+        conflicts_with = "no_aether_aqw_movement_stop_guard"
+    )]
     pub aether_aqw_movement_stop_guard: bool,
 
     /// Disable protection against false premature AvatarMC stopWalking calls during AQW movement.
-    #[clap(long, conflicts_with = "aether_aqw_movement_stop_guard")]
+    #[clap(
+        long = "no-movement-stop-guard",
+        alias = "no-aether-aqw-movement-stop-guard",
+        conflicts_with = "aether_aqw_movement_stop_guard"
+    )]
     pub no_aether_aqw_movement_stop_guard: bool,
 
-    /// Disable 60 Hz coalescing of continuous mouse positions in AQW mode.
-    #[clap(long)]
+    /// Keep every host mouse position instead of coalescing movement to rendered frames.
+    #[clap(
+        long = "no-mouse-motion-coalescing",
+        aliases = [
+            "no-aether-aqw-mouse-motion-coalescing",
+            "aether-no-mouse-motion-coalescing"
+        ],
+        conflicts_with = "aether_aqw_mouse_motion_coalescing"
+    )]
     pub no_aether_aqw_mouse_motion_coalescing: bool,
 
-    /// Resolved launch-mode setting; populated by the AQW preset.
-    #[clap(skip)]
+    /// Coalesce continuous AQW mouse positions to rendered frames.
+    #[clap(
+        long = "mouse-motion-coalescing",
+        alias = "aether-aqw-mouse-motion-coalescing",
+        conflicts_with = "no_aether_aqw_mouse_motion_coalescing"
+    )]
     pub aether_aqw_mouse_motion_coalescing: bool,
 
     /// Experimentally enable bounded cross-frame reuse of offscreen textures in AQW mode.
-    #[clap(long, conflicts_with = "no_aether_aqw_bounded_offscreen_pool")]
+    #[clap(
+        long = "bounded-offscreen-pool",
+        alias = "aether-aqw-bounded-offscreen-pool",
+        conflicts_with = "no_aether_aqw_bounded_offscreen_pool"
+    )]
     pub aether_aqw_bounded_offscreen_pool: bool,
 
     /// Disable bounded cross-frame reuse of offscreen textures in AQW mode.
-    #[clap(long, conflicts_with = "aether_aqw_bounded_offscreen_pool")]
+    #[clap(
+        long = "no-bounded-offscreen-pool",
+        alias = "no-aether-aqw-bounded-offscreen-pool",
+        conflicts_with = "aether_aqw_bounded_offscreen_pool"
+    )]
     pub no_aether_aqw_bounded_offscreen_pool: bool,
 
     /// Resolved launch-mode setting; populated by the AQW preset.
@@ -144,27 +192,46 @@ pub struct Opt {
     pub aether_bounded_offscreen_pool: bool,
 
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
-    /// every frame. Cuts texture creation by roughly 32x; opt-in until the filter fix that makes
-    /// oversized cache textures render correctly is confirmed in game.
-    #[clap(long, conflicts_with = "no_aether_aqw_cache_texture_grid")]
+    /// every frame. Cuts texture creation by roughly 32x.
+    #[clap(
+        long = "cache-texture-grid",
+        alias = "aether-aqw-cache-texture-grid",
+        conflicts_with = "no_aether_aqw_cache_texture_grid"
+    )]
     pub aether_aqw_cache_texture_grid: bool,
 
     /// Allocate cache textures at their exact size, as Ruffle does by default.
-    #[clap(long, conflicts_with = "aether_aqw_cache_texture_grid")]
+    #[clap(
+        long = "no-cache-texture-grid",
+        alias = "no-aether-aqw-cache-texture-grid",
+        conflicts_with = "aether_aqw_cache_texture_grid"
+    )]
     pub no_aether_aqw_cache_texture_grid: bool,
 
     /// Enable raw ActionScript trace output. This may contain account or session data.
-    #[clap(long)]
+    #[clap(long = "avm-trace", alias = "aether-avm-trace")]
     pub aether_avm_trace: bool,
 
     /// Write a self-contained crash report when Aether stops on a fatal error. Covers a lost
     /// graphics device as well as a panic; the former exits gracefully and is otherwise invisible
     /// to crash handlers.
-    #[clap(long)]
+    #[clap(
+        long = "crash-report",
+        alias = "aether-crash-report",
+        conflicts_with = "no_aether_crash_report"
+    )]
     pub aether_crash_report: bool,
 
+    /// Disable self-contained crash reports.
+    #[clap(long = "no-crash-report", conflicts_with = "aether_crash_report")]
+    pub no_aether_crash_report: bool,
+
     /// Directory to write crash reports into. Defaults to Aether's log directory.
-    #[clap(long, requires = "aether_crash_report")]
+    #[clap(
+        long = "crash-report-dir",
+        alias = "aether-crash-report-dir",
+        conflicts_with = "no_aether_crash_report"
+    )]
     pub aether_crash_report_dir: Option<PathBuf>,
 
     /// A "flashvars" parameter to provide to the movie.
@@ -226,6 +293,14 @@ pub struct Opt {
     /// Default quality of the movie.
     #[clap(long, short)]
     pub quality: Option<StageQuality>,
+
+    /// Force 2x backend multisample antialiasing without changing Flash StageQuality.
+    #[clap(long, conflicts_with = "msaa4x")]
+    pub msaa2x: bool,
+
+    /// Force 4x backend multisample antialiasing without changing Flash StageQuality.
+    #[clap(long, conflicts_with = "msaa2x")]
+    pub msaa4x: bool,
 
     /// The alignment of the stage.
     #[clap(long, short, value_parser(parse_align))]
@@ -312,7 +387,7 @@ pub struct Opt {
     pub player_runtime: Option<PlayerRuntime>,
 
     /// Set and lock the player's frame rate, overriding the movie's frame rate.
-    #[clap(long)]
+    #[clap(long = "maxfps", alias = "frame-rate")]
     pub frame_rate: Option<f64>,
 
     /// The handling mode of links opening a new website.
@@ -493,6 +568,102 @@ impl FromStr for OpenUrlMode {
             "deny" => Ok(OpenUrlMode::Deny),
             _ => Err(()),
         }
+    }
+}
+
+#[cfg(test)]
+mod aether_cli_tests {
+    use super::*;
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn canonical_aether_flags_parse_without_the_product_prefix() {
+        let opt = Opt::try_parse_from([
+            "aether",
+            "--metrics",
+            "--input-trace",
+            "--timeline-trace",
+            "--frame-construction-retry",
+            "--timeline-child-rebind",
+            "--adaptive-avatar-cache",
+            "--no-idle-gpu-upload-eviction",
+            "--no-avm2-broadcast-fast-path",
+            "--movement-stop-guard",
+            "--mouse-motion-coalescing",
+            "--bounded-offscreen-pool",
+            "--cache-texture-grid",
+            "--avm-trace",
+            "--crash-report",
+            "--crash-report-dir",
+            "reports",
+            "--maxfps",
+            "75",
+            "--msaa2x",
+        ])
+        .expect("canonical flags should parse");
+
+        assert!(opt.aether_metrics);
+        assert!(opt.aether_input_trace);
+        assert!(opt.aether_timeline_trace);
+        assert!(opt.aether_aqw_frame_construction_retry);
+        assert!(opt.aether_aqw_timeline_child_rebind);
+        assert!(opt.aether_aqw_adaptive_avatar_cache);
+        assert!(opt.no_aether_aqw_idle_gpu_upload_eviction);
+        assert!(opt.no_aether_aqw_avm2_broadcast_fast_path);
+        assert!(opt.aether_aqw_movement_stop_guard);
+        assert!(opt.aether_aqw_mouse_motion_coalescing);
+        assert!(opt.aether_aqw_bounded_offscreen_pool);
+        assert!(opt.aether_aqw_cache_texture_grid);
+        assert!(opt.aether_avm_trace);
+        assert!(opt.aether_crash_report);
+        assert_eq!(opt.frame_rate, Some(75.0));
+        assert!(opt.msaa2x);
+        assert!(!opt.msaa4x);
+    }
+
+    #[test]
+    fn legacy_aether_flag_spellings_remain_accepted() {
+        let opt = Opt::try_parse_from([
+            "aether",
+            "--aether-metrics",
+            "--aether-input-trace",
+            "--aether-timeline-trace",
+            "--aether-aqw-frame-construction-retry",
+            "--aether-aqw-adaptive-avatar-cache",
+            "--aether-aqw-cache-texture-grid",
+            "--no-aether-aqw-mouse-motion-coalescing",
+            "--aether-crash-report",
+            "--frame-rate",
+            "48",
+        ])
+        .expect("legacy aliases should parse");
+
+        assert!(opt.aether_metrics);
+        assert!(opt.aether_input_trace);
+        assert!(opt.aether_timeline_trace);
+        assert!(opt.aether_aqw_frame_construction_retry);
+        assert!(opt.aether_aqw_adaptive_avatar_cache);
+        assert!(opt.aether_aqw_cache_texture_grid);
+        assert!(opt.no_aether_aqw_mouse_motion_coalescing);
+        assert!(opt.aether_crash_report);
+        assert_eq!(opt.frame_rate, Some(48.0));
+    }
+
+    #[test]
+    fn legacy_names_are_hidden_from_normal_help() {
+        let help = Opt::command().render_long_help().to_string();
+
+        assert!(help.contains("--maxfps"));
+        assert!(help.contains("--input-trace"));
+        assert!(help.contains("--no-adaptive-avatar-cache"));
+        assert!(!help.contains("--frame-rate"));
+        assert!(!help.contains("--aether-input-trace"));
+        assert!(!help.contains("--no-aether-aqw-adaptive-avatar-cache"));
+    }
+
+    #[test]
+    fn msaa_override_flags_conflict() {
+        assert!(Opt::try_parse_from(["aether", "--msaa2x", "--msaa4x"]).is_err());
     }
 }
 

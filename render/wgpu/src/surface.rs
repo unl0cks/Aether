@@ -15,6 +15,7 @@ use ruffle_render::commands::CommandList;
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
 use ruffle_render::quality::StageQuality;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU8, Ordering};
 use target::CommandTarget;
 use tracing::instrument;
 
@@ -23,6 +24,48 @@ use crate::utils::run_copy_pipeline;
 pub use crate::surface::commands::LayerRef;
 
 use self::commands::ChunkBlendMode;
+
+const LARGE_TARGET_MSAA_PIXEL_THRESHOLD: u64 = 2560 * 1440;
+
+static BACKEND_MSAA_OVERRIDE: AtomicU8 = AtomicU8::new(0);
+
+pub(crate) fn set_backend_msaa_override(sample_count: Option<u32>) {
+    let sample_count = sample_count.unwrap_or(0);
+    debug_assert!(matches!(sample_count, 0 | 2 | 4));
+    BACKEND_MSAA_OVERRIDE.store(sample_count as u8, Ordering::Relaxed);
+}
+
+fn backend_msaa_override() -> Option<u32> {
+    match BACKEND_MSAA_OVERRIDE.load(Ordering::Relaxed) {
+        2 => Some(2),
+        4 => Some(4),
+        _ => None,
+    }
+}
+
+fn backend_sample_count_for_target(
+    quality: StageQuality,
+    width: u32,
+    height: u32,
+    sample_count_override: Option<u32>,
+) -> u32 {
+    if let Some(sample_count) = sample_count_override {
+        return sample_count;
+    }
+
+    let requested = quality.sample_count();
+    let pixel_count = u64::from(width) * u64::from(height);
+
+    if pixel_count >= LARGE_TARGET_MSAA_PIXEL_THRESHOLD {
+        // AQW creates a stage-sized multisampled target for every blend and mask. At 1440p,
+        // even 2x MSAA turns Medium into a severe bandwidth/allocation cliff on 4 GiB GPUs.
+        // StageQuality remains unchanged for ActionScript and tessellation; only the backend
+        // framebuffer sample count is capped for this target size.
+        requested.min(1)
+    } else {
+        requested
+    }
+}
 
 #[derive(Debug)]
 pub struct Surface {
@@ -49,7 +92,7 @@ impl Surface {
 
         let sample_count = supported_sample_count(
             &descriptors.adapter,
-            quality.sample_count(),
+            backend_sample_count_for_target(quality, width, height, backend_msaa_override()),
             frame_buffer_format,
         );
         let pipelines = descriptors.pipelines(sample_count, frame_buffer_format);
@@ -387,8 +430,8 @@ impl Surface {
 
                     // A child covering only part of the target needs its quad placed there and its
                     // own UV remap; a full-surface child keeps the cached whole-frame group.
-                    let region_bind_group = region
-                        .map(|region| target.region_frame_bind_group(descriptors, region));
+                    let region_bind_group =
+                        region.map(|region| target.region_frame_bind_group(descriptors, region));
                     render_pass.set_bind_group(
                         1,
                         region_bind_group
@@ -425,5 +468,47 @@ impl Surface {
 
     pub fn size(&self) -> wgpu::Extent3d {
         self.size
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::backend_sample_count_for_target;
+    use ruffle_render::quality::StageQuality;
+
+    #[test]
+    fn backend_sample_count_avoids_the_msaa_bandwidth_cliff_at_1440p() {
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::High, 2560, 1440, None),
+            1
+        );
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::Medium, 2560, 1440, None),
+            1
+        );
+    }
+
+    #[test]
+    fn backend_sample_count_preserves_smaller_and_lower_quality_targets() {
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::High, 1920, 1080, None),
+            4
+        );
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::Low, 2560, 1440, None),
+            1
+        );
+    }
+
+    #[test]
+    fn explicit_msaa_overrides_the_adaptive_large_target_cap() {
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::High, 2560, 1440, Some(2)),
+            2
+        );
+        assert_eq!(
+            backend_sample_count_for_target(StageQuality::Low, 2560, 1440, Some(4)),
+            4
+        );
     }
 }

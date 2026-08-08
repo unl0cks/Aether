@@ -1,7 +1,7 @@
 use crate::backend::RenderTargetMode;
-use crate::blend_region::{BlendRegion, plan_blend_region, quantise_region};
 use crate::blend::TrivialBlend;
 use crate::blend::{BlendType, ComplexBlend};
+use crate::blend_region::{BlendRegion, plan_blend_region, quantise_region};
 use crate::buffer_builder::BufferBuilder;
 use crate::buffer_pool::TexturePool;
 use crate::dynamic_transforms::DynamicTransforms;

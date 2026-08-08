@@ -177,6 +177,14 @@ fn main() -> Result<(), Error> {
     let mut opt = Opt::parse();
     let aqw_mode = aether_preset::apply(&mut opt)?;
     let preferences = GlobalPreferences::load(opt)?;
+    let backend_msaa_override = if preferences.cli.msaa4x {
+        Some(4)
+    } else if preferences.cli.msaa2x {
+        Some(2)
+    } else {
+        None
+    };
+    ruffle_render_wgpu::set_backend_msaa_override(backend_msaa_override);
 
     let logs_path = &preferences.cli.cache_directory.join("log");
     let log_path = preferences.log_filename_pattern().create_path(logs_path);
@@ -261,7 +269,7 @@ fn main() -> Result<(), Error> {
     #[cfg(not(feature = "metrics"))]
     if preferences.cli.aether_input_trace {
         tracing::warn!(
-            "--aether-input-trace was requested, but this binary was built without the `metrics` feature"
+            "--input-trace was requested, but this binary was built without the `metrics` feature"
         );
     }
 
@@ -286,7 +294,7 @@ fn main() -> Result<(), Error> {
     #[cfg(not(feature = "metrics"))]
     if preferences.cli.aether_timeline_trace {
         tracing::warn!(
-            "--aether-timeline-trace was requested, but this binary was built without the `metrics` feature"
+            "--timeline-trace was requested, but this binary was built without the `metrics` feature"
         );
     }
 
@@ -303,7 +311,7 @@ fn main() -> Result<(), Error> {
     #[cfg(not(feature = "metrics"))]
     if preferences.cli.aether_aqw_frame_construction_retry {
         tracing::warn!(
-            "--aether-aqw-frame-construction-retry was requested, but this binary was built without the `metrics` feature"
+            "--frame-construction-retry was requested, but this binary was built without the `metrics` feature"
         );
     }
 
@@ -318,7 +326,6 @@ fn main() -> Result<(), Error> {
             "AQW Settings timeline-child compatibility repair is enabled"
         );
     }
-
 
     let adaptive_avatar_cache_enabled =
         aqw_mode && preferences.cli.aether_aqw_adaptive_avatar_cache;
@@ -365,6 +372,12 @@ fn main() -> Result<(), Error> {
 
     if preferences.cli.aether_aqw_mouse_motion_coalescing {
         tracing::info!("AQW mouse motion is coalesced to rendered frames during gameplay");
+    } else if aqw_mode {
+        tracing::info!("AQW mouse motion is dispatched immediately for movement and dragging");
+    }
+
+    if let Some(sample_count) = backend_msaa_override {
+        tracing::info!(sample_count, "Backend MSAA override is enabled");
     }
 
     tracing::info!(
@@ -390,7 +403,7 @@ fn main() -> Result<(), Error> {
         }
         #[cfg(not(feature = "metrics"))]
         tracing::warn!(
-            "--aether-metrics was requested, but this binary was built without the `metrics` feature"
+            "--metrics was requested, but this binary was built without the `metrics` feature"
         );
     }
 

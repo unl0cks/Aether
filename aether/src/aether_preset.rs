@@ -43,15 +43,16 @@ pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedT
 /// Electron/WebSocket relay. Socket access is enabled only for the dedicated AQW preset; generic
 /// Ruffle mode retains the normal Ruffle behavior.
 pub fn apply(opt: &mut Opt) -> Result<bool> {
+    opt.aether_crash_report = !opt.no_aether_crash_report;
+
     if opt.generic || opt.movie_url.is_some() {
         return Ok(false);
     }
 
     opt.aether_aqw_timeline_child_rebind = !opt.no_aether_aqw_timeline_child_rebind;
-    opt.aether_aqw_mouse_motion_coalescing = !opt.no_aether_aqw_mouse_motion_coalescing;
+    opt.aether_aqw_mouse_motion_coalescing =
+        opt.aether_aqw_mouse_motion_coalescing && !opt.no_aether_aqw_mouse_motion_coalescing;
     opt.aether_aqw_avm2_broadcast_fast_path = !opt.no_aether_aqw_avm2_broadcast_fast_path;
-    // Still opt-in, but the bug that kept it that way is fixed and awaiting confirmation in game.
-    //
     // The adaptive avatar cache is what turns on BitmapCacheTexturePolicy::BoundedReuse, which keeps
     // an existing, slightly oversized cache texture when an object's bounds drift instead of
     // reallocating. Everything it corrupted -- glow and drop-shadow layers on fire effects, weapon
@@ -63,9 +64,8 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // texture, which is right only while that texture is exactly its own region. Oversize it and
     // the glow is sampled at region/texture of its correct scale, so it renders shrunk toward the
     // top left of the object it belongs to. Fixed in filters.rs; see the tests there.
+    opt.aether_aqw_adaptive_avatar_cache = !opt.no_aether_aqw_adaptive_avatar_cache;
     opt.aether_aqw_movement_stop_guard = !opt.no_aether_aqw_movement_stop_guard;
-    // Still opt-in for the same reason, and cleared by the same fix.
-    //
     // The grid is a large win: it took texture creation from 7.0 GB/s to 0.22 GB/s and peak
     // resident memory from 4.67 GB to 1.12 GB, because it collapses the per-frame bounds drift that
     // no pool setting could absorb. It cost nothing in frame rate either way, which is what ruled
@@ -75,6 +75,7 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // contents; it never reuses one across a bounds change. Corrupting the same things the avatar
     // cache does proved the oversizing was to blame rather than the reuse, and that is where the
     // filter UV bug turned out to be.
+    opt.aether_aqw_cache_texture_grid = !opt.no_aether_aqw_cache_texture_grid;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment
@@ -187,23 +188,16 @@ mod tests {
         assert!(!movie.aether_aqw_timeline_child_rebind);
     }
 
-
-
-
-
-
     #[test]
-    fn aqw_preset_leaves_adaptive_avatar_cache_off_by_default() {
-        // Reusing an oversized cache texture clips and offsets whatever it holds.
+    fn aqw_preset_enables_adaptive_avatar_cache_by_default() {
         let opt = parse_and_apply(&["aether"]);
-        assert!(!opt.aether_aqw_adaptive_avatar_cache);
+        assert!(opt.aether_aqw_adaptive_avatar_cache);
     }
 
     #[test]
-    fn aqw_preset_still_accepts_the_adaptive_avatar_cache_opt_in() {
-        // Kept so the corruption can be reproduced while it is being diagnosed.
-        let opt = parse_and_apply(&["aether", "--aether-aqw-adaptive-avatar-cache"]);
-        assert!(opt.aether_aqw_adaptive_avatar_cache);
+    fn aqw_preset_allows_adaptive_avatar_cache_opt_out() {
+        let opt = parse_and_apply(&["aether", "--no-adaptive-avatar-cache"]);
+        assert!(!opt.aether_aqw_adaptive_avatar_cache);
     }
 
     #[test]
@@ -297,15 +291,15 @@ mod tests {
     }
 
     #[test]
-    fn aqw_preset_enables_mouse_motion_coalescing_by_default() {
+    fn aqw_preset_disables_mouse_motion_coalescing_by_default() {
         let opt = parse_and_apply(&["aether"]);
-        assert!(opt.aether_aqw_mouse_motion_coalescing);
+        assert!(!opt.aether_aqw_mouse_motion_coalescing);
     }
 
     #[test]
-    fn aqw_preset_allows_mouse_motion_coalescing_opt_out() {
-        let opt = parse_and_apply(&["aether", "--no-aether-aqw-mouse-motion-coalescing"]);
-        assert!(!opt.aether_aqw_mouse_motion_coalescing);
+    fn aqw_preset_allows_mouse_motion_coalescing_opt_in() {
+        let opt = parse_and_apply(&["aether", "--mouse-motion-coalescing"]);
+        assert!(opt.aether_aqw_mouse_motion_coalescing);
     }
 
     #[test]
@@ -346,8 +340,37 @@ mod tests {
 
     #[test]
     fn aqw_preset_preserves_explicit_frame_rate_override() {
+        let opt = parse_and_apply(&["aether", "--maxfps", "48"]);
+        assert_eq!(opt.frame_rate, Some(48.0));
+    }
+
+    #[test]
+    fn legacy_frame_rate_alias_remains_accepted() {
         let opt = parse_and_apply(&["aether", "--frame-rate", "48"]);
         assert_eq!(opt.frame_rate, Some(48.0));
+    }
+
+    #[test]
+    fn crash_reports_are_enabled_by_default_in_every_mode() {
+        assert!(parse_and_apply(&["aether"]).aether_crash_report);
+        assert!(parse_and_apply(&["aether", "--generic"]).aether_crash_report);
+    }
+
+    #[test]
+    fn crash_reports_can_be_disabled() {
+        assert!(!parse_and_apply(&["aether", "--no-crash-report"]).aether_crash_report);
+    }
+
+    #[test]
+    fn aqw_preset_enables_texture_grid_by_default() {
+        assert!(parse_and_apply(&["aether"]).aether_aqw_cache_texture_grid);
+    }
+
+    #[test]
+    fn aqw_preset_allows_texture_grid_opt_out() {
+        assert!(
+            !parse_and_apply(&["aether", "--no-cache-texture-grid"]).aether_aqw_cache_texture_grid
+        );
     }
 
     #[test]

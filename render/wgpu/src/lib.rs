@@ -41,8 +41,8 @@ pub mod target;
 pub mod texture_pool_policy;
 
 pub mod backend;
-pub mod blend_region;
 mod blend;
+pub mod blend_region;
 mod buffer_builder;
 mod buffer_pool;
 #[cfg(feature = "clap")]
@@ -55,6 +55,11 @@ mod layouts;
 mod mesh;
 mod shaders;
 mod surface;
+
+/// Override backend multisampling for surfaces created after this call.
+pub fn set_backend_msaa_override(sample_count: Option<u32>) {
+    surface::set_backend_msaa_override(sample_count);
+}
 
 impl BitmapHandleImpl for Texture {}
 

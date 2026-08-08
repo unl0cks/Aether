@@ -18,7 +18,7 @@ use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::commands::CommandHandler;
-use std::cell::{OnceCell, RefCell, RefMut};
+use std::cell::{Cell, OnceCell, RefCell, RefMut};
 use std::sync::Arc;
 
 #[derive(Clone, Collect, Copy)]
@@ -53,18 +53,14 @@ impl<'gc> Graphic<'gc> {
         swf_shape: swf::Shape,
         movie: Arc<SwfMovie>,
     ) -> Self {
-        let library = context.library.library_for_movie(movie.clone()).unwrap();
         let shared = GraphicShared {
             id: swf_shape.id,
             bounds: swf_shape.shape_bounds,
-            render_handle: Some(
-                context
-                    .renderer
-                    .register_shape((&swf_shape).into(), &MovieLibrarySource { library }),
-            ),
+            render_handle: RefCell::new(None),
             shape: swf_shape,
             movie,
             scaled_handle: RefCell::new(TessellationCache::new()),
+            drawn_since_sweep: Cell::new(false),
         };
 
         Graphic(Gc::new(
@@ -84,7 +80,7 @@ impl<'gc> Graphic<'gc> {
         let shared = GraphicShared {
             id: 0,
             bounds: Default::default(),
-            render_handle: None,
+            render_handle: RefCell::new(None),
             shape: swf::Shape {
                 version: 32,
                 id: 0,
@@ -99,6 +95,7 @@ impl<'gc> Graphic<'gc> {
             },
             movie: context.root_swf.clone(),
             scaled_handle: RefCell::new(TessellationCache::new()),
+            drawn_since_sweep: Cell::new(false),
         };
 
         Graphic(Gc::new(
@@ -168,6 +165,32 @@ impl<'gc> Graphic<'gc> {
         } else {
             base_handle.clone()
         }
+    }
+
+    /// Drop this graphic's cached GPU uploads while retaining its SWF shape source.
+    pub fn release_gpu_resources(self) -> bool {
+        self.0.shared.get().release_gpu_uploads()
+    }
+
+    /// Give recently drawn uploads one sweep of reprieve, then release idle ones.
+    pub fn sweep_idle_gpu_upload(self) -> bool {
+        self.0.shared.get().sweep_idle_gpu_upload()
+    }
+
+    fn get_or_register_base_handle(self, context: &mut RenderContext) -> Option<ShapeHandle> {
+        let shared = self.0.shared.get();
+        shared.drawn_since_sweep.set(true);
+
+        if let Some(handle) = shared.render_handle.borrow().as_ref() {
+            return Some(handle.clone());
+        }
+
+        let library = context.library.library_for_movie(shared.movie.clone())?;
+        let handle = context
+            .renderer
+            .register_shape((&shared.shape).into(), &MovieLibrarySource { library });
+        *shared.render_handle.borrow_mut() = Some(handle.clone());
+        Some(handle)
     }
 }
 
@@ -255,7 +278,7 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 
         if let Some(drawing) = self.0.drawing.get() {
             drawing.borrow().render(context);
-        } else if let Some(base_handle) = self.0.shared.get().render_handle.clone() {
+        } else if let Some(base_handle) = self.get_or_register_base_handle(context) {
             let transform = context.transform_stack.transform();
 
             // Calculate the current scale from the transform, to determine if
@@ -338,9 +361,84 @@ impl<'gc> TDisplayObject<'gc> for Graphic<'gc> {
 struct GraphicShared {
     id: CharacterId,
     shape: swf::Shape,
-    render_handle: Option<ShapeHandle>,
+    render_handle: RefCell<Option<ShapeHandle>>,
     bounds: Rectangle<Twips>,
     movie: Arc<SwfMovie>,
     #[collect(require_static)]
     scaled_handle: RefCell<TessellationCache>,
+    #[collect(require_static)]
+    drawn_since_sweep: Cell<bool>,
+}
+
+impl GraphicShared {
+    fn release_gpu_uploads(&self) -> bool {
+        let released_base = self.render_handle.borrow_mut().take().is_some();
+        let released_scaled = self.scaled_handle.borrow_mut().clear() > 0;
+        released_base || released_scaled
+    }
+
+    fn sweep_idle_gpu_upload(&self) -> bool {
+        if self.drawn_since_sweep.replace(false) {
+            return false;
+        }
+        self.release_gpu_uploads()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ruffle_render::backend::ShapeHandleImpl;
+
+    #[derive(Debug)]
+    struct TestShapeHandle;
+
+    impl ShapeHandleImpl for TestShapeHandle {}
+
+    fn test_handle() -> ShapeHandle {
+        ShapeHandle(Arc::new(TestShapeHandle))
+    }
+
+    fn test_shape(id: CharacterId) -> swf::Shape {
+        swf::Shape {
+            version: 32,
+            id,
+            shape_bounds: Default::default(),
+            edge_bounds: Default::default(),
+            flags: swf::ShapeFlag::empty(),
+            styles: swf::ShapeStyles {
+                fill_styles: Vec::new(),
+                line_styles: Vec::new(),
+            },
+            shape: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn idle_graphic_gpu_uploads_are_evicted_without_discarding_the_shape() {
+        let mut scaled = TessellationCache::new();
+        scaled.insert(2.0, test_handle());
+        let shared = GraphicShared {
+            id: 41,
+            shape: test_shape(41),
+            render_handle: RefCell::new(Some(test_handle())),
+            bounds: Default::default(),
+            movie: Arc::new(SwfMovie::empty(32, None)),
+            scaled_handle: RefCell::new(scaled),
+            drawn_since_sweep: Cell::new(true),
+        };
+
+        assert!(!shared.sweep_idle_gpu_upload(), "recently drawn graphic");
+        assert!(shared.render_handle.borrow().is_some());
+        assert_eq!(shared.scaled_handle.borrow().len(), 1);
+
+        assert!(
+            shared.sweep_idle_gpu_upload(),
+            "idle handles must be evicted"
+        );
+        assert!(shared.render_handle.borrow().is_none());
+        assert_eq!(shared.scaled_handle.borrow().len(), 0);
+        assert_eq!(shared.shape.id, 41, "SWF source must remain for re-upload");
+        assert!(!shared.sweep_idle_gpu_upload(), "nothing left to evict");
+    }
 }

@@ -157,6 +157,8 @@ impl<'gc> MovieLibrary<'gc> {
             .values()
             .filter(|character| match character {
                 Character::Bitmap(bitmap) => bitmap.release_bitmap_handle(),
+                Character::Graphic(graphic) => graphic.release_gpu_resources(),
+                Character::MorphShape(morph_shape) => morph_shape.release_gpu_resources(),
                 _ => false,
             })
             .count()
@@ -169,6 +171,8 @@ impl<'gc> MovieLibrary<'gc> {
             .values()
             .filter(|character| match character {
                 Character::Bitmap(bitmap) => bitmap.sweep_idle_gpu_upload(),
+                Character::Graphic(graphic) => graphic.sweep_idle_gpu_upload(),
+                Character::MorphShape(morph_shape) => morph_shape.sweep_idle_gpu_upload(),
                 _ => false,
             })
             .count()

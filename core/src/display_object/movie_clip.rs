@@ -2533,6 +2533,20 @@ impl<'gc> MovieClip<'gc> {
                     };
 
                     #[cfg(feature = "aether_compatibility")]
+                    if crate::aether_compatibility::crafting_frame_construction_applies(self) {
+                        let summary =
+                            crate::aether_compatibility::prepare_aqw_crafting_frame_children(
+                                context, self,
+                            );
+                        #[cfg(feature = "aether_diagnostics")]
+                        crate::aether_diagnostics::record_timeline_child_rebind(
+                            context, self, &summary,
+                        );
+                        #[cfg(not(feature = "aether_diagnostics"))]
+                        let _ = summary;
+                    }
+
+                    #[cfg(feature = "aether_compatibility")]
                     if crate::aether_compatibility::timeline_child_rebind_enabled()
                         && crate::aether_compatibility::timeline_child_rebind_applies(self)
                     {

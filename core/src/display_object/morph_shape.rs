@@ -13,7 +13,7 @@ use gc_arena::{Collect, Gc, Mutation};
 use ruffle_common::utils::HasPrefixField;
 use ruffle_render::backend::ShapeHandle;
 use ruffle_render::commands::CommandHandler;
-use std::cell::{RefCell, RefMut};
+use std::cell::{Cell, RefCell, RefMut};
 use std::sync::Arc;
 use swf::{Fixed8, Fixed16};
 
@@ -54,6 +54,16 @@ impl<'gc> MorphShape<'gc> {
                 object: Lock::new(None),
             },
         ))
+    }
+
+    /// Drop cached tessellations while retaining every interpolated CPU frame.
+    pub fn release_gpu_resources(self) -> bool {
+        self.0.shared.get().release_gpu_uploads()
+    }
+
+    /// Give recently drawn morph uploads one sweep of reprieve, then release idle ones.
+    pub fn sweep_idle_gpu_upload(self) -> bool {
+        self.0.shared.get().sweep_idle_gpu_upload()
     }
 }
 
@@ -198,6 +208,8 @@ pub struct MorphShapeShared {
     end: swf::MorphShape,
     frames: RefCell<fnv::FnvHashMap<u16, Frame>>,
     movie: Arc<SwfMovie>,
+    #[collect(require_static)]
+    drawn_since_sweep: Cell<bool>,
 }
 
 impl MorphShapeShared {
@@ -208,6 +220,7 @@ impl MorphShapeShared {
             end: swf_tag.end.clone(),
             frames: RefCell::new(fnv::FnvHashMap::default()),
             movie,
+            drawn_since_sweep: Cell::new(false),
         }
     }
 
@@ -230,6 +243,7 @@ impl MorphShapeShared {
         library: &Library<'gc>,
         ratio: u16,
     ) -> ShapeHandle {
+        self.drawn_since_sweep.set(true);
         let mut frame = self.get_frame(ratio);
         if let Some(handle) = frame.shape_handle.clone() {
             handle
@@ -241,6 +255,21 @@ impl MorphShapeShared {
             frame.shape_handle = Some(handle.clone());
             handle
         }
+    }
+
+    fn release_gpu_uploads(&self) -> bool {
+        let mut released = false;
+        for frame in self.frames.borrow_mut().values_mut() {
+            released |= frame.shape_handle.take().is_some();
+        }
+        released
+    }
+
+    fn sweep_idle_gpu_upload(&self) -> bool {
+        if self.drawn_since_sweep.replace(false) {
+            return false;
+        }
+        self.release_gpu_uploads()
     }
 
     fn build_morph_frame(&self, ratio: u16) -> Frame {
@@ -626,6 +655,68 @@ fn lerp_gradient(start: &swf::Gradient, end: &swf::Gradient, a: f32, b: f32) -> 
 #[cfg(test)]
 mod test {
     use super::*;
+    use ruffle_render::backend::ShapeHandleImpl;
+
+    #[derive(Debug)]
+    struct TestShapeHandle;
+
+    impl ShapeHandleImpl for TestShapeHandle {}
+
+    fn test_handle() -> ShapeHandle {
+        ShapeHandle(Arc::new(TestShapeHandle))
+    }
+
+    fn empty_morph_shape() -> swf::MorphShape {
+        swf::MorphShape {
+            shape_bounds: Default::default(),
+            edge_bounds: Default::default(),
+            fill_styles: Vec::new(),
+            line_styles: Vec::new(),
+            shape: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn idle_morph_gpu_uploads_are_evicted_without_discarding_interpolated_frames() {
+        let shared = MorphShapeShared {
+            id: 9,
+            start: empty_morph_shape(),
+            end: empty_morph_shape(),
+            frames: RefCell::new(fnv::FnvHashMap::from_iter([(
+                32_768,
+                Frame {
+                    shape_handle: Some(test_handle()),
+                    shape: swf::Shape {
+                        version: 4,
+                        id: 9,
+                        shape_bounds: Default::default(),
+                        edge_bounds: Default::default(),
+                        flags: swf::ShapeFlag::empty(),
+                        styles: swf::ShapeStyles {
+                            fill_styles: Vec::new(),
+                            line_styles: Vec::new(),
+                        },
+                        shape: Vec::new(),
+                    },
+                    bounds: Default::default(),
+                },
+            )])),
+            movie: Arc::new(SwfMovie::empty(32, None)),
+            drawn_since_sweep: Cell::new(true),
+        };
+
+        assert!(!shared.sweep_idle_gpu_upload(), "recently drawn morph");
+        assert!(shared.frames.borrow()[&32_768].shape_handle.is_some());
+
+        assert!(
+            shared.sweep_idle_gpu_upload(),
+            "idle handle must be evicted"
+        );
+        let frames = shared.frames.borrow();
+        assert_eq!(frames.len(), 1, "interpolated CPU frame must remain cached");
+        assert!(frames[&32_768].shape_handle.is_none());
+        assert_eq!(frames[&32_768].shape.id, 9);
+    }
 
     // Regression test for #14074
     #[test]

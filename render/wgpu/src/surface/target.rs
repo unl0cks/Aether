@@ -416,7 +416,10 @@ impl CommandTarget {
             ry.saturating_sub(self.origin.1) as f32,
         );
         let (rw, rh) = (rw.max(1) as f32, rh.max(1) as f32);
-        let (tw, th) = (self.size.width.max(1) as f32, self.size.height.max(1) as f32);
+        let (tw, th) = (
+            self.size.width.max(1) as f32,
+            self.size.height.max(1) as f32,
+        );
 
         let transform = Transforms {
             world_matrix: [

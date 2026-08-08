@@ -4,8 +4,12 @@ use crate::avm2::{
     Activation as Avm2Activation, Multiname as Avm2Multiname, TObject as _, Value as Avm2Value,
 };
 use crate::context::UpdateContext;
-use crate::display_object::{DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer};
+use crate::display_object::{
+    Avm2LifecycleTraversal, DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer,
+};
+use crate::locale::get_current_date_time;
 use crate::string::AvmString;
+use crate::timer::TimerCallback;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 static TIMELINE_CHILD_REBIND_ENABLED: AtomicBool = AtomicBool::new(false);
@@ -27,6 +31,243 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+pub(crate) fn is_aqw_aura_refresh_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_is_public: bool,
+) -> bool {
+    contains_ascii_case_insensitive(movie_url, "spider.swf")
+        && matches!(method_name, "World/updateAuraData" | "updateAuraData")
+        && bound_class_local_name == Some("World")
+        && bound_class_is_public
+}
+
+pub(crate) fn is_aqw_aura_insertion_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_is_public: bool,
+) -> bool {
+    contains_ascii_case_insensitive(movie_url, "spider.swf")
+        && matches!(method_name, "World/showAuraChange" | "showAuraChange")
+        && bound_class_local_name == Some("World")
+        && bound_class_is_public
+}
+
+#[inline]
+fn should_repair_aqw_incoming_aura_timestamp(is_passive: bool, timestamp: f64) -> bool {
+    !is_passive && (!timestamp.is_finite() || timestamp <= 0.0)
+}
+
+#[inline]
+fn aura_refresh_identity_matches(
+    name_matches: bool,
+    caster_type_matches: bool,
+    caster_id_matches: bool,
+) -> bool {
+    name_matches && caster_type_matches && caster_id_matches
+}
+
+#[inline]
+fn select_aura_refresh_timestamp(incoming_timestamp: f64, current_timestamp: f64) -> f64 {
+    if incoming_timestamp.is_finite() && incoming_timestamp > 0.0 {
+        incoming_timestamp
+    } else {
+        current_timestamp
+    }
+}
+
+/// Give each newly received timed aura a valid application timestamp before Spider creates its
+/// countdown entry. Spider normally writes this field only when the optional `t` field is present;
+/// without it, the countdown treats the aura as already expired.
+pub(crate) fn repair_aqw_incoming_aura_timestamps<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    response: Avm2Value<'gc>,
+) -> Result<usize, crate::avm2::Error<'gc>> {
+    fn property<'gc>(
+        activation: &mut Avm2Activation<'_, 'gc>,
+        object: Avm2Value<'gc>,
+        name: &'static str,
+    ) -> Result<Avm2Value<'gc>, crate::avm2::Error<'gc>> {
+        object.get_public_property(AvmString::new_utf8(activation.gc(), name), activation)
+    }
+
+    let auras = property(activation, response, "auras")?;
+    let Some(auras) = auras.as_object() else {
+        return Ok(0);
+    };
+    let timestamp = Avm2Value::Number(get_current_date_time().timestamp_millis() as f64);
+    let mut repaired = 0_usize;
+    let mut index = auras.get_next_enumerant(0, activation)?;
+    while index != 0 {
+        let aura = auras.get_enumerant_value(index, activation)?;
+        let command = property(activation, aura, "cmd")?.coerce_to_string(activation)?;
+        let is_passive = command.as_wstr() == b"aura+p";
+        let current_timestamp = property(activation, aura, "ts")?.coerce_to_number(activation)?;
+        if should_repair_aqw_incoming_aura_timestamp(is_passive, current_timestamp) {
+            aura.set_public_property(
+                AvmString::new_utf8(activation.gc(), "ts"),
+                timestamp,
+                activation,
+            )?;
+            repaired = repaired.saturating_add(1);
+        }
+        index = auras.get_next_enumerant(index, activation)?;
+    }
+
+    Ok(repaired)
+}
+
+/// Copy Spider's refresh timestamp into the existing aura entry.
+///
+/// `World/updateAuraData` updates `dur` and `val`, but not `ts`. The UI therefore measures a
+/// refreshed aura from its original application time and can remove it immediately. Prefer the
+/// timestamp Spider supplied, and use the same clock as `Date` when that field was omitted. This
+/// repairs only the entry selected by Spider's own `(nam, casterType, casterId)` identity.
+pub(crate) fn repair_aqw_aura_refresh_timestamp<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    incoming_aura: Avm2Value<'gc>,
+    aura_collection_owner: Avm2Value<'gc>,
+) -> Result<usize, crate::avm2::Error<'gc>> {
+    fn property<'gc>(
+        activation: &mut Avm2Activation<'_, 'gc>,
+        object: Avm2Value<'gc>,
+        name: &'static str,
+    ) -> Result<Avm2Value<'gc>, crate::avm2::Error<'gc>> {
+        object.get_public_property(AvmString::new_utf8(activation.gc(), name), activation)
+    }
+
+    let incoming_timestamp =
+        property(activation, incoming_aura, "ts")?.coerce_to_number(activation)?;
+    let refresh_timestamp = Avm2Value::Number(select_aura_refresh_timestamp(
+        incoming_timestamp,
+        get_current_date_time().timestamp_millis() as f64,
+    ));
+
+    let incoming_name = property(activation, incoming_aura, "nam")?;
+    let incoming_caster_type = property(activation, incoming_aura, "casterType")?;
+    let incoming_caster_id = property(activation, incoming_aura, "casterId")?;
+    let auras = property(activation, aura_collection_owner, "auras")?;
+    let Some(auras) = auras.as_object() else {
+        return Ok(0);
+    };
+
+    let mut repaired = 0_usize;
+    let mut index = auras.get_next_enumerant(0, activation)?;
+    while index != 0 {
+        let existing = auras.get_enumerant_value(index, activation)?;
+        let existing_name = property(activation, existing, "nam")?;
+        let existing_caster_type = property(activation, existing, "casterType")?;
+        let existing_caster_id = property(activation, existing, "casterId")?;
+
+        let name_matches = existing_name.abstract_eq(&incoming_name, activation)?;
+        let caster_type_matches =
+            existing_caster_type.abstract_eq(&incoming_caster_type, activation)?;
+        let caster_id_matches = existing_caster_id.abstract_eq(&incoming_caster_id, activation)?;
+        if aura_refresh_identity_matches(name_matches, caster_type_matches, caster_id_matches) {
+            existing.set_public_property(
+                AvmString::new_utf8(activation.gc(), "ts"),
+                refresh_timestamp,
+                activation,
+            )?;
+            repaired = repaired.saturating_add(1);
+        }
+
+        index = auras.get_next_enumerant(index, activation)?;
+    }
+
+    Ok(repaired)
+}
+
+const AQW_EQUIPMENT_RECOVERY_TIMEOUT_MS: i32 = 30_000;
+
+pub(crate) fn is_aqw_equipment_initialization_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_is_public: bool,
+) -> bool {
+    contains_ascii_case_insensitive(movie_url, "game.aq.com/game/gamefiles/spider.swf")
+        && method_name == "Avatar/initAvatar"
+        && bound_class_local_name == Some("Avatar")
+        && bound_class_is_public
+}
+
+#[inline]
+fn should_schedule_aqw_equipment_recovery(
+    is_my_avatar: bool,
+    first_load: bool,
+    is_initializing_equipment: bool,
+    pending_equipment_count: usize,
+) -> bool {
+    is_my_avatar && first_load && !is_initializing_equipment && pending_equipment_count > 0
+}
+
+/// Schedule Spider's own equipment error-recovery method after a first load stops progressing.
+///
+/// Spider removes pending equipment slots from successful loader callbacks. Its I/O error handlers
+/// call `markAnyEquipmentLoaded` to clear the remaining slots, but a loader that never reaches a
+/// terminal event leaves the local avatar's loading animation running forever. The bound callback
+/// is harmless after a normal load: `firstLoad` is already false and the pending dictionary is
+/// empty, so Spider performs no completion work.
+pub(crate) fn schedule_aqw_equipment_recovery<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    receiver: Avm2Value<'gc>,
+) -> Result<bool, crate::avm2::Error<'gc>> {
+    fn property<'gc>(
+        activation: &mut Avm2Activation<'_, 'gc>,
+        receiver: Avm2Value<'gc>,
+        name: &'static str,
+    ) -> Result<Avm2Value<'gc>, crate::avm2::Error<'gc>> {
+        receiver.get_public_property(AvmString::new_utf8(activation.gc(), name), activation)
+    }
+
+    let is_my_avatar = property(activation, receiver, "isMyAvatar")?.coerce_to_boolean();
+    let first_load = property(activation, receiver, "firstLoad")?.coerce_to_boolean();
+    let is_initializing_equipment =
+        property(activation, receiver, "isInitializingEquipment")?.coerce_to_boolean();
+    let pending_equipment = property(activation, receiver, "pendingEquipment")?;
+    let pending_equipment_count = if let Some(pending_equipment) = pending_equipment.as_object() {
+        let mut count = 0_usize;
+        let mut index = pending_equipment.get_next_enumerant(0, activation)?;
+        while index != 0 {
+            count = count.saturating_add(1);
+            index = pending_equipment.get_next_enumerant(index, activation)?;
+        }
+        count
+    } else {
+        0
+    };
+
+    if !should_schedule_aqw_equipment_recovery(
+        is_my_avatar,
+        first_load,
+        is_initializing_equipment,
+        pending_equipment_count,
+    ) {
+        return Ok(false);
+    }
+
+    let recovery = property(activation, receiver, "markAnyEquipmentLoaded")?;
+    let Some(recovery) = recovery
+        .as_object()
+        .and_then(|object| object.as_function_object())
+    else {
+        return Ok(false);
+    };
+
+    activation.context.timers.add_timer(
+        TimerCallback::Avm2Callback {
+            closure: Some(recovery),
+            params: Vec::new(),
+        },
+        AQW_EQUIPMENT_RECOVERY_TIMEOUT_MS,
+        true,
+    );
+    Ok(true)
+}
+
 fn is_timeline_child_rebind_target(
     movie_url: &str,
     class_local_name: &str,
@@ -35,6 +276,137 @@ fn is_timeline_child_rebind_target(
     contains_ascii_case_insensitive(movie_url, "spider.swf")
         && class_local_name == "mcOption"
         && !has_nonempty_class_namespace
+}
+
+fn is_aqw_crafting_frame_target(
+    movie_url: &str,
+    class_namespace_uri: Option<&str>,
+    class_local_name: &str,
+) -> bool {
+    let is_aqw_asset = contains_ascii_case_insensitive(movie_url, "game.aq.com/game/gamefiles/");
+    is_aqw_asset
+        && ((contains_ascii_case_insensitive(movie_url, "spellcraft")
+            && class_namespace_uri == Some("game_fla")
+            && class_local_name == "mcInfoOverlay_233")
+            || (contains_ascii_case_insensitive(movie_url, "alchemy")
+                && class_namespace_uri == Some("alchemyGame_v4_fla")
+                && class_local_name == "mcInfoOverlay_388"))
+}
+
+#[inline]
+fn should_force_aqw_crafting_child(
+    target_clip: bool,
+    has_explicit_name: bool,
+    has_avm2_object: bool,
+) -> bool {
+    target_clip && has_explicit_name && !has_avm2_object
+}
+
+pub fn crafting_frame_construction_applies(clip: MovieClip<'_>) -> bool {
+    let Some(object) = clip.object2() else {
+        return false;
+    };
+    let class_name = object.instance_class().name();
+    let class_namespace_uri = class_name
+        .namespace()
+        .as_uri_opt()
+        .map(|uri| uri.to_string());
+    let class_local_name = class_name.local_name().as_wstr().to_string();
+    is_aqw_crafting_frame_target(
+        clip.movie().url(),
+        class_namespace_uri.as_deref(),
+        &class_local_name,
+    )
+}
+
+/// Construct and bind the named direct children used by the two AQW crafting overlays.
+///
+/// Their generated `__setProp__` frame methods immediately dereference timeline fields such as
+/// `_id6.strAction` and `_id3.strFrame`. A re-entrant construction pass can leave those fields null
+/// even though the child is present in the display list. Repair before the frame script starts so
+/// no partially executed script is retried.
+pub fn prepare_aqw_crafting_frame_children<'gc>(
+    context: &mut UpdateContext<'gc>,
+    clip: MovieClip<'gc>,
+) -> TimelineChildRebindSummary {
+    let mut summary = TimelineChildRebindSummary::default();
+    if !crafting_frame_construction_applies(clip) {
+        return summary;
+    }
+
+    let Some(parent_object) = clip.object2() else {
+        summary
+            .errors
+            .push("crafting overlay AVM2 object is unavailable".to_owned());
+        return summary;
+    };
+    let Some(domain) = context
+        .library
+        .library_for_movie(clip.movie())
+        .map(|library| library.avm2_domain())
+    else {
+        summary
+            .errors
+            .push("crafting overlay AVM2 domain is unavailable".to_owned());
+        return summary;
+    };
+
+    let mut activation = Avm2Activation::from_domain(context, domain);
+    let parent = Avm2Value::from(parent_object);
+    let children: Vec<DisplayObject<'gc>> = clip.iter_render_list().collect();
+    summary.scanned_containers = 1;
+    summary.scanned_direct_children = children.len();
+
+    for child in children {
+        let Some(name_string) = child
+            .has_explicit_name()
+            .then(|| child.name().map(|name| name.to_string()))
+            .flatten()
+        else {
+            continue;
+        };
+        summary.named_children = summary.named_children.saturating_add(1);
+
+        if should_force_aqw_crafting_child(true, true, child.object2().is_some()) {
+            summary.forced_construct_attempts = summary.forced_construct_attempts.saturating_add(1);
+            child.mark_avm2_lifecycle_dirty(Avm2LifecycleTraversal::Construct);
+            child.construct_frame(activation.context);
+            if child.object2().is_some() {
+                summary.forced_constructed_fields.push(name_string.clone());
+            }
+        }
+
+        let Some(child_object) = child.object2() else {
+            summary
+                .unavailable_fields
+                .push(format!("{name_string} (child AVM2 object unavailable)"));
+            continue;
+        };
+        summary.constructed_named_children = summary.constructed_named_children.saturating_add(1);
+
+        let name = AvmString::new_utf8(activation.gc(), name_string.clone());
+        let multiname = Avm2Multiname::new(activation.avm2().find_public_namespace(), name);
+        match parent.get_property(&multiname, &mut activation) {
+            Ok(Avm2Value::Null | Avm2Value::Undefined) => {
+                summary.null_or_undefined_fields =
+                    summary.null_or_undefined_fields.saturating_add(1);
+                match parent.init_property(
+                    &multiname,
+                    Avm2Value::from(child_object),
+                    &mut activation,
+                ) {
+                    Ok(()) => summary.rebound_fields.push(name_string),
+                    Err(error) => summary.errors.push(format!("{name_string}: {error:?}")),
+                }
+            }
+            Ok(_) => summary.occupied_fields.push(name_string),
+            Err(error) => summary
+                .errors
+                .push(format!("{name_string} lookup: {error:?}")),
+        }
+    }
+
+    summary
 }
 
 fn is_aqw_parent_timeline_label_fallback(
@@ -451,6 +823,200 @@ mod tests {
             Some("mcChar"),
             Some("mcSkel"),
             true,
+        ));
+    }
+
+    #[test]
+    fn aura_refresh_target_is_limited_to_spider_world_update_aura_data() {
+        assert!(is_aqw_aura_refresh_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "World/updateAuraData",
+            Some("World"),
+            true,
+        ));
+        assert!(is_aqw_aura_refresh_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "updateAuraData",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_refresh_target(
+            "https://example.invalid/other.swf",
+            "World/updateAuraData",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_refresh_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/removeAura",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_refresh_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/updateAuraData",
+            Some("Avatar"),
+            true,
+        ));
+        assert!(!is_aqw_aura_refresh_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/updateAuraData",
+            Some("World"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn aura_insertion_target_is_limited_to_spider_world_show_aura_change() {
+        assert!(is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "World/showAuraChange",
+            Some("World"),
+            true,
+        ));
+        assert!(is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "showAuraChange",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_insertion_target(
+            "https://example.invalid/other.swf",
+            "World/showAuraChange",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/updateAuraData",
+            Some("World"),
+            true,
+        ));
+        assert!(!is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/showAuraChange",
+            Some("Avatar"),
+            true,
+        ));
+        assert!(!is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/showAuraChange",
+            Some("World"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn only_missing_timed_aura_timestamps_are_repaired() {
+        assert!(should_repair_aqw_incoming_aura_timestamp(false, f64::NAN));
+        assert!(should_repair_aqw_incoming_aura_timestamp(false, 0.0));
+        assert!(!should_repair_aqw_incoming_aura_timestamp(false, 42_000.0));
+        assert!(!should_repair_aqw_incoming_aura_timestamp(true, f64::NAN));
+        assert!(!should_repair_aqw_incoming_aura_timestamp(true, 0.0));
+    }
+
+    #[test]
+    fn aura_refresh_requires_all_three_identity_fields_to_match() {
+        assert!(aura_refresh_identity_matches(true, true, true));
+        assert!(!aura_refresh_identity_matches(false, true, true));
+        assert!(!aura_refresh_identity_matches(true, false, true));
+        assert!(!aura_refresh_identity_matches(true, true, false));
+    }
+
+    #[test]
+    fn aura_refresh_uses_current_time_when_spider_omits_timestamp() {
+        assert_eq!(select_aura_refresh_timestamp(f64::NAN, 42_000.0), 42_000.0);
+        assert_eq!(select_aura_refresh_timestamp(0.0, 42_000.0), 42_000.0);
+    }
+
+    #[test]
+    fn aura_refresh_preserves_spiders_valid_timestamp() {
+        assert_eq!(select_aura_refresh_timestamp(41_999.0, 42_000.0), 41_999.0);
+    }
+
+    #[test]
+    fn crafting_frame_target_is_limited_to_the_two_trace_proven_overlays() {
+        assert!(is_aqw_crafting_frame_target(
+            "https://game.aq.com/game/gamefiles/maps/spellcraft.swf?ver=1",
+            Some("game_fla"),
+            "mcInfoOverlay_233",
+        ));
+        assert!(is_aqw_crafting_frame_target(
+            "https://game.aq.com/game/gamefiles/alchemy/alchemyGame_v4.swf",
+            Some("alchemyGame_v4_fla"),
+            "mcInfoOverlay_388",
+        ));
+        assert!(!is_aqw_crafting_frame_target(
+            "https://game.aq.com/game/gamefiles/maps/battleon.swf",
+            Some("game_fla"),
+            "mcInfoOverlay_233",
+        ));
+        assert!(!is_aqw_crafting_frame_target(
+            "https://game.aq.com/game/gamefiles/maps/spellcraft.swf",
+            Some("game_fla"),
+            "OtherOverlay",
+        ));
+        assert!(!is_aqw_crafting_frame_target(
+            "https://example.invalid/spellcraft.swf",
+            Some("game_fla"),
+            "mcInfoOverlay_233",
+        ));
+    }
+
+    #[test]
+    fn crafting_repair_only_forces_named_unconstructed_children() {
+        assert!(should_force_aqw_crafting_child(true, true, false));
+        assert!(!should_force_aqw_crafting_child(false, true, false));
+        assert!(!should_force_aqw_crafting_child(true, false, false));
+        assert!(!should_force_aqw_crafting_child(true, true, true));
+    }
+
+    #[test]
+    fn equipment_recovery_target_is_limited_to_spider_avatar_initialization() {
+        assert!(is_aqw_equipment_initialization_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "Avatar/initAvatar",
+            Some("Avatar"),
+            true,
+        ));
+        assert!(!is_aqw_equipment_initialization_target(
+            "https://example.invalid/spider.swf",
+            "Avatar/initAvatar",
+            Some("Avatar"),
+            true,
+        ));
+        assert!(!is_aqw_equipment_initialization_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "Avatar/updateItemAnimation",
+            Some("Avatar"),
+            true,
+        ));
+        assert!(!is_aqw_equipment_initialization_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "Avatar/initAvatar",
+            Some("AvatarMC"),
+            true,
+        ));
+        assert!(!is_aqw_equipment_initialization_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "Avatar/initAvatar",
+            Some("Avatar"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn equipment_recovery_requires_a_finished_stuck_own_first_load() {
+        assert!(should_schedule_aqw_equipment_recovery(true, true, false, 1,));
+        assert!(!should_schedule_aqw_equipment_recovery(
+            false, true, false, 1,
+        ));
+        assert!(!should_schedule_aqw_equipment_recovery(
+            true, false, false, 1,
+        ));
+        assert!(!should_schedule_aqw_equipment_recovery(true, true, true, 1,));
+        assert!(!should_schedule_aqw_equipment_recovery(
+            true, true, false, 0,
         ));
     }
 }

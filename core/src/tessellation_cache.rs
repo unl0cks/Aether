@@ -88,6 +88,19 @@ impl TessellationCache {
         self.len
     }
 
+    /// Drops every cached GPU handle and returns how many entries were released.
+    ///
+    /// The source shape is owned by the display object, so cleared entries can be
+    /// tessellated again the next time they are drawn.
+    pub(crate) fn clear(&mut self) -> usize {
+        let released = self.len;
+        for entry in &mut self.entries[..self.len] {
+            *entry = None;
+        }
+        self.len = 0;
+        released
+    }
+
     /// Moves the entry at the given index to the most recently used position and returns its shape handle.
     fn touch_entry(&mut self, index: usize) -> ShapeHandle {
         if index == self.len - 1 {

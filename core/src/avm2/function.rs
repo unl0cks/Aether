@@ -294,6 +294,79 @@ pub fn exec<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mc = activation.gc();
 
+    #[cfg(feature = "aether_compatibility")]
+    let aether_aura_refresh_arguments = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_is_public =
+            bound_class.is_some_and(|class| class.name().namespace().is_public());
+        let applies = crate::aether_compatibility::is_aqw_aura_refresh_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_is_public,
+        );
+        (applies && arguments.len() >= 3).then(|| (arguments.get_at(1), arguments.get_at(2)))
+    };
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_aura_insertion_argument = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_is_public =
+            bound_class.is_some_and(|class| class.name().namespace().is_public());
+        let applies = crate::aether_compatibility::is_aqw_aura_insertion_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_is_public,
+        );
+        (applies && arguments.len() >= 1).then(|| arguments.get_at(0))
+    };
+
+    #[cfg(feature = "aether_compatibility")]
+    if let Some(response) = aether_aura_insertion_argument
+        && let Err(error) =
+            crate::aether_compatibility::repair_aqw_incoming_aura_timestamps(activation, response)
+    {
+        tracing::warn!(?error, "AQW incoming aura timestamp repair failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_equipment_initialization = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_is_public =
+            bound_class.is_some_and(|class| class.name().namespace().is_public());
+        crate::aether_compatibility::is_aqw_equipment_initialization_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_is_public,
+        )
+    };
+
     #[cfg(feature = "aether_diagnostics")]
     let aether_movement_method = crate::aether_diagnostics::movement_tracking_enabled()
         .then(|| classify_aether_movement_method_for(method))
@@ -496,6 +569,27 @@ pub fn exec<'gc>(
             result
         }
     };
+
+    #[cfg(feature = "aether_compatibility")]
+    if ret.is_ok()
+        && let Some((incoming_aura, aura_collection_owner)) = aether_aura_refresh_arguments
+        && let Err(error) = crate::aether_compatibility::repair_aqw_aura_refresh_timestamp(
+            activation,
+            incoming_aura,
+            aura_collection_owner,
+        )
+    {
+        tracing::warn!(?error, "AQW aura refresh timestamp repair failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    if ret.is_ok()
+        && aether_equipment_initialization
+        && let Err(error) =
+            crate::aether_compatibility::schedule_aqw_equipment_recovery(activation, receiver)
+    {
+        tracing::warn!(?error, "AQW equipment recovery scheduling failed");
+    }
 
     #[cfg(feature = "aether_diagnostics")]
     if let Some(sequence_id) = aether_movement_simulation {
