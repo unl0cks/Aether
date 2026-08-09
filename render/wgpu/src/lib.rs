@@ -136,10 +136,11 @@ struct GradientUniforms {
     interpolation: i32,
     shape: i32,
     repeat: i32,
+    atlas: [f32; 4],
 }
 
-impl From<TessGradient> for GradientUniforms {
-    fn from(gradient: TessGradient) -> Self {
+impl GradientUniforms {
+    fn new(gradient: TessGradient, atlas_y: f32) -> Self {
         Self {
             focal_point: gradient.focal_point.to_f32().clamp(-0.98, 0.98),
             interpolation: (gradient.interpolation == swf::GradientInterpolation::LinearRgb) as i32,
@@ -153,6 +154,7 @@ impl From<TessGradient> for GradientUniforms {
                 GradientSpread::Reflect => 2,
                 GradientSpread::Repeat => 3,
             },
+            atlas: [atlas_y, 0.0, 0.0, 0.0],
         }
     }
 }

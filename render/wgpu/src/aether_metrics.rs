@@ -543,6 +543,23 @@ mod tests {
     }
 
     #[test]
+    fn texture_census_names_gradient_atlas_allocations() {
+        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        reset_texture_census();
+        record_texture_created(TextureOrigin::GradientAtlas, 256, 4_096, 1, 4_194_304);
+
+        let report = texture_census_report(4).join("\n");
+        assert!(
+            report.contains("gradient-atlas"),
+            "the atlas must be distinguishable from decoded bitmaps: {report}"
+        );
+        assert!(
+            report.contains("256x4096"),
+            "atlas dimensions missing: {report}"
+        );
+    }
+
+    #[test]
     fn census_reports_pool_reuse_and_how_thinly_the_entry_cap_is_spread() {
         // Whether the pool reuses anything is the question the entry cap was raised to answer, and
         // it cannot be read off allocation counts alone -- a request that reuses and a request that
@@ -628,6 +645,8 @@ pub enum TextureOrigin {
     Pool,
     /// Decoded SWF images and BitmapData surfaces, via `register_bitmap`.
     Bitmap,
+    /// Packed vector-gradient color ramps shared by every registered shape.
+    GradientAtlas,
 }
 
 impl TextureOrigin {
@@ -635,6 +654,7 @@ impl TextureOrigin {
         match self {
             TextureOrigin::Pool => "pool",
             TextureOrigin::Bitmap => "bitmap",
+            TextureOrigin::GradientAtlas => "gradient-atlas",
         }
     }
 }
@@ -684,7 +704,7 @@ impl OverflowCounters {
     }
 }
 
-static TEXTURE_CENSUS_OVERFLOW: [OverflowCounters; 2] = [const { OverflowCounters::new() }; 2];
+static TEXTURE_CENSUS_OVERFLOW: [OverflowCounters; 3] = [const { OverflowCounters::new() }; 3];
 
 /// Last sampled live-resource figures from wgpu-hal. The census above counts textures as they are
 /// *created*, which cannot distinguish per-frame churn that is freed again from memory that is
@@ -713,13 +733,15 @@ fn overflow_index(origin: TextureOrigin) -> usize {
     match origin {
         TextureOrigin::Pool => 0,
         TextureOrigin::Bitmap => 1,
+        TextureOrigin::GradientAtlas => 2,
     }
 }
 
 fn overflow_origin(index: usize) -> TextureOrigin {
     match index {
         0 => TextureOrigin::Pool,
-        _ => TextureOrigin::Bitmap,
+        1 => TextureOrigin::Bitmap,
+        _ => TextureOrigin::GradientAtlas,
     }
 }
 
@@ -767,6 +789,7 @@ fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> 
     let origin = match origin {
         TextureOrigin::Pool => 1_u64,
         TextureOrigin::Bitmap => 2_u64,
+        TextureOrigin::GradientAtlas => 3_u64,
     };
     // Never zero, so an untouched slot is distinguishable from a real bucket.
     (origin << 62)
@@ -845,7 +868,8 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
             let bytes = slot.bytes.load(Ordering::Relaxed);
             let origin = match key >> 62 {
                 1 => TextureOrigin::Pool,
-                _ => TextureOrigin::Bitmap,
+                2 => TextureOrigin::Bitmap,
+                _ => TextureOrigin::GradientAtlas,
             };
             let samples = (key >> 58) & 0xF;
             let width = (key >> 29) & 0x1FFF_FFFF;

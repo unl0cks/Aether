@@ -13,6 +13,7 @@ struct Gradient {
     interpolation: i32,
     shape: i32,
     repeat: i32,
+    atlas: vec4<f32>,
 };
 
 @group(2) @binding(1) var<uniform> gradient: Gradient;
@@ -72,7 +73,7 @@ fn main_fragment(in: VertexOutput) -> @location(0) vec4<f32> {
         t = fract(t);
     }
 
-    var color = textureSample(texture, texture_sampler, vec2<f32>(t, 0.0));
+    var color = textureSample(texture, texture_sampler, vec2<f32>(t, gradient.atlas.x));
     if (gradient.interpolation != 0) {
         color = common__linear_to_srgb(color);
     }

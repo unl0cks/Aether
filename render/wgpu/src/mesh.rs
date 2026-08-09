@@ -4,8 +4,8 @@ use crate::{
     Descriptors, GradientUniforms, PosColorVertex, PosVertex, TextureTransforms, as_texture,
 };
 use std::any::Any;
+use std::collections::HashMap;
 use std::ops::Range;
-use wgpu::util::DeviceExt;
 
 use crate::buffer_builder::BufferBuilder;
 use ruffle_render::backend::{RenderBackend, ShapeHandle, ShapeHandleImpl};
@@ -15,6 +15,147 @@ use swf::{CharacterId, GradientInterpolation};
 
 /// How big to make gradient textures. Larger will keep more detail, but be slower and use more memory.
 const GRADIENT_SIZE: usize = 256;
+const GRADIENT_ATLAS_ROWS: u32 = 4_096;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct GradientAtlasLocation {
+    page: usize,
+    row: u32,
+}
+
+#[derive(Debug)]
+struct GradientAtlasPage {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct GradientAtlas {
+    layout: GradientAtlasLayout,
+    pages: Vec<GradientAtlasPage>,
+}
+
+impl GradientAtlas {
+    fn allocate(
+        &mut self,
+        descriptors: &Descriptors,
+        pixels: [u8; GRADIENT_SIZE * 4],
+    ) -> (GradientAtlasLocation, wgpu::TextureView) {
+        let (location, is_new) = self.layout.allocate_with_status(pixels);
+
+        while self.pages.len() <= location.page {
+            let texture = descriptors.device.create_texture(&wgpu::TextureDescriptor {
+                label: create_debug_label!("Gradient atlas page {}", self.pages.len()).as_deref(),
+                size: wgpu::Extent3d {
+                    width: GRADIENT_SIZE as u32,
+                    height: GRADIENT_ATLAS_ROWS,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba8Unorm,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            #[cfg(feature = "aether_metrics")]
+            crate::aether_metrics::record_texture_created(
+                crate::aether_metrics::TextureOrigin::GradientAtlas,
+                GRADIENT_SIZE as u32,
+                GRADIENT_ATLAS_ROWS,
+                1,
+                GRADIENT_SIZE as u64 * GRADIENT_ATLAS_ROWS as u64 * 4,
+            );
+            let view = texture.create_view(&Default::default());
+            self.pages.push(GradientAtlasPage { texture, view });
+        }
+
+        let page = &self.pages[location.page];
+        if is_new {
+            descriptors.queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &page.texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d {
+                        x: 0,
+                        y: location.row,
+                        z: 0,
+                    },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                &pixels,
+                wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(GRADIENT_SIZE as u32 * 4),
+                    rows_per_image: None,
+                },
+                wgpu::Extent3d {
+                    width: GRADIENT_SIZE as u32,
+                    height: 1,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        (location, page.view.clone())
+    }
+}
+
+#[derive(Debug, Default)]
+struct GradientAtlasLayout {
+    locations: HashMap<[u8; GRADIENT_SIZE * 4], GradientAtlasLocation>,
+}
+
+impl GradientAtlasLayout {
+    #[cfg(test)]
+    fn allocate(&mut self, pixels: [u8; GRADIENT_SIZE * 4]) -> GradientAtlasLocation {
+        self.allocate_with_status(pixels).0
+    }
+
+    fn allocate_with_status(
+        &mut self,
+        pixels: [u8; GRADIENT_SIZE * 4],
+    ) -> (GradientAtlasLocation, bool) {
+        if let Some(location) = self.locations.get(&pixels) {
+            return (*location, false);
+        }
+
+        let index = self.locations.len();
+        let location = GradientAtlasLocation {
+            page: index / GRADIENT_ATLAS_ROWS as usize,
+            row: (index % GRADIENT_ATLAS_ROWS as usize) as u32,
+        };
+        self.locations.insert(pixels, location);
+        (location, true)
+    }
+
+    fn sample_y(row: u32) -> f32 {
+        debug_assert!(row < GRADIENT_ATLAS_ROWS);
+        (row as f32 + 0.5) / GRADIENT_ATLAS_ROWS as f32
+    }
+}
+
+#[derive(Debug, Default)]
+struct GradientBindGroupLayout {
+    slots: HashMap<usize, usize>,
+}
+
+impl GradientBindGroupLayout {
+    fn slot_for_page(&mut self, page: usize) -> usize {
+        if let Some(slot) = self.slots.get(&page) {
+            return *slot;
+        }
+
+        let slot = self.slots.len();
+        self.slots.insert(page, slot);
+        slot
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.slots.len()
+    }
+}
 
 #[derive(Debug)]
 pub struct Mesh {
@@ -39,16 +180,44 @@ pub struct PendingDraw {
 }
 
 impl PendingDraw {
-    pub fn finish(
+    pub fn finish_all(
+        pending: Vec<Self>,
+        descriptors: &Descriptors,
+        uniform_buffer: &wgpu::Buffer,
+        gradients: &[CommonGradient],
+    ) -> Vec<Draw> {
+        let mut layout = GradientBindGroupLayout::default();
+        let mut bind_groups = Vec::new();
+        pending
+            .into_iter()
+            .map(|draw| {
+                draw.finish(
+                    descriptors,
+                    uniform_buffer,
+                    gradients,
+                    &mut layout,
+                    &mut bind_groups,
+                )
+            })
+            .collect()
+    }
+
+    fn finish(
         self,
         descriptors: &Descriptors,
         uniform_buffer: &wgpu::Buffer,
         gradients: &[CommonGradient],
+        gradient_layout: &mut GradientBindGroupLayout,
+        gradient_bind_groups: &mut Vec<wgpu::BindGroup>,
     ) -> Draw {
         Draw {
-            draw_type: self
-                .draw_type
-                .finish(descriptors, uniform_buffer, gradients),
+            draw_type: self.draw_type.finish(
+                descriptors,
+                uniform_buffer,
+                gradients,
+                gradient_layout,
+                gradient_bind_groups,
+            ),
             vertices: self.vertices,
             indices: self.indices,
             num_indices: self.num_indices,
@@ -195,11 +364,13 @@ impl PendingDrawType {
         })
     }
 
-    pub fn finish(
+    fn finish(
         self,
         descriptors: &Descriptors,
         uniform_buffer: &wgpu::Buffer,
         gradients: &[CommonGradient],
+        gradient_layout: &mut GradientBindGroupLayout,
+        gradient_bind_groups: &mut Vec<wgpu::BindGroup>,
     ) -> DrawType {
         match self {
             PendingDrawType::Color => DrawType::Color,
@@ -209,45 +380,69 @@ impl PendingDrawType {
                 bind_group_label,
             } => {
                 let common = &gradients[gradient_index];
-                let bind_group = descriptors
-                    .device
-                    .create_bind_group(&wgpu::BindGroupDescriptor {
-                        layout: &descriptors.bind_layouts.gradient,
-                        entries: &[
-                            wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: uniform_buffer,
-                                    offset: texture_transforms_index,
-                                    size: wgpu::BufferSize::new(
-                                        std::mem::size_of::<TextureTransforms>() as u64,
-                                    ),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 1,
-                                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                                    buffer: uniform_buffer,
-                                    offset: common.buffer_offset,
-                                    size: wgpu::BufferSize::new(
-                                        std::mem::size_of::<GradientUniforms>() as u64,
-                                    ),
-                                }),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 2,
-                                resource: wgpu::BindingResource::TextureView(&common.texture_view),
-                            },
-                            wgpu::BindGroupEntry {
-                                binding: 3,
-                                resource: wgpu::BindingResource::Sampler(
-                                    descriptors.bitmap_samplers.get_sampler(false, true),
-                                ),
-                            },
-                        ],
-                        label: bind_group_label.as_deref(),
-                    });
-                DrawType::Gradient { bind_group }
+                let slot = gradient_layout.slot_for_page(common.atlas_page);
+                if slot == gradient_bind_groups.len() {
+                    let bind_group =
+                        descriptors
+                            .device
+                            .create_bind_group(&wgpu::BindGroupDescriptor {
+                                layout: &descriptors.bind_layouts.gradient,
+                                entries: &[
+                                    wgpu::BindGroupEntry {
+                                        binding: 0,
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: uniform_buffer,
+                                                offset: 0,
+                                                size: wgpu::BufferSize::new(std::mem::size_of::<
+                                                    TextureTransforms,
+                                                >(
+                                                )
+                                                    as u64),
+                                            },
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 1,
+                                        resource: wgpu::BindingResource::Buffer(
+                                            wgpu::BufferBinding {
+                                                buffer: uniform_buffer,
+                                                offset: 0,
+                                                size: wgpu::BufferSize::new(std::mem::size_of::<
+                                                    GradientUniforms,
+                                                >(
+                                                )
+                                                    as u64),
+                                            },
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 2,
+                                        resource: wgpu::BindingResource::TextureView(
+                                            &common.texture_view,
+                                        ),
+                                    },
+                                    wgpu::BindGroupEntry {
+                                        binding: 3,
+                                        resource: wgpu::BindingResource::Sampler(
+                                            descriptors.bitmap_samplers.get_sampler(false, true),
+                                        ),
+                                    },
+                                ],
+                                label: bind_group_label.as_deref(),
+                            });
+                    gradient_bind_groups.push(bind_group);
+                }
+                DrawType::Gradient {
+                    bind_group: gradient_bind_groups[slot].clone(),
+                    texture_transforms_offset: texture_transforms_index
+                        .try_into()
+                        .expect("gradient texture-transform offset must fit in u32"),
+                    gradient_offset: common
+                        .buffer_offset
+                        .try_into()
+                        .expect("gradient uniform offset must fit in u32"),
+                }
             }
             PendingDrawType::Bitmap {
                 texture_transforms_index,
@@ -277,12 +472,19 @@ impl PendingDrawType {
 #[derive(Debug)]
 pub enum DrawType {
     Color,
-    Gradient { bind_group: wgpu::BindGroup },
-    Bitmap { binds: BitmapBinds },
+    Gradient {
+        bind_group: wgpu::BindGroup,
+        texture_transforms_offset: wgpu::DynamicOffset,
+        gradient_offset: wgpu::DynamicOffset,
+    },
+    Bitmap {
+        binds: BitmapBinds,
+    },
 }
 
 #[derive(Debug)]
 pub struct CommonGradient {
+    atlas_page: usize,
     texture_view: wgpu::TextureView,
     buffer_offset: wgpu::BufferAddress,
 }
@@ -291,6 +493,7 @@ impl CommonGradient {
     pub fn new(
         descriptors: &Descriptors,
         gradient: Gradient,
+        atlas: &mut GradientAtlas,
         uniform_buffers: &mut BufferBuilder,
     ) -> Self {
         let colors = if gradient.records.is_empty() {
@@ -354,34 +557,19 @@ impl CommonGradient {
 
             colors
         };
-        let texture = descriptors.device.create_texture_with_data(
-            &descriptors.queue,
-            &wgpu::TextureDescriptor {
-                label: None,
-                size: wgpu::Extent3d {
-                    width: GRADIENT_SIZE as u32,
-                    height: 1,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                usage: wgpu::TextureUsages::TEXTURE_BINDING,
-                view_formats: &[],
-            },
-            wgpu::util::TextureDataOrder::LayerMajor,
-            &colors[..],
-        );
-        let view = texture.create_view(&Default::default());
+        let (location, texture_view) = atlas.allocate(descriptors, colors);
 
         let buffer_offset = uniform_buffers
-            .add(&[GradientUniforms::from(gradient)])
+            .add(&[GradientUniforms::new(
+                gradient,
+                GradientAtlasLayout::sample_y(location.row),
+            )])
             .expect("Mesh uniform buffer was too large!")
             .start;
 
         Self {
-            texture_view: view,
+            atlas_page: location.page,
+            texture_view,
             buffer_offset,
         }
     }
@@ -443,4 +631,70 @@ fn create_texture_transforms(
         .add(&[texture_transform])
         .expect("Mesh uniform buffer was too large!")
         .start
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GRADIENT_ATLAS_ROWS, GRADIENT_SIZE, GradientAtlasLayout, GradientBindGroupLayout};
+
+    #[test]
+    fn gradient_atlas_packs_crowded_room_scale_into_seven_textures() {
+        let mut layout = GradientAtlasLayout::default();
+        let mut last = None;
+
+        for index in 0_u32..28_504 {
+            let mut pixels = [0; GRADIENT_SIZE * 4];
+            pixels[..4].copy_from_slice(&index.to_le_bytes());
+            last = Some(layout.allocate(pixels));
+        }
+
+        let last = last.expect("the trace contains gradients");
+        assert_eq!(GRADIENT_ATLAS_ROWS, 4_096);
+        assert_eq!(last.page, 6);
+        assert_eq!(last.row, 3_927);
+    }
+
+    #[test]
+    fn gradient_atlas_reuses_identical_color_ramps() {
+        let mut layout = GradientAtlasLayout::default();
+        let pixels = [37; GRADIENT_SIZE * 4];
+
+        let first = layout.allocate(pixels);
+        let second = layout.allocate(pixels);
+
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn gradient_atlas_only_uploads_a_color_ramp_once() {
+        let mut layout = GradientAtlasLayout::default();
+        let pixels = [91; GRADIENT_SIZE * 4];
+
+        let (first, first_is_new) = layout.allocate_with_status(pixels);
+        let (second, second_is_new) = layout.allocate_with_status(pixels);
+
+        assert_eq!(first, second);
+        assert!(first_is_new);
+        assert!(!second_is_new);
+    }
+
+    #[test]
+    fn gradient_atlas_samples_the_center_of_each_row() {
+        let first = GradientAtlasLayout::sample_y(0);
+        let last = GradientAtlasLayout::sample_y(GRADIENT_ATLAS_ROWS - 1);
+
+        assert_eq!(first, 0.5 / 4_096.0);
+        assert_eq!(last, 4_095.5 / 4_096.0);
+    }
+
+    #[test]
+    fn gradient_draws_share_one_bind_group_per_mesh_atlas_page() {
+        let mut layout = GradientBindGroupLayout::default();
+
+        assert_eq!(layout.slot_for_page(4), 0);
+        assert_eq!(layout.slot_for_page(4), 0);
+        assert_eq!(layout.slot_for_page(9), 1);
+        assert_eq!(layout.slot_for_page(4), 0);
+        assert_eq!(layout.len(), 2);
+    }
 }

@@ -3,7 +3,7 @@ use crate::buffer_pool::{BufferPool, TexturePool};
 use crate::context3d::WgpuContext3D;
 use crate::dynamic_transforms::DynamicTransforms;
 use crate::filters::FilterSource;
-use crate::mesh::{CommonGradient, Mesh, PendingDraw};
+use crate::mesh::{CommonGradient, GradientAtlas, Mesh, PendingDraw};
 use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::{LayerRef, Surface};
 use crate::target::{MaybeOwnedBuffer, TextureTarget};
@@ -73,6 +73,7 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     surface: Surface,
     meshes: Vec<Mesh>,
     shape_tessellator: ShapeTessellator,
+    gradient_atlas: GradientAtlas,
     // This is currently unused - we just store it to report in
     // `get_viewport_dimensions`
     viewport_scale_factor: f64,
@@ -264,6 +265,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             surface,
             meshes: Vec::new(),
             shape_tessellator: ShapeTessellator::new(),
+            gradient_atlas: GradientAtlas::default(),
             viewport_scale_factor: 1.0,
             texture_pool: TexturePool::new(
                 general_texture_pool_policy(offscreen_texture_pool_policy),
@@ -302,6 +304,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             gradients.push(CommonGradient::new(
                 &self.descriptors,
                 gradient,
+                &mut self.gradient_atlas,
                 &mut uniform_buffer,
             ));
         }
@@ -338,10 +341,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             wgpu::BufferUsages::INDEX,
         );
 
-        let draws = draws
-            .into_iter()
-            .map(|d| d.finish(&self.descriptors, &uniform_buffer, &gradients))
-            .collect();
+        let draws = PendingDraw::finish_all(draws, &self.descriptors, &uniform_buffer, &gradients);
 
         Mesh {
             draws,

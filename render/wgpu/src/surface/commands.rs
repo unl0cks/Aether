@@ -134,7 +134,12 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
     }
 
-    pub fn prep_gradient(&mut self, bind_group: &'pass wgpu::BindGroup) {
+    pub fn prep_gradient(
+        &mut self,
+        bind_group: &'pass wgpu::BindGroup,
+        texture_transforms_offset: wgpu::DynamicOffset,
+        gradient_offset: wgpu::DynamicOffset,
+    ) {
         if self.needs_stencil {
             self.render_pass
                 .set_pipeline(self.pipelines.gradients.pipeline_for(self.mask_state));
@@ -143,7 +148,11 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 .set_pipeline(self.pipelines.gradients.stencilless_pipeline());
         }
 
-        self.render_pass.set_bind_group(2, bind_group, &[]);
+        self.render_pass.set_bind_group(
+            2,
+            bind_group,
+            &[texture_transforms_offset, gradient_offset],
+        );
     }
 
     pub fn prep_bitmap(
@@ -292,8 +301,12 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
                 DrawType::Color => {
                     self.prep_color();
                 }
-                DrawType::Gradient { bind_group, .. } => {
-                    self.prep_gradient(bind_group);
+                DrawType::Gradient {
+                    bind_group,
+                    texture_transforms_offset,
+                    gradient_offset,
+                } => {
+                    self.prep_gradient(bind_group, *texture_transforms_offset, *gradient_offset);
                 }
                 DrawType::Bitmap { binds, .. } => {
                     self.prep_bitmap(&binds.bind_group, TrivialBlend::Normal, false);
