@@ -1,7 +1,8 @@
 //! Narrow compatibility repairs used by Aether without enabling diagnostic instrumentation.
 
 use crate::avm2::{
-    Activation as Avm2Activation, Multiname as Avm2Multiname, TObject as _, Value as Avm2Value,
+    Activation as Avm2Activation, FunctionArgs as Avm2FunctionArgs, Multiname as Avm2Multiname,
+    TObject as _, Value as Avm2Value,
 };
 use crate::context::UpdateContext;
 use crate::display_object::{
@@ -73,6 +74,43 @@ fn aqw_spellcraft_drag_delay_ms() -> f64 {
 }
 
 #[inline]
+pub(crate) fn is_aqw_spellcraft_drop_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_has_public_namespace: bool,
+) -> bool {
+    if !contains_ascii_case_insensitive(
+        movie_url,
+        "game.aq.com/game/gamefiles/maps/tradeskills/spellcraft/game-spellcraftr2.swf",
+    ) {
+        return false;
+    }
+
+    method_name.ends_with("scGame_1/DragStop")
+        || (method_name == "DragStop"
+            && bound_class_local_name == Some("scGame_1")
+            && bound_class_has_public_namespace)
+}
+
+#[inline]
+fn select_aqw_spellcraft_effect_target(
+    hit_targets: [bool; 5],
+    pickup_point: Option<&str>,
+) -> Option<u8> {
+    hit_targets
+        .iter()
+        .position(|hit| *hit)
+        .map(|index| index as u8 + 1)
+        .or_else(|| {
+            pickup_point
+                .and_then(|name| name.strip_prefix("mcTarget"))
+                .and_then(|index| index.parse::<u8>().ok())
+                .filter(|index| (1..=5).contains(index))
+        })
+}
+
+#[inline]
 pub(crate) fn is_aqw_valiance_track_target(
     movie_url: &str,
     method_name: &str,
@@ -102,7 +140,9 @@ pub(crate) fn is_aqw_valiance_track_target(
 
 #[inline]
 fn aqw_valiance_y_offset() -> f64 {
-    6.0
+    // Valiance spans roughly -282 to +108 pixels around AQW's foot-level target origin. Moving
+    // the tracked effect down 36 pixels centers its main artwork over the avatar instead of above it.
+    36.0
 }
 
 pub(crate) fn is_aqw_aura_refresh_target(
@@ -126,6 +166,10 @@ pub(crate) fn is_aqw_aura_insertion_target(
 ) -> bool {
     if !contains_ascii_case_insensitive(movie_url, "spider.swf") {
         return false;
+    }
+
+    if matches!(method_name, "World/showAuraChange" | "showAuraChange") {
+        return bound_class_local_name == Some("World") && bound_class_is_public;
     }
 
     if method_name.ends_with("playerAuras/handleAura")
@@ -272,6 +316,70 @@ pub(crate) fn smooth_aqw_spellcraft_drag_timer<'gc>(
     Ok(true)
 }
 
+pub(crate) fn capture_aqw_spellcraft_effect_target<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    receiver: Avm2Value<'gc>,
+) -> Result<Option<u8>, crate::avm2::Error<'gc>> {
+    fn property<'gc>(
+        activation: &mut Avm2Activation<'_, 'gc>,
+        receiver: Avm2Value<'gc>,
+        name: &str,
+    ) -> Result<Avm2Value<'gc>, crate::avm2::Error<'gc>> {
+        receiver.get_public_property(AvmString::new_utf8(activation.gc(), name), activation)
+    }
+
+    let word_list = property(activation, receiver, "mcWordList")?;
+    let pickup_point = property(activation, receiver, "strPickupPoint")?
+        .coerce_to_string(activation)?
+        .to_utf8_lossy()
+        .into_owned();
+    let mut hit_targets = [false; 5];
+    for (index, hit) in hit_targets.iter_mut().enumerate() {
+        let target = property(activation, receiver, &format!("mcTarget{}", index + 1))?;
+        *hit = word_list
+            .call_public_property(
+                AvmString::new_utf8(activation.gc(), "hitTestObject"),
+                Avm2FunctionArgs::from_slice(&[target]),
+                activation,
+            )?
+            .coerce_to_boolean();
+    }
+
+    Ok(select_aqw_spellcraft_effect_target(
+        hit_targets,
+        Some(&pickup_point),
+    ))
+}
+
+pub(crate) fn focus_aqw_spellcraft_effect<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    receiver: Avm2Value<'gc>,
+    target_index: u8,
+) -> Result<(), crate::avm2::Error<'gc>> {
+    // AQW restarts mcGlow on every recipe-compatible occupied slot after each drop. Keep the
+    // feedback on the slot that actually changed so stale recipe glows do not appear elsewhere.
+    for index in 1..=5 {
+        let target = receiver.get_public_property(
+            AvmString::new_utf8(activation.gc(), format!("mcTarget{index}")),
+            activation,
+        )?;
+        let glow = target
+            .get_public_property(AvmString::new_utf8(activation.gc(), "mcGlow"), activation)?;
+        let (method, frame) = if index == target_index {
+            ("gotoAndPlay", "Play")
+        } else {
+            ("gotoAndStop", "Init")
+        };
+        let frame = Avm2Value::from(AvmString::new_utf8(activation.gc(), frame));
+        glow.call_public_property(
+            AvmString::new_utf8(activation.gc(), method),
+            Avm2FunctionArgs::from_slice(&[frame]),
+            activation,
+        )?;
+    }
+    Ok(())
+}
+
 pub(crate) fn offset_aqw_valiance_effect<'gc>(
     activation: &mut Avm2Activation<'_, 'gc>,
     receiver: Avm2Value<'gc>,
@@ -337,9 +445,8 @@ pub(crate) fn repair_aqw_incoming_aura_timestamps<'gc>(
         }
     }
 
-    // The optional aura UI does not call `World/showAuraChange`; it consumes the raw `resObj.a`
-    // packet. Repair both packet layouts before `playerAuras` or `targetAuras` copies `ts` into
-    // its countdown state.
+    // The optional aura UI also consumes the raw `resObj.a` packet. Repair both packet layouts
+    // before `playerAuras` or `targetAuras` copies `ts` into its countdown state.
     let actions = property(activation, response, "a")?;
     if let Some(actions) = actions.as_object() {
         let mut action_index = actions.get_next_enumerant(0, activation)?;
@@ -1186,15 +1293,15 @@ mod tests {
     }
 
     #[test]
-    fn aura_insertion_target_is_limited_to_spider_aura_handlers() {
-        assert!(!is_aqw_aura_insertion_target(
+    fn aura_insertion_target_includes_spider_world_and_optional_ui_handlers() {
+        assert!(is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
             "World/showAuraChange",
             Some("World"),
             true,
             true,
         ));
-        assert!(!is_aqw_aura_insertion_target(
+        assert!(is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf",
             "showAuraChange",
             Some("World"),
@@ -1377,6 +1484,52 @@ mod tests {
     }
 
     #[test]
+    fn spellcraft_drop_feedback_follows_the_last_changed_target() {
+        let movie =
+            "https://game.aq.com/game/gamefiles/maps/tradeskills/spellcraft/game-spellcraftr2.swf";
+        assert!(is_aqw_spellcraft_drop_target(
+            movie,
+            "scGame_1/DragStop",
+            Some("scGame_1"),
+            true,
+        ));
+        assert!(!is_aqw_spellcraft_drop_target(
+            movie,
+            "scGame_1/DragStart",
+            Some("scGame_1"),
+            true,
+        ));
+        assert!(!is_aqw_spellcraft_drop_target(
+            "https://example.invalid/game-spellcraftr2.swf",
+            "scGame_1/DragStop",
+            Some("scGame_1"),
+            true,
+        ));
+
+        assert_eq!(
+            select_aqw_spellcraft_effect_target(
+                [false, true, false, false, false],
+                Some("mcWordSlot3"),
+            ),
+            Some(2),
+        );
+        assert_eq!(
+            select_aqw_spellcraft_effect_target(
+                [false, false, false, false, false],
+                Some("mcTarget4"),
+            ),
+            Some(4),
+        );
+        assert_eq!(
+            select_aqw_spellcraft_effect_target(
+                [false, false, false, false, false],
+                Some("mcWordSlot3"),
+            ),
+            None,
+        );
+    }
+
+    #[test]
     fn valiance_offset_is_limited_to_its_spellw_tracking_callback() {
         let movie = "https://game.aq.com/game/gamefiles/assets/assets_2026.swf";
         assert!(is_aqw_valiance_track_target(
@@ -1403,7 +1556,7 @@ mod tests {
             Some("SpellW"),
             Some("sp_qchronoa2"),
         ));
-        assert_eq!(aqw_valiance_y_offset(), 6.0);
+        assert_eq!(aqw_valiance_y_offset(), 36.0);
     }
 
     #[test]

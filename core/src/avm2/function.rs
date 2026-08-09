@@ -427,6 +427,39 @@ pub fn exec<'gc>(
     };
 
     #[cfg(feature = "aether_compatibility")]
+    let aether_spellcraft_effect_target = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_has_public_namespace =
+            bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
+        if crate::aether_compatibility::is_aqw_spellcraft_drop_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_has_public_namespace,
+        ) {
+            match crate::aether_compatibility::capture_aqw_spellcraft_effect_target(
+                activation, receiver,
+            ) {
+                Ok(target) => target,
+                Err(error) => {
+                    tracing::warn!(?error, "AQW Spellcraft effect target capture failed");
+                    None
+                }
+            }
+        } else {
+            None
+        }
+    };
+
+    #[cfg(feature = "aether_compatibility")]
     let aether_valiance_tracking = {
         let bound_class_local_name = method.bound_class().map(|class| {
             class
@@ -684,6 +717,18 @@ pub fn exec<'gc>(
             crate::aether_compatibility::smooth_aqw_spellcraft_drag_timer(activation, receiver)
     {
         tracing::warn!(?error, "AQW Spellcraft drag timer adjustment failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    if ret.is_ok()
+        && let Some(target_index) = aether_spellcraft_effect_target
+        && let Err(error) = crate::aether_compatibility::focus_aqw_spellcraft_effect(
+            activation,
+            receiver,
+            target_index,
+        )
+    {
+        tracing::warn!(?error, "AQW Spellcraft effect placement adjustment failed");
     }
 
     #[cfg(feature = "aether_compatibility")]
