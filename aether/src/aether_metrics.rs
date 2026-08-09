@@ -965,6 +965,7 @@ fn complex_blend_breakdown(
 /// scene that is CPU-bound shows a large tick and a small render; one that is GPU-bound shows the
 /// reverse. Separating the SWF's executed frame rate from the host's render rate matters too,
 /// because the two only agree while the player is keeping up with its own frame budget.
+#[allow(clippy::too_many_arguments)]
 fn perf_summary_line(
     interval_us: u64,
     authored_frames_executed: u64,

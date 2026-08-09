@@ -36,6 +36,7 @@ use ruffle_render::tessellator::ShapeTessellator;
 use std::any::Any;
 use std::borrow::Cow;
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::Arc;
 use swf::Color;
@@ -80,6 +81,7 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
+    submission_retirement: SubmissionRetirement<SubmissionIndex>,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -255,6 +257,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             &descriptors,
             max_cache_entries_per_submission(offscreen_texture_pool_policy, &adapter_info),
         );
+        let submission_retirement =
+            SubmissionRetirement::new(submission_retirement_limit_for_adapter_info(&adapter_info));
 
         Ok(Self {
             descriptors,
@@ -276,6 +280,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             offscreen_buffer_pool: Arc::new(offscreen_buffer_pool),
             dynamic_transforms: transforms,
             active_frame,
+            submission_retirement,
         })
     }
 
@@ -690,8 +695,17 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let queue_started = std::time::Instant::now();
         self.active_frame.staging_belt.finish();
 
-        self.active_frame
-            .submit_for_target(&self.descriptors, &self.target, frame_output);
+        let submission_index =
+            self.active_frame
+                .submit_for_target(&self.descriptors, &self.target, frame_output);
+        if let Some(oldest_submission) = self.submission_retirement.push(submission_index) {
+            if let Err(error) = self.descriptors.device.poll(wgpu::PollType::Wait {
+                submission_index: Some(oldest_submission),
+                timeout: None,
+            }) {
+                tracing::warn!("Failed to retire an AMD Vulkan frame submission: {error}");
+            }
+        }
         #[cfg(feature = "aether_metrics")]
         let queue_elapsed = queue_started.elapsed();
         let general_maintenance = self.texture_pool.finish_frame();
@@ -1319,6 +1333,13 @@ fn memory_hints_for_adapter_info(adapter_info: &wgpu::AdapterInfo) -> wgpu::Memo
     }
 }
 
+const AMD_VULKAN_MAX_FRAMES_IN_FLIGHT: usize = 2;
+
+#[inline]
+fn submission_retirement_limit_for_adapter_info(adapter_info: &wgpu::AdapterInfo) -> Option<usize> {
+    is_amd_vulkan(adapter_info).then_some(AMD_VULKAN_MAX_FRAMES_IN_FLIGHT)
+}
+
 /// Determines how we choose our frame buffer
 #[derive(Clone)]
 pub enum RenderTargetMode {
@@ -1351,6 +1372,28 @@ pub struct ActiveFrame {
     pub command_encoder: wgpu::CommandEncoder,
     draws_since_flush: u32,
     max_draws_per_flush: u32,
+}
+
+struct SubmissionRetirement<T> {
+    max_in_flight: Option<usize>,
+    submissions: VecDeque<T>,
+}
+
+impl<T> SubmissionRetirement<T> {
+    fn new(max_in_flight: Option<usize>) -> Self {
+        Self {
+            max_in_flight,
+            submissions: VecDeque::new(),
+        }
+    }
+
+    fn push(&mut self, submission: T) -> Option<T> {
+        let max_in_flight = self.max_in_flight?;
+        self.submissions.push_back(submission);
+        (self.submissions.len() > max_in_flight)
+            .then(|| self.submissions.pop_front())
+            .flatten()
+    }
 }
 
 #[cfg(test)]
@@ -1399,6 +1442,37 @@ mod bitmap_cache_capacity_tests {
         assert_eq!(
             bitmap_cache_filter_source_size((637, 584), (900, 498)),
             (637, 498)
+        );
+    }
+
+    #[test]
+    fn submission_retirement_waits_for_the_oldest_frame_at_the_limit() {
+        let mut retirement = SubmissionRetirement::new(Some(2));
+
+        assert_eq!(retirement.push(11), None);
+        assert_eq!(retirement.push(12), None);
+        assert_eq!(retirement.push(13), Some(11));
+        assert_eq!(retirement.push(14), Some(12));
+    }
+
+    #[test]
+    fn submission_retirement_is_limited_to_amd_vulkan() {
+        let amd_vulkan = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Vulkan);
+        assert_eq!(
+            submission_retirement_limit_for_adapter_info(&amd_vulkan),
+            Some(2)
+        );
+
+        let nvidia_vulkan = adapter_info("NVIDIA GeForce RTX 3080", 0x10de, wgpu::Backend::Vulkan);
+        assert_eq!(
+            submission_retirement_limit_for_adapter_info(&nvidia_vulkan),
+            None
+        );
+
+        let amd_dx12 = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Dx12);
+        assert_eq!(
+            submission_retirement_limit_for_adapter_info(&amd_dx12),
+            None
         );
     }
 }
