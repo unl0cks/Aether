@@ -81,7 +81,6 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
-    submission_retirement: SubmissionRetirement<SubmissionIndex>,
 }
 
 impl WgpuRenderBackend<SwapChainTarget> {
@@ -256,9 +255,8 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         let active_frame = ActiveFrame::new(
             &descriptors,
             max_cache_entries_per_submission(offscreen_texture_pool_policy, &adapter_info),
+            submission_retirement_limit_for_adapter_info(&adapter_info),
         );
-        let submission_retirement =
-            SubmissionRetirement::new(submission_retirement_limit_for_adapter_info(&adapter_info));
 
         Ok(Self {
             descriptors,
@@ -280,7 +278,6 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             offscreen_buffer_pool: Arc::new(offscreen_buffer_pool),
             dynamic_transforms: transforms,
             active_frame,
-            submission_retirement,
         })
     }
 
@@ -695,17 +692,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         let queue_started = std::time::Instant::now();
         self.active_frame.staging_belt.finish();
 
-        let submission_index =
-            self.active_frame
-                .submit_for_target(&self.descriptors, &self.target, frame_output);
-        if let Some(oldest_submission) = self.submission_retirement.push(submission_index) {
-            if let Err(error) = self.descriptors.device.poll(wgpu::PollType::Wait {
-                submission_index: Some(oldest_submission),
-                timeout: None,
-            }) {
-                tracing::warn!("Failed to retire an AMD Vulkan frame submission: {error}");
-            }
-        }
+        self.active_frame
+            .submit_for_target(&self.descriptors, &self.target, frame_output);
         #[cfg(feature = "aether_metrics")]
         let queue_elapsed = queue_started.elapsed();
         let general_maintenance = self.texture_pool.finish_frame();
@@ -1372,6 +1360,7 @@ pub struct ActiveFrame {
     pub command_encoder: wgpu::CommandEncoder,
     draws_since_flush: u32,
     max_draws_per_flush: u32,
+    submission_retirement: SubmissionRetirement<SubmissionIndex>,
 }
 
 struct SubmissionRetirement<T> {
@@ -1393,6 +1382,14 @@ impl<T> SubmissionRetirement<T> {
         (self.submissions.len() > max_in_flight)
             .then(|| self.submissions.pop_front())
             .flatten()
+    }
+
+    fn push_direct(&mut self, submission: T) -> Option<T> {
+        self.push(submission)
+    }
+
+    fn push_target(&mut self, submission: T) -> Option<T> {
+        self.push(submission)
     }
 }
 
@@ -1456,6 +1453,16 @@ mod bitmap_cache_capacity_tests {
     }
 
     #[test]
+    fn intermediate_flushes_share_the_frame_retirement_budget() {
+        let mut retirement = SubmissionRetirement::new(Some(2));
+
+        assert_eq!(retirement.push_direct(21), None);
+        assert_eq!(retirement.push_target(22), None);
+        assert_eq!(retirement.push_direct(23), Some(21));
+        assert_eq!(retirement.push_target(24), Some(22));
+    }
+
+    #[test]
     fn submission_retirement_is_limited_to_amd_vulkan() {
         let amd_vulkan = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Vulkan);
         assert_eq!(
@@ -1478,7 +1485,11 @@ mod bitmap_cache_capacity_tests {
 }
 
 impl ActiveFrame {
-    pub fn new(descriptors: &Descriptors, max_draws_per_flush: u32) -> Self {
+    pub fn new(
+        descriptors: &Descriptors,
+        max_draws_per_flush: u32,
+        max_in_flight_submissions: Option<usize>,
+    ) -> Self {
         Self {
             command_encoder: descriptors
                 .device
@@ -1486,6 +1497,7 @@ impl ActiveFrame {
             staging_belt: wgpu::util::StagingBelt::new(65536),
             draws_since_flush: 0,
             max_draws_per_flush: max_draws_per_flush.max(1),
+            submission_retirement: SubmissionRetirement::new(max_in_flight_submissions),
         }
     }
 
@@ -1510,6 +1522,8 @@ impl ActiveFrame {
             frame,
         );
         self.staging_belt.recall();
+        let oldest_submission = self.submission_retirement.push_target(index.clone());
+        self.retire_submission(descriptors, oldest_submission, "frame");
         index
     }
 
@@ -1524,7 +1538,27 @@ impl ActiveFrame {
         );
         let index = descriptors.queue.submit(Some(draw_encoder.finish()));
         self.staging_belt.recall();
+        let oldest_submission = self.submission_retirement.push_direct(index.clone());
+        self.retire_submission(descriptors, oldest_submission, "intermediate");
         index
+    }
+
+    fn retire_submission(
+        &self,
+        descriptors: &Descriptors,
+        oldest_submission: Option<SubmissionIndex>,
+        submission_kind: &str,
+    ) {
+        let Some(oldest_submission) = oldest_submission else {
+            return;
+        };
+
+        if let Err(error) = descriptors.device.poll(wgpu::PollType::Wait {
+            submission_index: Some(oldest_submission),
+            timeout: None,
+        }) {
+            tracing::warn!("Failed to retire an AMD Vulkan {submission_kind} submission: {error}");
+        }
     }
 
     pub fn maybe_flush(&mut self, descriptors: &Descriptors) {
