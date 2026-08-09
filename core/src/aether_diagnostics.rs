@@ -34,7 +34,10 @@ const STALE_CACHE_FRAMES: u64 = 24 * 60 * 5;
 const INPUT_FLUSH_INTERVAL: Duration = Duration::from_millis(250);
 const INPUT_FLUSH_EVENT_COUNT: usize = 32;
 const AQW_MOVEMENT_NO_PROGRESS_DELAY_MS: f64 = 50.0;
-const AQW_DELAYED_MOUSE_STOP_GRACE: Duration = Duration::from_millis(50);
+// Coalesced mouse dispatch runs on the rendered frame. On a heavily loaded map the callback
+// observed one frame later can therefore arrive 67-100 ms after the MouseMove instead of the
+// 14-16 ms seen at 60 FPS. Keep the window bounded, but wide enough for two 10 FPS frames.
+const AQW_DELAYED_MOUSE_STOP_GRACE: Duration = Duration::from_millis(250);
 const MOVEMENT_PROGRESS_EPSILON_PX: f64 = 0.25;
 const MAX_MOVEMENT_CALLBACKS_WITHOUT_PROGRESS: u32 = 120;
 const MAX_MOVEMENT_COLLISIONS_PER_SEQUENCE: usize = 128;
@@ -3033,7 +3036,7 @@ mod tests {
                 current,
                 50.0,
                 100.0,
-                now + Duration::from_millis(51),
+                now + AQW_DELAYED_MOUSE_STOP_GRACE + Duration::from_millis(1),
             ),
             None,
             "the cursor-specific guard must end after the delayed callback grace window"
@@ -3070,6 +3073,35 @@ mod tests {
     }
 
     #[test]
+    fn stop_guard_covers_a_delayed_mouse_callback_at_low_frame_rates() {
+        let owner = "stage#0/game/avatar";
+        let now = Instant::now();
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            ..MovementTraceRuntime::default()
+        };
+        let current = MovementPoint { x: 100.0, y: 200.0 };
+
+        state.enter_mouse_move_at(now);
+        state.exit_mouse_move();
+
+        assert_eq!(
+            state.try_record_suppressed_stop_at(
+                current,
+                400.0,
+                200.0,
+                now + Duration::from_millis(100),
+            ),
+            Some(1),
+            "a 10 FPS frame must not let AQW's delayed mouse-triggered stop escape the guard"
+        );
+    }
+
+    #[test]
     fn stop_guard_does_not_claim_unrelated_stops_after_mouse_grace_expires() {
         let owner = "stage#0/game/avatar";
         let now = Instant::now();
@@ -3091,7 +3123,7 @@ mod tests {
                 current,
                 400.0,
                 250.0,
-                now + Duration::from_millis(51),
+                now + AQW_DELAYED_MOUSE_STOP_GRACE + Duration::from_millis(1),
             ),
             None
         );

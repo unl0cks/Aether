@@ -468,6 +468,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         result.push(format!("Adapter Device Type: {:?}", info.device_type));
         result.push(format!("Adapter Driver Name: {:?}", info.driver));
         result.push(format!("Adapter Driver Info: {:?}", info.driver_info));
+        result.push(format!(
+            "Device Memory Policy: {:?}",
+            memory_hints_for_adapter_info(&info)
+        ));
 
         let enabled_features = self.descriptors.device.features();
         let available_features = self.descriptors.adapter.features() - enabled_features;
@@ -1289,11 +1293,30 @@ async fn request_device(
             label: None,
             required_features: features,
             required_limits: limits,
-            memory_hints: Default::default(),
+            memory_hints: memory_hints_for_adapter(adapter),
             trace: wgpu::Trace::Off,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
         })
         .await
+}
+
+#[inline]
+fn memory_hints_for_adapter(adapter: &wgpu::Adapter) -> wgpu::MemoryHints {
+    memory_hints_for_adapter_info(&adapter.get_info())
+}
+
+#[inline]
+fn memory_hints_for_adapter_info(adapter_info: &wgpu::AdapterInfo) -> wgpu::MemoryHints {
+    const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+
+    // wgpu 27's Vulkan performance policy grows suballocation blocks from 128 MiB to
+    // 512 MiB. The memory-usage policy uses 8 MiB to 64 MiB blocks, avoiding large
+    // speculative allocations on AMD's Windows Vulkan driver.
+    if adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == AMD_PCI_VENDOR_ID {
+        wgpu::MemoryHints::MemoryUsage
+    } else {
+        wgpu::MemoryHints::Performance
+    }
 }
 
 /// Determines how we choose our frame buffer
@@ -1333,6 +1356,39 @@ pub struct ActiveFrame {
 #[cfg(test)]
 mod bitmap_cache_capacity_tests {
     use super::*;
+
+    fn adapter_info(name: &str, vendor: u32, backend: wgpu::Backend) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: name.to_string(),
+            vendor,
+            device: 0,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            driver: String::new(),
+            driver_info: String::new(),
+            backend,
+        }
+    }
+
+    #[test]
+    fn amd_vulkan_uses_memory_conserving_allocations() {
+        let amd_vulkan = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Vulkan);
+        assert!(matches!(
+            memory_hints_for_adapter_info(&amd_vulkan),
+            wgpu::MemoryHints::MemoryUsage
+        ));
+
+        let nvidia_vulkan = adapter_info("NVIDIA GeForce RTX 3080", 0x10de, wgpu::Backend::Vulkan);
+        assert!(matches!(
+            memory_hints_for_adapter_info(&nvidia_vulkan),
+            wgpu::MemoryHints::Performance
+        ));
+
+        let amd_dx12 = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Dx12);
+        assert!(matches!(
+            memory_hints_for_adapter_info(&amd_dx12),
+            wgpu::MemoryHints::Performance
+        ));
+    }
 
     #[test]
     fn filters_process_only_the_logical_cache_region() {

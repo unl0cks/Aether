@@ -700,7 +700,7 @@ impl<'a> WgpuCommandHandler<'a> {
     }
 }
 
-/// Whether COMPLEX and shader blends may shrink too, on top of `SHRINK_BLEND_TARGETS`.
+/// Whether COMPLEX blends may shrink too, on top of `SHRINK_BLEND_TARGETS`.
 ///
 /// Separate because the risk is different. A trivial blend is composited as a plain textured quad,
 /// so a region is just a smaller quad. A complex blend samples the parent's blend buffer alongside
@@ -737,6 +737,23 @@ const BLEND_TARGET_SIZE_GRID: u32 = 128;
 /// targets are all alive at once. Alpha masks take two each and were the larger half.
 const SHRINK_BLEND_TARGETS: bool = true;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum BlendTargetKind {
+    Trivial,
+    Complex,
+    Shader,
+}
+
+fn blend_target_may_shrink(kind: BlendTargetKind) -> bool {
+    match kind {
+        BlendTargetKind::Trivial => SHRINK_BLEND_TARGETS,
+        BlendTargetKind::Complex => SHRINK_BLEND_TARGETS && SHRINK_COMPLEX_BLEND_TARGETS,
+        // PixelBender receives no region transform when the blend executes. Its foreground and
+        // background inputs therefore have to retain the same full-surface coordinate space.
+        BlendTargetKind::Shader => false,
+    }
+}
+
 impl CommandHandler for WgpuCommandHandler<'_> {
     fn blend(
         &mut self,
@@ -751,18 +768,13 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         };
         let blend_type = BlendType::from(blend_mode);
 
-        // Where this blend's sub-target actually has to be. Only trivial blends can move: complex
-        // and shader blends composite against the PARENT's blend buffer through
-        // `whole_frame_bind_group`, which assumes the two are the same size and aligned, so handing
-        // them a smaller target would misplace the result. Those keep a full-surface target, which
-        // is what every blend used to get.
-        let may_shrink = match blend_type {
-            BlendType::Trivial(_) => SHRINK_BLEND_TARGETS,
-            // Complex and shader blends composite against the parent's blend buffer, so the shader
-            // has to remap the child's UV -- see `region_frame_bind_group`. Separately switchable
-            // because that path is the one that can misplace an effect if the remap is wrong.
-            _ => SHRINK_BLEND_TARGETS && SHRINK_COMPLEX_BLEND_TARGETS,
-        };
+        // Where this blend's sub-target actually has to be. Complex blends carry an explicit region
+        // transform when composited. PixelBender blends do not, so they retain the full surface.
+        let may_shrink = blend_target_may_shrink(match &blend_type {
+            BlendType::Trivial(_) => BlendTargetKind::Trivial,
+            BlendType::Complex(_) => BlendTargetKind::Complex,
+            BlendType::Shader(_) => BlendTargetKind::Shader,
+        });
         let region = match (may_shrink, bounds.filter(|_| may_shrink)) {
             (true, Some(bounds)) => {
                 // Core has already grown these bounds for the object's filters, so the region is
@@ -1142,6 +1154,22 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 transform_buffer,
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod blend_target_policy_tests {
+    use super::{BlendTargetKind, blend_target_may_shrink};
+
+    #[test]
+    fn pixel_bender_blends_keep_full_surface_coordinates() {
+        assert!(!blend_target_may_shrink(BlendTargetKind::Shader));
+    }
+
+    #[test]
+    fn ordinary_blends_retain_region_sizing() {
+        assert!(blend_target_may_shrink(BlendTargetKind::Trivial));
+        assert!(blend_target_may_shrink(BlendTargetKind::Complex));
     }
 }
 

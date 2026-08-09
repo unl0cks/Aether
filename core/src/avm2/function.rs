@@ -2,6 +2,8 @@ use crate::avm2::Multiname;
 use crate::avm2::activation::Activation;
 use crate::avm2::error::{Error, make_error_1063};
 use crate::avm2::method::{Method, MethodKind, ParamConfig};
+#[cfg(feature = "aether_compatibility")]
+use crate::avm2::object::TObject as _;
 use crate::avm2::object::{ClassObject, FunctionObject};
 use crate::avm2::scope::ScopeChain;
 use crate::avm2::traits::TraitKind;
@@ -329,11 +331,14 @@ pub fn exec<'gc>(
         });
         let bound_class_is_public =
             bound_class.is_some_and(|class| class.name().namespace().is_public());
+        let bound_class_has_public_namespace =
+            bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
         let applies = crate::aether_compatibility::is_aqw_aura_insertion_target(
             method.owner_movie().url(),
             method.method_name().as_ref(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
+            bound_class_has_public_namespace,
         );
         (applies && arguments.len() >= 1).then(|| arguments.get_at(0))
     };
@@ -344,6 +349,39 @@ pub fn exec<'gc>(
             crate::aether_compatibility::repair_aqw_incoming_aura_timestamps(activation, response)
     {
         tracing::warn!(?error, "AQW incoming aura timestamp repair failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_aura_countdown_event = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_is_public =
+            bound_class.is_some_and(|class| class.name().namespace().is_public());
+        let bound_class_has_public_namespace =
+            bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
+        let applies = crate::aether_compatibility::is_aqw_aura_countdown_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_is_public,
+            bound_class_has_public_namespace,
+        );
+        (applies && arguments.len() >= 1).then(|| arguments.get_at(0))
+    };
+
+    #[cfg(feature = "aether_compatibility")]
+    if let Some(event) = aether_aura_countdown_event
+        && let Err(error) =
+            crate::aether_compatibility::repair_aqw_aura_countdown_mask(activation, event)
+    {
+        tracing::warn!(?error, "AQW aura countdown mask repair failed");
     }
 
     #[cfg(feature = "aether_compatibility")]
@@ -364,6 +402,54 @@ pub fn exec<'gc>(
             method.method_name().as_ref(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
+        )
+    };
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_spellcraft_drag_timer_setup = {
+        let bound_class = method.bound_class();
+        let bound_class_local_name = bound_class.map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let bound_class_has_public_namespace =
+            bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
+        crate::aether_compatibility::is_aqw_spellcraft_drag_timer_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            bound_class_has_public_namespace,
+        )
+    };
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_valiance_tracking = {
+        let bound_class_local_name = method.bound_class().map(|class| {
+            class
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        let receiver_class_local_name = receiver.as_object().map(|object| {
+            object
+                .instance_class()
+                .name()
+                .local_name()
+                .as_wstr()
+                .to_utf8_lossy()
+                .into_owned()
+        });
+        crate::aether_compatibility::is_aqw_valiance_track_target(
+            method.owner_movie().url(),
+            method.method_name().as_ref(),
+            bound_class_local_name.as_deref(),
+            receiver_class_local_name.as_deref(),
         )
     };
 
@@ -589,6 +675,24 @@ pub fn exec<'gc>(
             crate::aether_compatibility::schedule_aqw_equipment_recovery(activation, receiver)
     {
         tracing::warn!(?error, "AQW equipment recovery scheduling failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    if ret.is_ok()
+        && aether_spellcraft_drag_timer_setup
+        && let Err(error) =
+            crate::aether_compatibility::smooth_aqw_spellcraft_drag_timer(activation, receiver)
+    {
+        tracing::warn!(?error, "AQW Spellcraft drag timer adjustment failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    if ret.is_ok()
+        && aether_valiance_tracking
+        && let Err(error) =
+            crate::aether_compatibility::offset_aqw_valiance_effect(activation, receiver)
+    {
+        tracing::warn!(?error, "AQW Valiance position adjustment failed");
     }
 
     #[cfg(feature = "aether_diagnostics")]

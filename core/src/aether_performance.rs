@@ -8,7 +8,6 @@ static ADAPTIVE_AVATAR_CACHE: AtomicBool = AtomicBool::new(false);
 static CACHE_TEXTURE_GRID: AtomicBool = AtomicBool::new(false);
 static IDLE_GPU_UPLOAD_EVICTION: AtomicBool = AtomicBool::new(false);
 
-
 #[inline]
 pub fn set_avm2_broadcast_fast_path_enabled(enabled: bool) {
     AVM2_BROADCAST_FAST_PATH.store(enabled, Ordering::Relaxed);

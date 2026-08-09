@@ -86,7 +86,10 @@ mod tests {
 
     /// Apply the (column-major, row-vector) view matrix to a pixel coordinate.
     fn to_ndc(m: &[[f32; 4]; 4], x: f32, y: f32) -> (f32, f32) {
-        (x * m[0][0] + y * m[1][0] + m[3][0], x * m[0][1] + y * m[1][1] + m[3][1])
+        (
+            x * m[0][0] + y * m[1][0] + m[3][0],
+            x * m[0][1] + y * m[1][1] + m[3][1],
+        )
     }
 
     fn close(a: f32, b: f32) -> bool {
@@ -100,7 +103,10 @@ mod tests {
         let (x, y) = to_ndc(&m, 0.0, 0.0);
         assert!(close(x, -1.0) && close(y, 1.0), "top-left was ({x}, {y})");
         let (x, y) = to_ndc(&m, 2560.0, 1440.0);
-        assert!(close(x, 1.0) && close(y, -1.0), "bottom-right was ({x}, {y})");
+        assert!(
+            close(x, 1.0) && close(y, -1.0),
+            "bottom-right was ({x}, {y})"
+        );
     }
 
     #[test]
@@ -110,21 +116,33 @@ mod tests {
         let m = region_view_matrix(400, 300, 80, 60);
 
         let (x, y) = to_ndc(&m, 400.0, 300.0);
-        assert!(close(x, -1.0) && close(y, 1.0), "region top-left was ({x}, {y})");
+        assert!(
+            close(x, -1.0) && close(y, 1.0),
+            "region top-left was ({x}, {y})"
+        );
         let (x, y) = to_ndc(&m, 480.0, 360.0);
-        assert!(close(x, 1.0) && close(y, -1.0), "region bottom-right was ({x}, {y})");
+        assert!(
+            close(x, 1.0) && close(y, -1.0),
+            "region bottom-right was ({x}, {y})"
+        );
         // And the region's centre lands in the middle, not off to one side.
         let (x, y) = to_ndc(&m, 440.0, 330.0);
-        assert!(close(x, 0.0) && close(y, 0.0), "region centre was ({x}, {y})");
+        assert!(
+            close(x, 0.0) && close(y, 0.0),
+            "region centre was ({x}, {y})"
+        );
     }
 
     #[test]
     fn a_zero_offset_region_is_the_old_full_surface_matrix() {
-        assert_eq!(region_view_matrix(0, 0, 800, 600), [
-            [1.0 / 400.0, 0.0, 0.0, 0.0],
-            [0.0, -1.0 / 300.0, 0.0, 0.0],
-            [0.0, 0.0, 1.0, 0.0],
-            [-1.0, 1.0, 0.0, 1.0],
-        ]);
+        assert_eq!(
+            region_view_matrix(0, 0, 800, 600),
+            [
+                [1.0 / 400.0, 0.0, 0.0, 0.0],
+                [0.0, -1.0 / 300.0, 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [-1.0, 1.0, 0.0, 1.0],
+            ]
+        );
     }
 }

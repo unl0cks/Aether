@@ -372,10 +372,18 @@ pub fn goto_and_stop<'gc>(
         .as_display_object()
         .and_then(|dobj| dobj.as_movie_clip())
     {
+        #[cfg(feature = "aether_compatibility")]
+        let suppress_aqw_aura_mask_frame_script =
+            crate::aether_compatibility::is_aqw_aura_mask_segment(mc);
         let frame_or_label = args.get_value(0);
         let scene = args.try_get_string(1);
 
         goto_frame(activation, mc, frame_or_label, scene, true)?;
+
+        #[cfg(feature = "aether_compatibility")]
+        if suppress_aqw_aura_mask_frame_script {
+            mc.set_has_pending_script(false);
+        }
     }
 
     Ok(Value::Undefined)

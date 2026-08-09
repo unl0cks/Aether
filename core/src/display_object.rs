@@ -409,7 +409,6 @@ impl BitmapCache {
             .then_some("stage_scale_change")
     }
 
-
     /// Clears any dirtiness and ensure there's an appropriately sized texture allocated
     #[expect(clippy::too_many_arguments)]
     fn update(
@@ -1598,7 +1597,6 @@ pub fn render_base<'gc>(
 
         let base_transform = context.transform_stack.transform();
         let stage_matrix = context.stage.view_matrix();
-
 
         {
             #[cfg(feature = "aether_metrics")]
@@ -4175,7 +4173,6 @@ mod avm2_lifecycle_dirty_tests {
         // There is deliberately no fast path left to ask. `fast_hit_info` validated the transform
         // and the stage scale but not this, so it answered "clean hit" here and served the previous
         // frame's bitmap with its stale draw_offset and output size.
-
     }
 
     #[test]

@@ -31,6 +31,80 @@ fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
         .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
+#[inline]
+fn is_aqw_aura_mask_segment_parts(
+    parent_movie_url: &str,
+    parent_class_local_name: &str,
+    child_name: Option<&str>,
+    is_direct_child: bool,
+) -> bool {
+    is_direct_child
+        && contains_ascii_case_insensitive(
+            parent_movie_url,
+            "game.aq.com/game/gamefiles/spider.swf",
+        )
+        && parent_class_local_name == "ActMaskReverse"
+        && matches!(child_name, Some("e0" | "e1" | "e2" | "e3"))
+}
+
+#[inline]
+pub(crate) fn is_aqw_spellcraft_drag_timer_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_has_public_namespace: bool,
+) -> bool {
+    if !contains_ascii_case_insensitive(
+        movie_url,
+        "game.aq.com/game/gamefiles/maps/tradeskills/spellcraft/game-spellcraftr2.swf",
+    ) {
+        return false;
+    }
+
+    method_name.ends_with("scGame_1/frame6")
+        || (method_name == "frame6"
+            && bound_class_local_name == Some("scGame_1")
+            && bound_class_has_public_namespace)
+}
+
+#[inline]
+fn aqw_spellcraft_drag_delay_ms() -> f64 {
+    1_000.0 / 60.0
+}
+
+#[inline]
+pub(crate) fn is_aqw_valiance_track_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    receiver_class_local_name: Option<&str>,
+) -> bool {
+    let (method_owner, method_member) = method_name
+        .rsplit_once('/')
+        .map_or((None, method_name), |(owner, member)| (Some(owner), member));
+    let method_member = method_member
+        .rsplit_once(':')
+        .map_or(method_member, |(_, member)| member);
+    let method_owner_is_spell_w = method_owner.is_some_and(|owner| {
+        owner == "SpellW"
+            || owner
+                .rsplit_once("::")
+                .is_some_and(|(_, name)| name == "SpellW")
+    });
+
+    contains_ascii_case_insensitive(
+        movie_url,
+        "game.aq.com/game/gamefiles/assets/assets_2026.swf",
+    ) && method_member == "trackTC"
+        && (bound_class_local_name == Some("SpellW") || method_owner_is_spell_w)
+        && receiver_class_local_name == Some("sp_qchronoa2")
+}
+
+#[inline]
+fn aqw_valiance_y_offset() -> f64 {
+    6.0
+}
+
 pub(crate) fn is_aqw_aura_refresh_target(
     movie_url: &str,
     method_name: &str,
@@ -48,16 +122,78 @@ pub(crate) fn is_aqw_aura_insertion_target(
     method_name: &str,
     bound_class_local_name: Option<&str>,
     bound_class_is_public: bool,
+    bound_class_has_public_namespace: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "spider.swf")
-        && matches!(method_name, "World/showAuraChange" | "showAuraChange")
-        && bound_class_local_name == Some("World")
-        && bound_class_is_public
+    if !contains_ascii_case_insensitive(movie_url, "spider.swf") {
+        return false;
+    }
+
+    if method_name.ends_with("playerAuras/handleAura")
+        || method_name.ends_with("targetAuras/handleAura")
+    {
+        return true;
+    }
+
+    match bound_class_local_name {
+        Some("playerAuras") => {
+            aura_insertion_namespace_is_allowed(
+                bound_class_is_public,
+                bound_class_has_public_namespace,
+            ) && method_name == "handleAura"
+        }
+        Some("targetAuras") => {
+            aura_insertion_namespace_is_allowed(
+                bound_class_is_public,
+                bound_class_has_public_namespace,
+            ) && method_name == "handleAura"
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn is_aqw_aura_countdown_target(
+    movie_url: &str,
+    method_name: &str,
+    bound_class_local_name: Option<&str>,
+    bound_class_is_public: bool,
+    bound_class_has_public_namespace: bool,
+) -> bool {
+    if !contains_ascii_case_insensitive(movie_url, "spider.swf") {
+        return false;
+    }
+
+    if method_name.ends_with("playerAuras/countDownAct")
+        || method_name.ends_with("targetAuras/countDownAct")
+    {
+        return true;
+    }
+
+    method_name == "countDownAct"
+        && matches!(bound_class_local_name, Some("playerAuras" | "targetAuras"))
+        && aura_insertion_namespace_is_allowed(
+            bound_class_is_public,
+            bound_class_has_public_namespace,
+        )
+}
+
+#[inline]
+fn aura_insertion_namespace_is_allowed(
+    bound_class_is_public: bool,
+    bound_class_has_public_namespace: bool,
+) -> bool {
+    bound_class_is_public || bound_class_has_public_namespace
+}
+
+#[inline]
+fn is_plausible_aqw_aura_timestamp(timestamp: f64) -> bool {
+    const MIN_PLAUSIBLE_UNIX_TIMESTAMP_MS: f64 = 1_000_000_000_000.0;
+
+    timestamp.is_finite() && timestamp >= MIN_PLAUSIBLE_UNIX_TIMESTAMP_MS
 }
 
 #[inline]
 fn should_repair_aqw_incoming_aura_timestamp(is_passive: bool, timestamp: f64) -> bool {
-    !is_passive && (!timestamp.is_finite() || timestamp <= 0.0)
+    !is_passive && !is_plausible_aqw_aura_timestamp(timestamp)
 }
 
 #[inline]
@@ -70,12 +206,86 @@ fn aura_refresh_identity_matches(
 }
 
 #[inline]
+fn aura_countdown_child_needs_rebind(
+    field_is_display_object: bool,
+    field_matches_current_child: bool,
+) -> bool {
+    !field_is_display_object || !field_matches_current_child
+}
+
+#[inline]
 fn select_aura_refresh_timestamp(incoming_timestamp: f64, current_timestamp: f64) -> f64 {
-    if incoming_timestamp.is_finite() && incoming_timestamp > 0.0 {
+    if is_plausible_aqw_aura_timestamp(incoming_timestamp) {
         incoming_timestamp
     } else {
         current_timestamp
     }
+}
+
+/// Return whether an explicit goto is advancing one of AQW's four aura countdown mask segments.
+///
+/// AQW traces show these physical children inheriting unrelated skill frame scripts.
+/// Their timeline graphics still need to advance, but those unrelated scripts must not run.
+pub(crate) fn is_aqw_aura_mask_segment(clip: MovieClip<'_>) -> bool {
+    let Some(parent) = clip.parent() else {
+        return false;
+    };
+    let Some(parent_object) = parent.object2() else {
+        return false;
+    };
+    let child_name = clip
+        .has_explicit_name()
+        .then(|| clip.name().map(|name| name.to_string()))
+        .flatten();
+    let parent_class_local_name = parent_object
+        .instance_class()
+        .name()
+        .local_name()
+        .as_wstr()
+        .to_string();
+
+    is_aqw_aura_mask_segment_parts(
+        parent.movie().url(),
+        &parent_class_local_name,
+        child_name.as_deref(),
+        true,
+    )
+}
+
+pub(crate) fn smooth_aqw_spellcraft_drag_timer<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    receiver: Avm2Value<'gc>,
+) -> Result<bool, crate::avm2::Error<'gc>> {
+    let drag_timer = receiver.get_public_property(
+        AvmString::new_utf8(activation.gc(), "dragTimer"),
+        activation,
+    )?;
+    if matches!(drag_timer, Avm2Value::Null | Avm2Value::Undefined) {
+        return Ok(false);
+    }
+
+    drag_timer.set_public_property(
+        AvmString::new_utf8(activation.gc(), "delay"),
+        Avm2Value::Number(aqw_spellcraft_drag_delay_ms()),
+        activation,
+    )?;
+    Ok(true)
+}
+
+pub(crate) fn offset_aqw_valiance_effect<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    receiver: Avm2Value<'gc>,
+) -> Result<bool, crate::avm2::Error<'gc>> {
+    let y_name = AvmString::new_utf8(activation.gc(), "y");
+    let y = receiver
+        .get_public_property(y_name, activation)?
+        .coerce_to_number(activation)?;
+    receiver.set_public_property(
+        y_name,
+        Avm2Value::Number(y + aqw_valiance_y_offset()),
+        activation,
+    )?;
+    Ok(true)
 }
 
 /// Give each newly received timed aura a valid application timestamp before Spider creates its
@@ -93,16 +303,15 @@ pub(crate) fn repair_aqw_incoming_aura_timestamps<'gc>(
         object.get_public_property(AvmString::new_utf8(activation.gc(), name), activation)
     }
 
-    let auras = property(activation, response, "auras")?;
-    let Some(auras) = auras.as_object() else {
-        return Ok(0);
-    };
     let timestamp = Avm2Value::Number(get_current_date_time().timestamp_millis() as f64);
     let mut repaired = 0_usize;
-    let mut index = auras.get_next_enumerant(0, activation)?;
-    while index != 0 {
-        let aura = auras.get_enumerant_value(index, activation)?;
-        let command = property(activation, aura, "cmd")?.coerce_to_string(activation)?;
+
+    fn repair_aura<'gc>(
+        activation: &mut Avm2Activation<'_, 'gc>,
+        aura: Avm2Value<'gc>,
+        command: AvmString<'gc>,
+        timestamp: Avm2Value<'gc>,
+    ) -> Result<bool, crate::avm2::Error<'gc>> {
         let is_passive = command.as_wstr() == b"aura+p";
         let current_timestamp = property(activation, aura, "ts")?.coerce_to_number(activation)?;
         if should_repair_aqw_incoming_aura_timestamp(is_passive, current_timestamp) {
@@ -111,9 +320,119 @@ pub(crate) fn repair_aqw_incoming_aura_timestamps<'gc>(
                 timestamp,
                 activation,
             )?;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    let auras = property(activation, response, "auras")?;
+    if let Some(auras) = auras.as_object() {
+        let mut index = auras.get_next_enumerant(0, activation)?;
+        while index != 0 {
+            let aura = auras.get_enumerant_value(index, activation)?;
+            let command = property(activation, aura, "cmd")?.coerce_to_string(activation)?;
+            repaired += usize::from(repair_aura(activation, aura, command, timestamp)?);
+            index = auras.get_next_enumerant(index, activation)?;
+        }
+    }
+
+    // The optional aura UI does not call `World/showAuraChange`; it consumes the raw `resObj.a`
+    // packet. Repair both packet layouts before `playerAuras` or `targetAuras` copies `ts` into
+    // its countdown state.
+    let actions = property(activation, response, "a")?;
+    if let Some(actions) = actions.as_object() {
+        let mut action_index = actions.get_next_enumerant(0, activation)?;
+        while action_index != 0 {
+            let action = actions.get_enumerant_value(action_index, activation)?;
+            let command = property(activation, action, "cmd")?.coerce_to_string(activation)?;
+            let action_auras = property(activation, action, "auras")?;
+            if let Some(action_auras) = action_auras.as_object() {
+                let mut aura_index = action_auras.get_next_enumerant(0, activation)?;
+                while aura_index != 0 {
+                    let aura = action_auras.get_enumerant_value(aura_index, activation)?;
+                    repaired += usize::from(repair_aura(activation, aura, command, timestamp)?);
+                    aura_index = action_auras.get_next_enumerant(aura_index, activation)?;
+                }
+            } else {
+                let aura = property(activation, action, "aura")?;
+                if aura.as_object().is_some() {
+                    repaired += usize::from(repair_aura(activation, aura, command, timestamp)?);
+                }
+            }
+            action_index = actions.get_next_enumerant(action_index, activation)?;
+        }
+    }
+
+    Ok(repaired)
+}
+
+/// Restore the four named timeline children used by AQW's optional aura countdown mask.
+///
+/// Some AQW sessions resolve an `ActMaskReverse.eN` field to an unrelated avatar or skill clip.
+/// The countdown then drives that clip with `gotoAndStop`, running arbitrary frame scripts and
+/// aborting the aura update. Rebind only this mask class and only to its currently-present direct
+/// children immediately before Spider's countdown handler executes.
+pub(crate) fn repair_aqw_aura_countdown_mask<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    event: Avm2Value<'gc>,
+) -> Result<usize, crate::avm2::Error<'gc>> {
+    let Some(event_object) = event.as_object() else {
+        return Ok(0);
+    };
+    let target = event_object.as_event().and_then(|event| event.target());
+    let Some(target) = target else {
+        return Ok(0);
+    };
+
+    let icon2 = Avm2Value::from(target)
+        .get_public_property(AvmString::new_utf8(activation.gc(), "icon2"), activation)?;
+    let Some(icon2) = icon2
+        .as_object()
+        .and_then(|object| object.as_display_object())
+    else {
+        return Ok(0);
+    };
+    let Some(mask) = icon2.masker() else {
+        return Ok(0);
+    };
+    let Some(mask_object) = mask.object2() else {
+        return Ok(0);
+    };
+    if mask_object.instance_class().name().local_name().as_wstr() != b"ActMaskReverse" {
+        return Ok(0);
+    }
+    let Some(mask_container) = mask.as_container() else {
+        return Ok(0);
+    };
+
+    let mask_value = Avm2Value::from(mask_object);
+    let mut repaired = 0_usize;
+    for child_name in ["e0", "e1", "e2", "e3"] {
+        let name = AvmString::new_utf8(activation.gc(), child_name);
+        let Some(actual_child) = mask_container.child_by_name(name.as_wstr(), true) else {
+            continue;
+        };
+        let Some(actual_child_object) = actual_child.object2() else {
+            continue;
+        };
+
+        let multiname = Avm2Multiname::new(activation.avm2().find_public_namespace(), name);
+        let current = mask_value.get_property(&multiname, activation)?;
+        let current_display = current
+            .as_object()
+            .and_then(|object| object.as_display_object());
+        let field_is_display_object = current_display.is_some();
+        let field_matches_current_child =
+            current_display.is_some_and(|current| current.id() == actual_child.id());
+        if aura_countdown_child_needs_rebind(field_is_display_object, field_matches_current_child) {
+            mask_value.set_property(
+                &multiname,
+                Avm2Value::from(actual_child_object),
+                activation,
+            )?;
             repaired = repaired.saturating_add(1);
         }
-        index = auras.get_next_enumerant(index, activation)?;
     }
 
     Ok(repaired)
@@ -867,17 +1186,40 @@ mod tests {
     }
 
     #[test]
-    fn aura_insertion_target_is_limited_to_spider_world_show_aura_change() {
-        assert!(is_aqw_aura_insertion_target(
+    fn aura_insertion_target_is_limited_to_spider_aura_handlers() {
+        assert!(!is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
             "World/showAuraChange",
             Some("World"),
             true,
+            true,
         ));
-        assert!(is_aqw_aura_insertion_target(
+        assert!(!is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf",
             "showAuraChange",
             Some("World"),
+            true,
+            true,
+        ));
+        assert!(is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "playerAuras/handleAura",
+            Some("playerAuras"),
+            false,
+            true,
+        ));
+        assert!(is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "playerAuras/handleAura",
+            None,
+            false,
+            false,
+        ));
+        assert!(is_aqw_aura_insertion_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "targetAuras/handleAura",
+            Some("targetAuras"),
+            false,
             true,
         ));
         assert!(!is_aqw_aura_insertion_target(
@@ -885,11 +1227,13 @@ mod tests {
             "World/showAuraChange",
             Some("World"),
             true,
+            true,
         ));
         assert!(!is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf",
             "World/updateAuraData",
             Some("World"),
+            true,
             true,
         ));
         assert!(!is_aqw_aura_insertion_target(
@@ -897,20 +1241,180 @@ mod tests {
             "World/showAuraChange",
             Some("Avatar"),
             true,
+            true,
         ));
         assert!(!is_aqw_aura_insertion_target(
             "https://game.aq.com/game/gamefiles/spider.swf",
             "World/showAuraChange",
             Some("World"),
             false,
+            false,
         ));
     }
 
     #[test]
-    fn only_missing_timed_aura_timestamps_are_repaired() {
+    fn aura_insertion_allows_public_package_classes_but_not_internal_classes() {
+        assert!(aura_insertion_namespace_is_allowed(true, true));
+        assert!(aura_insertion_namespace_is_allowed(false, true));
+        assert!(!aura_insertion_namespace_is_allowed(false, false));
+    }
+
+    #[test]
+    fn aura_countdown_mask_repair_is_limited_to_spider_aura_handlers() {
+        assert!(is_aqw_aura_countdown_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "playerAuras/countDownAct",
+            Some("playerAuras"),
+            false,
+            true,
+        ));
+        assert!(is_aqw_aura_countdown_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "targetAuras/countDownAct",
+            Some("targetAuras"),
+            false,
+            true,
+        ));
+        assert!(is_aqw_aura_countdown_target(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "playerAuras/countDownAct",
+            None,
+            false,
+            false,
+        ));
+        assert!(!is_aqw_aura_countdown_target(
+            "https://example.invalid/other.swf",
+            "playerAuras/countDownAct",
+            Some("playerAuras"),
+            false,
+            true,
+        ));
+        assert!(!is_aqw_aura_countdown_target(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "World/countDownAct",
+            Some("World"),
+            true,
+            true,
+        ));
+    }
+
+    #[test]
+    fn aura_countdown_rebinds_missing_or_wrong_occupied_child_fields() {
+        assert!(aura_countdown_child_needs_rebind(false, false));
+        assert!(aura_countdown_child_needs_rebind(true, false));
+        assert!(!aura_countdown_child_needs_rebind(true, true));
+    }
+
+    #[test]
+    fn aura_mask_script_suppression_is_limited_to_direct_named_segments() {
+        assert!(is_aqw_aura_mask_segment_parts(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=1",
+            "ActMaskReverse",
+            Some("e0"),
+            true,
+        ));
+        assert!(is_aqw_aura_mask_segment_parts(
+            "https://game.aq.com/game/gamefiles/SPIDER.SWF",
+            "ActMaskReverse",
+            Some("e3"),
+            true,
+        ));
+        assert!(!is_aqw_aura_mask_segment_parts(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "ActMaskReverse",
+            Some("e4"),
+            true,
+        ));
+        assert!(!is_aqw_aura_mask_segment_parts(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "OtherMask",
+            Some("e0"),
+            true,
+        ));
+        assert!(!is_aqw_aura_mask_segment_parts(
+            "https://example.invalid/spider.swf",
+            "ActMaskReverse",
+            Some("e0"),
+            true,
+        ));
+        assert!(!is_aqw_aura_mask_segment_parts(
+            "https://game.aq.com/game/gamefiles/spider.swf",
+            "ActMaskReverse",
+            Some("e0"),
+            false,
+        ));
+    }
+
+    #[test]
+    fn spellcraft_drag_timer_override_is_limited_to_live_map_frame_six() {
+        let movie =
+            "https://game.aq.com/game/gamefiles/maps/tradeskills/spellcraft/game-spellcraftr2.swf";
+        assert!(is_aqw_spellcraft_drag_timer_target(
+            movie,
+            "scGame_1/frame6",
+            Some("scGame_1"),
+            true,
+        ));
+        assert!(is_aqw_spellcraft_drag_timer_target(
+            movie,
+            "scGame_1/frame6",
+            None,
+            false,
+        ));
+        assert!(!is_aqw_spellcraft_drag_timer_target(
+            movie,
+            "scGame_1/frame7",
+            Some("scGame_1"),
+            true,
+        ));
+        assert!(!is_aqw_spellcraft_drag_timer_target(
+            "https://example.invalid/game-spellcraftr2.swf",
+            "scGame_1/frame6",
+            Some("scGame_1"),
+            true,
+        ));
+        assert!((aqw_spellcraft_drag_delay_ms() - (1_000.0 / 60.0)).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn valiance_offset_is_limited_to_its_spellw_tracking_callback() {
+        let movie = "https://game.aq.com/game/gamefiles/assets/assets_2026.swf";
+        assert!(is_aqw_valiance_track_target(
+            movie,
+            "SpellW/private:trackTC",
+            Some("SpellW"),
+            Some("sp_qchronoa2"),
+        ));
+        assert!(is_aqw_valiance_track_target(
+            movie,
+            "SpellW/private:trackTC",
+            None,
+            Some("sp_qchronoa2"),
+        ));
+        assert!(!is_aqw_valiance_track_target(
+            movie,
+            "SpellW/private:trackTC",
+            Some("SpellW"),
+            Some("sp_apal4"),
+        ));
+        assert!(!is_aqw_valiance_track_target(
+            movie,
+            "SpellW/init",
+            Some("SpellW"),
+            Some("sp_qchronoa2"),
+        ));
+        assert_eq!(aqw_valiance_y_offset(), 6.0);
+    }
+
+    #[test]
+    fn invalid_timed_aura_timestamps_are_repaired() {
         assert!(should_repair_aqw_incoming_aura_timestamp(false, f64::NAN));
         assert!(should_repair_aqw_incoming_aura_timestamp(false, 0.0));
-        assert!(!should_repair_aqw_incoming_aura_timestamp(false, 42_000.0));
+        assert!(should_repair_aqw_incoming_aura_timestamp(false, 1.0));
+        assert!(!should_repair_aqw_incoming_aura_timestamp(
+            false,
+            1_780_000_000_000.0,
+        ));
         assert!(!should_repair_aqw_incoming_aura_timestamp(true, f64::NAN));
         assert!(!should_repair_aqw_incoming_aura_timestamp(true, 0.0));
     }
@@ -930,8 +1434,16 @@ mod tests {
     }
 
     #[test]
-    fn aura_refresh_preserves_spiders_valid_timestamp() {
-        assert_eq!(select_aura_refresh_timestamp(41_999.0, 42_000.0), 41_999.0);
+    fn aura_refresh_replaces_relative_or_seconds_timestamps() {
+        assert_eq!(select_aura_refresh_timestamp(41_999.0, 42_000.0), 42_000.0);
+    }
+
+    #[test]
+    fn aura_refresh_preserves_spiders_valid_epoch_milliseconds() {
+        assert_eq!(
+            select_aura_refresh_timestamp(1_780_000_000_000.0, 1_780_000_001_000.0),
+            1_780_000_000_000.0,
+        );
     }
 
     #[test]

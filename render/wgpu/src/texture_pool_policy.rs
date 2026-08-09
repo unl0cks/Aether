@@ -460,13 +460,13 @@ mod tests {
                     last_used_frame: 7,
                     available_entries: 1,
                     bytes_per_entry: Some(50),
-                uses: 1,
+                    uses: 1,
                 },
                 TextureRetentionCandidate {
                     last_used_frame: 10,
                     available_entries: 1,
                     bytes_per_entry: None,
-                uses: 1,
+                    uses: 1,
                 },
             ],
         );

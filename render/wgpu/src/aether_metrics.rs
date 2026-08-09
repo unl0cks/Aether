@@ -684,8 +684,7 @@ impl OverflowCounters {
     }
 }
 
-static TEXTURE_CENSUS_OVERFLOW: [OverflowCounters; 2] =
-    [const { OverflowCounters::new() }; 2];
+static TEXTURE_CENSUS_OVERFLOW: [OverflowCounters; 2] = [const { OverflowCounters::new() }; 2];
 
 /// Last sampled live-resource figures from wgpu-hal. The census above counts textures as they are
 /// *created*, which cannot distinguish per-frame churn that is freed again from memory that is
@@ -770,7 +769,9 @@ fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> 
         TextureOrigin::Bitmap => 2_u64,
     };
     // Never zero, so an untouched slot is distinguishable from a real bucket.
-    (origin << 62) | ((samples.min(15) as u64) << 58) | ((width.min(0x1FFF_FFFF) as u64) << 29)
+    (origin << 62)
+        | ((samples.min(15) as u64) << 58)
+        | ((width.min(0x1FFF_FFFF) as u64) << 29)
         | (height.min(0x1FFF_FFFF) as u64)
 }
 
@@ -874,10 +875,16 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
         .iter()
         .map(|slot| slot.bytes.load(Ordering::Relaxed))
         .sum();
-    let total_bytes: u64 =
-        rows.iter().map(|r| r.0).sum::<u64>().saturating_add(overflow_bytes);
-    let total_count: u64 =
-        rows.iter().map(|r| r.1).sum::<u64>().saturating_add(overflow_count);
+    let total_bytes: u64 = rows
+        .iter()
+        .map(|r| r.0)
+        .sum::<u64>()
+        .saturating_add(overflow_bytes);
+    let total_count: u64 = rows
+        .iter()
+        .map(|r| r.1)
+        .sum::<u64>()
+        .saturating_add(overflow_count);
     let used_buckets = rows.len();
     let mut out = vec![format!(
         "texture census: {} allocations, {:.1} GB created in total, {}/{} size buckets used{}",
