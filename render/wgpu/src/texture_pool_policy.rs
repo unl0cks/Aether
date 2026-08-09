@@ -13,6 +13,12 @@ pub enum OffscreenTexturePoolPolicy {
     BoundedReuse(BoundedTexturePoolLimits),
 }
 
+pub(crate) const AMD_PCI_VENDOR_ID: u32 = 0x1002;
+
+pub(crate) fn is_amd_vulkan(adapter_info: &wgpu::AdapterInfo) -> bool {
+    adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == AMD_PCI_VENDOR_ID
+}
+
 /// Budget for the general pool, which holds whole-surface render targets rather than the small
 /// filter intermediates the offscreen pool deals in.
 ///
@@ -59,11 +65,16 @@ pub(crate) fn general_texture_pool_policy(
 
 /// Bound the amount of cache/filter work recorded into one GPU command submission. The generic
 /// renderer keeps its established batching, while Aether's bounded AQW path retains a safety
-/// margin below that established limit. Sixty-four entries prevents an unbounded command buffer
-/// without turning one dense AQW frame into a dozen separate queue submissions.
-pub(crate) fn max_cache_entries_per_submission(policy: OffscreenTexturePoolPolicy) -> u32 {
+/// margin below that established limit. AMD's Windows Vulkan driver needs a smaller batch because
+/// it has reported device OOM while resident texture memory remained low and one dense AQW frame
+/// accumulated hundreds of passes in a single command submission.
+pub(crate) fn max_cache_entries_per_submission(
+    policy: OffscreenTexturePoolPolicy,
+    adapter_info: &wgpu::AdapterInfo,
+) -> u32 {
     match policy {
         OffscreenTexturePoolPolicy::Ephemeral => 100,
+        OffscreenTexturePoolPolicy::BoundedReuse(_) if is_amd_vulkan(adapter_info) => 16,
         OffscreenTexturePoolPolicy::BoundedReuse(_) => 64,
     }
 }
@@ -275,6 +286,18 @@ pub(crate) fn plan_globals_retention(
 mod tests {
     use super::*;
 
+    fn adapter_info(vendor: u32, backend: wgpu::Backend) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: String::new(),
+            vendor,
+            device: 0,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            driver: String::new(),
+            driver_info: String::new(),
+            backend,
+        }
+    }
+
     const LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
         max_cached_bytes: 300,
         max_cached_entries: 3,
@@ -283,13 +306,35 @@ mod tests {
     };
 
     #[test]
-    fn bounded_aqw_work_keeps_safe_but_coarser_gpu_submissions() {
+    fn bounded_aqw_work_limits_amd_vulkan_submission_pressure() {
+        let amd_vulkan = adapter_info(0x1002, wgpu::Backend::Vulkan);
+        let amd_dx12 = adapter_info(0x1002, wgpu::Backend::Dx12);
+        let nvidia_vulkan = adapter_info(0x10de, wgpu::Backend::Vulkan);
+
         assert_eq!(
-            max_cache_entries_per_submission(OffscreenTexturePoolPolicy::Ephemeral),
+            max_cache_entries_per_submission(OffscreenTexturePoolPolicy::Ephemeral, &amd_vulkan),
             100
         );
         assert_eq!(
-            max_cache_entries_per_submission(OffscreenTexturePoolPolicy::BoundedReuse(LIMITS)),
+            max_cache_entries_per_submission(
+                OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+                &amd_vulkan,
+            ),
+            16,
+            "AMD Vulkan must split dense AQW frames before one submission reaches driver OOM pressure"
+        );
+        assert_eq!(
+            max_cache_entries_per_submission(
+                OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+                &amd_dx12,
+            ),
+            64
+        );
+        assert_eq!(
+            max_cache_entries_per_submission(
+                OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+                &nvidia_vulkan,
+            ),
             64
         );
     }

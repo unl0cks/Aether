@@ -15,6 +15,7 @@ use ruffle_render_wgpu::backend::{
     WgpuRenderBackend, create_wgpu_instance, request_adapter_and_device,
 };
 use ruffle_render_wgpu::descriptors::Descriptors;
+use ruffle_render_wgpu::target::desired_maximum_frame_latency;
 use ruffle_render_wgpu::utils::{format_list, get_backend_names};
 use std::any::Any;
 use std::fs::File;
@@ -174,7 +175,7 @@ impl GuiController {
                 width: size.width,
                 height: size.height,
                 present_mode: Default::default(),
-                desired_maximum_frame_latency: 2,
+                desired_maximum_frame_latency: desired_maximum_frame_latency(&adapter_info),
                 alpha_mode: Default::default(),
                 view_formats: Default::default(),
             },
@@ -281,7 +282,9 @@ impl GuiController {
                 width: self.size.width,
                 height: self.size.height,
                 present_mode: Default::default(),
-                desired_maximum_frame_latency: 2,
+                desired_maximum_frame_latency: desired_maximum_frame_latency(
+                    &self.descriptors.adapter.get_info(),
+                ),
                 alpha_mode: Default::default(),
                 view_formats: Default::default(),
             },

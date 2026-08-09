@@ -1,5 +1,6 @@
 use crate::Error;
 use crate::buffer_pool::PoolEntry;
+use crate::texture_pool_policy::is_amd_vulkan;
 use crate::utils::{BufferDimensions, remove_srgb};
 use ruffle_render::bitmap::PixelRegion;
 use std::fmt::Debug;
@@ -89,7 +90,7 @@ impl SwapChainTarget {
             width,
             height,
             present_mode: wgpu::PresentMode::Fifo,
-            desired_maximum_frame_latency: 2,
+            desired_maximum_frame_latency: desired_maximum_frame_latency(&adapter.get_info()),
             alpha_mode: capabilities.alpha_modes[0],
             view_formats: if linear_format == format {
                 vec![format]
@@ -103,6 +104,12 @@ impl SwapChainTarget {
             window_surface: surface,
         }
     }
+}
+
+/// Limit the number of presentable images queued by the Windows AMD Vulkan path. This does not
+/// block the CPU; it reduces the amount of driver-owned work and memory that can be outstanding.
+pub fn desired_maximum_frame_latency(adapter_info: &wgpu::AdapterInfo) -> u32 {
+    if is_amd_vulkan(adapter_info) { 1 } else { 2 }
 }
 
 impl RenderTarget for SwapChainTarget {
@@ -325,5 +332,33 @@ impl RenderTarget for TextureTarget {
         } else {
             queue.submit(command_buffers)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn adapter_info(vendor: u32, backend: wgpu::Backend) -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            name: String::new(),
+            vendor,
+            device: 0,
+            device_type: wgpu::DeviceType::DiscreteGpu,
+            driver: String::new(),
+            driver_info: String::new(),
+            backend,
+        }
+    }
+
+    #[test]
+    fn amd_vulkan_keeps_only_one_presentable_frame_queued() {
+        let amd_vulkan = adapter_info(0x1002, wgpu::Backend::Vulkan);
+        let amd_dx12 = adapter_info(0x1002, wgpu::Backend::Dx12);
+        let nvidia_vulkan = adapter_info(0x10de, wgpu::Backend::Vulkan);
+
+        assert_eq!(desired_maximum_frame_latency(&amd_vulkan), 1);
+        assert_eq!(desired_maximum_frame_latency(&amd_dx12), 2);
+        assert_eq!(desired_maximum_frame_latency(&nvidia_vulkan), 2);
     }
 }

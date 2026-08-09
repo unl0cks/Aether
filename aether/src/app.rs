@@ -52,7 +52,7 @@ struct MainWindow {
 impl MainWindow {
     pub fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         if matches!(&event, WindowEvent::RedrawRequested) {
-            self.flush_render_mouse_move(Instant::now());
+            let rendered_mouse_move = self.flush_render_mouse_move(Instant::now());
 
             // Don't render when minimized to avoid potential swap chain errors in `wgpu`.
             if !self.minimized {
@@ -118,6 +118,10 @@ impl MainWindow {
                         wgpu,
                     );
                 }
+            }
+
+            if rendered_mouse_move && !self.minimized {
+                ruffle_core::aether_diagnostics::finish_movement_mouse_move_render();
             }
 
             // Important that we return here, or we'll get a feedback loop with egui
@@ -387,9 +391,12 @@ impl MainWindow {
         }
     }
 
-    fn flush_render_mouse_move(&mut self, now: Instant) {
+    fn flush_render_mouse_move(&mut self, now: Instant) -> bool {
         if let Some(position) = self.mouse_motion.take_for_render(now) {
             self.dispatch_mouse_move(position, false);
+            true
+        } else {
+            false
         }
     }
 

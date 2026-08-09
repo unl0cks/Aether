@@ -9,7 +9,8 @@ use crate::surface::{LayerRef, Surface};
 use crate::target::{MaybeOwnedBuffer, TextureTarget};
 use crate::target::{RenderTargetFrame, TextureBufferInfo};
 use crate::texture_pool_policy::{
-    OffscreenTexturePoolPolicy, general_texture_pool_policy, max_cache_entries_per_submission,
+    OffscreenTexturePoolPolicy, general_texture_pool_policy, is_amd_vulkan,
+    max_cache_entries_per_submission,
 };
 use crate::utils::BufferDimensions;
 use crate::{
@@ -249,9 +250,10 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
         ));
 
         let transforms = DynamicTransforms::new(&descriptors);
+        let adapter_info = descriptors.adapter.get_info();
         let active_frame = ActiveFrame::new(
             &descriptors,
-            max_cache_entries_per_submission(offscreen_texture_pool_policy),
+            max_cache_entries_per_submission(offscreen_texture_pool_policy, &adapter_info),
         );
 
         Ok(Self {
@@ -1307,12 +1309,10 @@ fn memory_hints_for_adapter(adapter: &wgpu::Adapter) -> wgpu::MemoryHints {
 
 #[inline]
 fn memory_hints_for_adapter_info(adapter_info: &wgpu::AdapterInfo) -> wgpu::MemoryHints {
-    const AMD_PCI_VENDOR_ID: u32 = 0x1002;
-
     // wgpu 27's Vulkan performance policy grows suballocation blocks from 128 MiB to
     // 512 MiB. The memory-usage policy uses 8 MiB to 64 MiB blocks, avoiding large
     // speculative allocations on AMD's Windows Vulkan driver.
-    if adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == AMD_PCI_VENDOR_ID {
+    if is_amd_vulkan(adapter_info) {
         wgpu::MemoryHints::MemoryUsage
     } else {
         wgpu::MemoryHints::Performance

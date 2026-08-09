@@ -1471,6 +1471,12 @@ impl MovementTraceRuntime {
         self.mouse_move_depth = self.mouse_move_depth.saturating_sub(1);
     }
 
+    fn finish_mouse_move_render_at(&mut self, now: Instant) {
+        if self.active && self.guard_eligible && self.last_mouse_move_at.is_some() {
+            self.last_mouse_move_at = Some(now);
+        }
+    }
+
     fn try_record_suppressed_stop(
         &mut self,
         receiver_position: MovementPoint,
@@ -1802,6 +1808,21 @@ pub fn enter_movement_mouse_move() -> MovementMouseMoveGuard {
         state.enter_mouse_move();
     }
     MovementMouseMoveGuard { active }
+}
+
+/// Start AQW's short delayed-callback grace period after the frame caused by a coalesced mouse
+/// event has finished rendering. On crowded maps that render can take longer than the entire grace
+/// period, allowing the next authored callback to cancel an otherwise valid walk.
+pub fn finish_movement_mouse_move_render() {
+    if !movement_tracking_enabled() {
+        return;
+    }
+
+    let mut state = match movement_trace_runtime().lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.finish_mouse_move_render_at(Instant::now());
 }
 
 fn movement_stop_guard_should_suppress(
@@ -3098,6 +3119,37 @@ mod tests {
             ),
             Some(1),
             "a 10 FPS frame must not let AQW's delayed mouse-triggered stop escape the guard"
+        );
+    }
+
+    #[test]
+    fn stop_guard_grace_starts_after_a_slow_mouse_triggered_render() {
+        let owner = "stage#0/game/avatar";
+        let mouse_dispatched_at = Instant::now();
+        let render_finished_at = mouse_dispatched_at + Duration::from_millis(400);
+        let mut state = MovementTraceRuntime {
+            active: true,
+            guard_eligible: true,
+            owner_path: Some(owner.to_string()),
+            target: Some(MovementPoint { x: 500.0, y: 200.0 }),
+            expected_duration_ms: 1_000.0,
+            ..MovementTraceRuntime::default()
+        };
+        let current = MovementPoint { x: 100.0, y: 200.0 };
+
+        state.enter_mouse_move_at(mouse_dispatched_at);
+        state.exit_mouse_move();
+        state.finish_mouse_move_render_at(render_finished_at);
+
+        assert_eq!(
+            state.try_record_suppressed_stop_at(
+                current,
+                400.0,
+                500.0,
+                render_finished_at + Duration::from_millis(100),
+            ),
+            Some(1),
+            "a crowded frame must not consume the delayed mouse-stop grace before AQW can run its follow-up callback"
         );
     }
 
