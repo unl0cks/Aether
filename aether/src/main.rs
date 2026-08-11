@@ -9,6 +9,7 @@
 #[cfg(feature = "metrics")]
 mod aether_metrics;
 mod aether_preset;
+mod aether_settings;
 mod app;
 mod backends;
 mod cli;
@@ -175,16 +176,18 @@ fn main() -> Result<(), Error> {
     let _console = windows::Console::attach();
 
     let mut opt = Opt::parse();
+    // Before the preset, not after: it is what collapses each --x / --no-x pair into one bool and
+    // erases the difference between "switched off" and "not mentioned". A setting nobody mentioned
+    // is one the options window is free to decide.
+    let aether_explicit = aether_settings::AetherExplicitFlags::capture(&opt);
     let aqw_mode = aether_preset::apply(&mut opt)?;
-    let preferences = GlobalPreferences::load(opt)?;
-    let backend_msaa_override = if preferences.cli.msaa4x {
-        Some(4)
-    } else if preferences.cli.msaa2x {
-        Some(2)
-    } else {
-        None
-    };
-    ruffle_render_wgpu::set_backend_msaa_override(backend_msaa_override);
+    let preferences = GlobalPreferences::load(opt, aether_explicit, aqw_mode)?;
+    // Resolved rather than read straight off the flags, so a sample count chosen in the options
+    // window applies on the next start. Read once while the renderer is built, which is why the
+    // window says a restart is needed for it.
+    ruffle_render_wgpu::set_backend_msaa_override(
+        preferences.aether().msaa_samples.value.map(u32::from),
+    );
 
     let logs_path = &preferences.cli.cache_directory.join("log");
     let log_path = preferences.log_filename_pattern().create_path(logs_path);
@@ -318,23 +321,9 @@ fn main() -> Result<(), Error> {
     let cache_texture_grid = aqw_mode && preferences.cli.aether_aqw_cache_texture_grid;
     ruffle_core::aether_performance::set_cache_texture_grid_enabled(cache_texture_grid);
 
-    let number_separator = if aqw_mode && preferences.cli.aether_aqw_hp_separators {
-        if preferences.cli.aether_aqw_hp_separator_space {
-            ruffle_core::aether_compatibility::NumberSeparator::Space
-        } else {
-            ruffle_core::aether_compatibility::NumberSeparator::Comma
-        }
-    } else {
-        ruffle_core::aether_compatibility::NumberSeparator::None
-    };
-    ruffle_core::aether_compatibility::set_number_separator(number_separator);
-    ruffle_core::aether_compatibility::set_separator_min_digits(
-        if preferences.cli.aether_aqw_separators_from_ten_thousand {
-            5
-        } else {
-            4
-        },
-    );
+    // The same call the options window makes when it saves, so a setting changed in game and a
+    // setting read from the file at startup cannot end up meaning different things.
+    aether_settings::apply_live_settings(&preferences.aether(), aqw_mode, None);
 
     let rebind_enabled = aqw_mode && preferences.cli.aether_aqw_timeline_child_rebind;
     ruffle_core::aether_compatibility::set_timeline_child_rebind_enabled(rebind_enabled);
@@ -394,7 +383,7 @@ fn main() -> Result<(), Error> {
         tracing::info!("AQW mouse motion is dispatched immediately for movement and dragging");
     }
 
-    if let Some(sample_count) = backend_msaa_override {
+    if let Some(sample_count) = preferences.aether().msaa_samples.value {
         tracing::info!(sample_count, "Backend MSAA override is enabled");
     }
 

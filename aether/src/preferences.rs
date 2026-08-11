@@ -3,6 +3,9 @@ mod write;
 
 pub mod storage;
 
+use crate::aether_settings::{
+    AetherExplicitFlags, AetherSettings, OptionsHotkey, ResolvedAetherSettings,
+};
 use crate::cli::{GameModePreference, OpenUrlMode, Opt};
 use crate::gui::ThemePreference;
 use crate::log::FilenamePattern;
@@ -47,10 +50,26 @@ pub struct GlobalPreferences {
     recents: Arc<Mutex<DocumentHolder<Recents>>>,
 
     watchers: GlobalPreferencesWatchers,
+
+    /// Which Aether settings the command line pinned, captured before the preset ran. See
+    /// [`crate::aether_settings`] for why this cannot be read back off `cli`.
+    aether_explicit: AetherExplicitFlags,
+
+    /// Whether the AQW preset applied. The options window needs it because a saved AQW setting
+    /// must not take effect when Aether was pointed at an unrelated movie.
+    aqw_mode: bool,
+
+    /// The settings this process actually started with. Not an `Arc`, deliberately: it must not
+    /// change when the options window saves.
+    aether_at_startup: AetherSettings,
 }
 
 impl GlobalPreferences {
-    pub fn load(cli: Opt) -> Result<Self, Error> {
+    pub fn load(
+        cli: Opt,
+        aether_explicit: AetherExplicitFlags,
+        aqw_mode: bool,
+    ) -> Result<Self, Error> {
         std::fs::create_dir_all(&cli.config).context("Failed to create configuration directory")?;
         let preferences_path = cli.config.join("preferences.toml");
         let preferences = if preferences_path.exists() {
@@ -92,13 +111,59 @@ impl GlobalPreferences {
             Default::default()
         };
 
+        let preferences_snapshot = preferences.aether;
+
         Ok(Self {
             cli,
             preferences: Arc::new(Mutex::new(preferences)),
             bookmarks: Arc::new(Mutex::new(bookmarks)),
             recents: Arc::new(Mutex::new(recents)),
             watchers: Default::default(),
+            aether_explicit,
+            aqw_mode,
+            aether_at_startup: preferences_snapshot,
         })
+    }
+
+    /// Every Aether setting as it applies to this session, with where each answer came from.
+    pub fn aether(&self) -> ResolvedAetherSettings {
+        let saved = self
+            .preferences
+            .lock()
+            .expect("Preferences is not reentrant")
+            .aether;
+
+        ResolvedAetherSettings::resolve(self.aether_explicit, saved)
+    }
+
+    /// The settings as they were when the process started.
+    ///
+    /// This is what the renderer and the player were actually built with, so it is what the
+    /// options window has to compare against to decide whether a change needs a restart. Reading
+    /// the saved file instead would forget as soon as Save wrote to it: change the sample count,
+    /// see the warning, reopen the window, and the warning would be gone while the renderer was
+    /// still running on the old value.
+    pub fn aether_at_startup(&self) -> AetherSettings {
+        self.aether_at_startup
+    }
+
+    /// The saved settings on their own, which is what the options window edits.
+    pub fn aether_saved(&self) -> AetherSettings {
+        self.preferences
+            .lock()
+            .expect("Preferences is not reentrant")
+            .aether
+    }
+
+    pub fn aqw_mode(&self) -> bool {
+        self.aqw_mode
+    }
+
+    pub fn aether_options_hotkey(&self) -> OptionsHotkey {
+        self.preferences
+            .lock()
+            .expect("Preferences is not reentrant")
+            .aether_options_hotkey
     }
 
     pub fn graphics_backends(&self) -> GraphicsBackend {
@@ -287,6 +352,8 @@ pub struct SavedGlobalPreferences {
     pub theme_preference: ThemePreference,
     pub open_url_mode: OpenUrlMode,
     pub ime_enabled: Option<bool>,
+    pub aether: AetherSettings,
+    pub aether_options_hotkey: OptionsHotkey,
 }
 
 impl Default for SavedGlobalPreferences {
@@ -311,6 +378,8 @@ impl Default for SavedGlobalPreferences {
             theme_preference: Default::default(),
             open_url_mode: Default::default(),
             ime_enabled: None,
+            aether: Default::default(),
+            aether_options_hotkey: Default::default(),
         }
     }
 }

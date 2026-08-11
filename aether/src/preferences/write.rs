@@ -1,3 +1,4 @@
+use crate::aether_settings::{AetherSettings, OptionsHotkey};
 use crate::cli::{GameModePreference, OpenUrlMode};
 use crate::gui::ThemePreference;
 use crate::log::FilenamePattern;
@@ -141,6 +142,71 @@ impl<'a> PreferencesWriter<'a> {
             }
             values.ime_enabled = ime_enabled;
         });
+    }
+
+    /// Write every Aether setting at once.
+    ///
+    /// The options window edits a working copy and saves it whole, so there is nothing to gain
+    /// from a setter per toggle and a dozen of them to keep in step with the struct.
+    pub fn set_aether_settings(&mut self, settings: AetherSettings) {
+        self.0.edit(|values, toml_document| {
+            aether_table(toml_document);
+            let table = &mut toml_document["aether"];
+            for (key, field) in [
+                ("number_separators", settings.number_separators),
+                ("number_separator_space", settings.number_separator_space),
+                (
+                    "separators_from_ten_thousand",
+                    settings.separators_from_ten_thousand,
+                ),
+                ("timeline_child_rebind", settings.timeline_child_rebind),
+                ("adaptive_avatar_cache", settings.adaptive_avatar_cache),
+                ("movement_stop_guard", settings.movement_stop_guard),
+                (
+                    "avm2_broadcast_fast_path",
+                    settings.avm2_broadcast_fast_path,
+                ),
+                ("mouse_motion_coalescing", settings.mouse_motion_coalescing),
+                ("bounded_offscreen_pool", settings.bounded_offscreen_pool),
+                ("cache_texture_grid", settings.cache_texture_grid),
+                (
+                    "idle_gpu_upload_eviction",
+                    settings.idle_gpu_upload_eviction,
+                ),
+                ("crash_report", settings.crash_report),
+            ] {
+                table[key] = value(field);
+            }
+            table["quality"] = value(settings.quality.to_string());
+            match settings.msaa_samples {
+                Some(samples) => table["msaa_samples"] = value(i64::from(samples)),
+                None => table["msaa_samples"] = toml_edit::Item::None,
+            }
+            // Zero, not an absent key. The default frame rate is 60, so leaving the key out would
+            // read back as 60 and there would be no way to say "follow the movie's own rate". The
+            // reader maps any non-positive value back to `None`.
+            table["max_fps"] = value(settings.max_fps.unwrap_or(0.0));
+            values.aether = settings;
+        });
+    }
+
+    pub fn set_aether_options_hotkey(&mut self, hotkey: OptionsHotkey) {
+        self.0.edit(|values, toml_document| {
+            aether_table(toml_document);
+            toml_document["aether"]["options_hotkey"] = value(hotkey.to_string());
+            values.aether_options_hotkey = hotkey;
+        });
+    }
+}
+
+/// Make sure `[aether]` is a real section rather than the inline table toml_edit would create.
+///
+/// Indexing a key that does not exist yet produces `aether = { a = true, b = true, ... }`, which
+/// for a dozen settings is one unreadable line. Storing the hotkey as `F1` instead of a keycode
+/// was for the benefit of anyone opening this file, and the layout should match that.
+fn aether_table(toml_document: &mut toml_edit::DocumentMut) {
+    if !toml_document.contains_key("aether") {
+        toml_document["aether"] = toml_edit::table();
     }
 }
 
@@ -336,6 +402,90 @@ mod tests {
             "open_url_mode = \"deny\"",
             |writer| writer.set_open_url_mode(OpenUrlMode::Confirm),
             "",
+        );
+    }
+
+    #[test]
+    fn set_aether_settings() {
+        test(
+            "",
+            |writer| {
+                writer.set_aether_settings(AetherSettings {
+                    number_separator_space: true,
+                    cache_texture_grid: false,
+                    ..Default::default()
+                })
+            },
+            "[aether]
+number_separators = true
+number_separator_space = true
+separators_from_ten_thousand = false
+timeline_child_rebind = true
+adaptive_avatar_cache = true
+movement_stop_guard = true
+avm2_broadcast_fast_path = true
+mouse_motion_coalescing = true
+bounded_offscreen_pool = true
+cache_texture_grid = false
+idle_gpu_upload_eviction = true
+crash_report = true
+quality = \"high\"
+max_fps = 60.0
+",
+        );
+    }
+
+    /// The two settings that can be unset have to survive being unset.
+    ///
+    /// They differ because their defaults do. MSAA defaults to "let the renderer decide", so an
+    /// absent key already means that and the key is removed. The frame rate defaults to 60, so an
+    /// absent key would read back as 60 and "follow the movie's own rate" would be unsayable;
+    /// zero carries it instead.
+    ///
+    /// Keys already in the file keep their position, which is why `max_fps` stays at the top here.
+    #[test]
+    fn an_unset_msaa_and_frame_rate_survive_a_round_trip() {
+        test(
+            "[aether]\nmsaa_samples = 4\nmax_fps = 144.0\n",
+            |writer| {
+                writer.set_aether_settings(AetherSettings {
+                    msaa_samples: None,
+                    max_fps: None,
+                    ..Default::default()
+                })
+            },
+            "[aether]
+max_fps = 0.0
+number_separators = true
+number_separator_space = false
+separators_from_ten_thousand = false
+timeline_child_rebind = true
+adaptive_avatar_cache = true
+movement_stop_guard = true
+avm2_broadcast_fast_path = true
+mouse_motion_coalescing = true
+bounded_offscreen_pool = true
+cache_texture_grid = true
+idle_gpu_upload_eviction = true
+crash_report = true
+quality = \"high\"
+",
+        );
+    }
+
+    #[test]
+    fn set_aether_options_hotkey() {
+        test(
+            "",
+            |writer| {
+                writer.set_aether_options_hotkey(OptionsHotkey {
+                    modifiers: egui::Modifiers::COMMAND,
+                    key: egui::Key::F9,
+                })
+            },
+            "[aether]
+options_hotkey = \"Ctrl+F9\"
+",
         );
     }
 

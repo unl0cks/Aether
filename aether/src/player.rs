@@ -62,7 +62,8 @@ impl From<&GlobalPreferences> for LaunchOptions {
                 parameters: value.cli.parameters().collect(),
                 max_execution_duration: value.cli.max_execution_duration,
                 base: value.cli.base.clone(),
-                quality: value.cli.quality,
+                // Resolved so the options window can set it; the command line still wins.
+                quality: Some(value.aether().quality.value),
                 align: value.cli.align,
                 force_align: if value.cli.force_align {
                     Some(true)
@@ -87,7 +88,7 @@ impl From<&GlobalPreferences> for LaunchOptions {
                 cookie: value.cli.cookie.clone(),
                 player_version: value.cli.player_version,
                 player_runtime: value.cli.player_runtime,
-                frame_rate: value.cli.frame_rate,
+                frame_rate: value.aether().max_fps.value,
                 dummy_external_interface: if value.cli.dummy_external_interface {
                     Some(true)
                 } else {

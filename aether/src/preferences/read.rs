@@ -1,3 +1,4 @@
+use crate::aether_settings::OptionsHotkey;
 use crate::preferences::SavedGlobalPreferences;
 use ruffle_frontend_utils::parse::{
     DocumentHolder, ParseContext, ParseDetails, ParseWarning, ReadExt,
@@ -87,6 +88,71 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
         result.ime_enabled = ime.get_bool(cx, "enabled");
     });
 
+    // Everything the in-game options window writes lives under one table, so the Aether settings
+    // stay visibly separate from the ones Ruffle itself understands.
+    document.get_table_like(&mut cx, "aether", |cx, aether| {
+        let settings = &mut result.aether;
+        for (key, field) in [
+            ("number_separators", &mut settings.number_separators),
+            (
+                "number_separator_space",
+                &mut settings.number_separator_space,
+            ),
+            (
+                "separators_from_ten_thousand",
+                &mut settings.separators_from_ten_thousand,
+            ),
+            ("timeline_child_rebind", &mut settings.timeline_child_rebind),
+            ("adaptive_avatar_cache", &mut settings.adaptive_avatar_cache),
+            ("movement_stop_guard", &mut settings.movement_stop_guard),
+            (
+                "avm2_broadcast_fast_path",
+                &mut settings.avm2_broadcast_fast_path,
+            ),
+            (
+                "mouse_motion_coalescing",
+                &mut settings.mouse_motion_coalescing,
+            ),
+            (
+                "bounded_offscreen_pool",
+                &mut settings.bounded_offscreen_pool,
+            ),
+            ("cache_texture_grid", &mut settings.cache_texture_grid),
+            (
+                "idle_gpu_upload_eviction",
+                &mut settings.idle_gpu_upload_eviction,
+            ),
+            ("crash_report", &mut settings.crash_report),
+        ] {
+            if let Some(value) = aether.get_bool(cx, key) {
+                *field = value;
+            }
+        }
+
+        if let Some(value) = aether.parse_from_str(cx, "quality") {
+            settings.quality = value;
+        }
+
+        // Only 1, 2 and 4 are offered; anything else is a hand-edit and the renderer's own choice
+        // is the safer answer than an unsupported sample count.
+        if let Some(value) = aether.get_integer(cx, "msaa_samples") {
+            settings.msaa_samples = matches!(value, 1 | 2 | 4).then_some(value as u8);
+        }
+
+        if let Some(value) = aether.get_float(cx, "max_fps") {
+            // Zero or negative would stop the movie rather than uncap it.
+            settings.max_fps = (value > 0.0).then_some(value);
+        }
+
+        // A binding that no longer parses leaves the default in place. Refusing to guess is what
+        // stops a typo in this file from leaving the window with no way to open.
+        if let Some(written) = aether.parse_from_str::<String>(cx, "options_hotkey")
+            && let Some(hotkey) = OptionsHotkey::parse(&written)
+        {
+            result.aether_options_hotkey = hotkey;
+        }
+    });
+
     ParseDetails {
         warnings: cx.warnings,
         result: DocumentHolder::new(result, document),
@@ -121,6 +187,45 @@ mod tests {
 
         assert_eq!(&SavedGlobalPreferences::default(), result.values());
         assert_eq!(Vec::<ParseWarning>::new(), result.warnings);
+    }
+
+    /// A hotkey that no longer parses has to leave the default in place. Taking the binding away
+    /// would leave the options window with no way to open, and the file that broke it is the one
+    /// place a player could not then go to fix it.
+    #[test]
+    fn a_broken_hotkey_falls_back_to_f1() {
+        for written in ["\"\"", "\"Meta+F1\"", "\"F99\"", "5", "true"] {
+            let result = read_preferences(&format!("[aether]\noptions_hotkey = {written}"));
+            assert_eq!(
+                OptionsHotkey::default(),
+                result.values().aether_options_hotkey,
+                "{written}"
+            );
+        }
+    }
+
+    #[test]
+    fn aether_settings_default_when_absent_or_wrong_typed() {
+        let defaults = crate::aether_settings::AetherSettings::default();
+        assert_eq!(defaults, read_preferences("").values().aether);
+        assert_eq!(defaults, read_preferences("[aether]").values().aether);
+        assert_eq!(
+            defaults,
+            read_preferences("[aether]\nnumber_separators = \"yes\"")
+                .values()
+                .aether
+        );
+    }
+
+    /// One setting written by hand must not disturb the eleven around it.
+    #[test]
+    fn a_single_saved_setting_leaves_the_rest_alone() {
+        let read = read_preferences("[aether]\ncache_texture_grid = false\n");
+        let settings = read.values().aether;
+
+        assert!(!settings.cache_texture_grid);
+        assert!(settings.number_separators);
+        assert!(settings.crash_report);
     }
 
     #[test]

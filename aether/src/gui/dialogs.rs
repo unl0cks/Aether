@@ -1,4 +1,5 @@
 mod about_dialog;
+mod aether_options_dialog;
 mod bookmarks_dialog;
 pub mod export_bundle_dialog;
 pub mod filesystem_access_dialog;
@@ -13,6 +14,7 @@ mod volume_controls;
 use crate::custom_event::RuffleEvent;
 use crate::player::LaunchOptions;
 use crate::preferences::GlobalPreferences;
+use aether_options_dialog::AetherOptionsDialog;
 use bookmarks_dialog::{BookmarkAddDialog, BookmarksDialog};
 use export_bundle_dialog::{ExportBundleDialog, ExportBundleDialogConfiguration};
 use filesystem_access_dialog::{FilesystemAccessDialog, FilesystemAccessDialogConfiguration};
@@ -36,6 +38,7 @@ pub struct Dialogs {
 
     picker: FilePicker,
     preferences_dialog: Option<PreferencesDialog>,
+    aether_options_dialog: Option<AetherOptionsDialog>,
     bookmarks_dialog: Option<BookmarksDialog>,
     bookmark_add_dialog: Option<BookmarkAddDialog>,
     open_url_dialog: Option<OpenUrlDialog>,
@@ -82,6 +85,7 @@ impl Dialogs {
         let picker = FilePicker::new(window, preferences.clone(), event_loop.clone());
         Self {
             preferences_dialog: None,
+            aether_options_dialog: None,
             bookmarks_dialog: None,
             bookmark_add_dialog: None,
             open_url_dialog: None,
@@ -145,6 +149,27 @@ impl Dialogs {
         self.preferences_dialog = Some(PreferencesDialog::new(self.preferences.clone()));
     }
 
+    /// Open the Aether options window, or close it if it is already open.
+    ///
+    /// Toggling matters because this is bound to a single key: the same press that opened it is
+    /// the obvious way to dismiss it again.
+    pub fn toggle_aether_options(&mut self) {
+        self.aether_options_dialog = match self.aether_options_dialog {
+            Some(_) => None,
+            None => Some(AetherOptionsDialog::new(self.preferences.clone())),
+        };
+    }
+
+    /// Whether the window is waiting for a key to bind.
+    ///
+    /// While it is, the options shortcut must not fire: the press meant for the new binding would
+    /// otherwise also close the window it was being typed into.
+    pub fn aether_options_rebinding(&self) -> bool {
+        self.aether_options_dialog
+            .as_ref()
+            .is_some_and(AetherOptionsDialog::is_rebinding)
+    }
+
     pub fn open_bookmarks(&mut self) {
         self.bookmarks_dialog = Some(BookmarksDialog::new(
             self.preferences.clone(),
@@ -205,10 +230,11 @@ impl Dialogs {
         &mut self,
         locale: &LanguageIdentifier,
         egui_ctx: &egui::Context,
-        player: Option<&mut Player>,
+        mut player: Option<&mut Player>,
     ) {
         self.show_open_dialog(locale, egui_ctx);
         self.show_preferences_dialog(locale, egui_ctx);
+        self.show_aether_options_dialog(locale, egui_ctx, player.as_deref_mut());
         self.show_bookmarks_dialog(locale, egui_ctx);
         self.show_bookmark_add_dialog(locale, egui_ctx);
         self.show_volume_controls(locale, egui_ctx, player);
@@ -236,6 +262,22 @@ impl Dialogs {
         };
         if !keep_open {
             self.preferences_dialog = None;
+        }
+    }
+
+    fn show_aether_options_dialog(
+        &mut self,
+        locale: &LanguageIdentifier,
+        egui_ctx: &egui::Context,
+        player: Option<&mut Player>,
+    ) {
+        let keep_open = if let Some(dialog) = &mut self.aether_options_dialog {
+            dialog.show(locale, egui_ctx, player)
+        } else {
+            true
+        };
+        if !keep_open {
+            self.aether_options_dialog = None;
         }
     }
 

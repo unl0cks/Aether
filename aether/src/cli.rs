@@ -318,12 +318,16 @@ pub struct Opt {
     #[clap(long, short)]
     pub quality: Option<StageQuality>,
 
+    /// Turn backend multisample antialiasing off without changing Flash StageQuality.
+    #[clap(long, conflicts_with_all = ["msaa2x", "msaa4x"])]
+    pub msaa1x: bool,
+
     /// Force 2x backend multisample antialiasing without changing Flash StageQuality.
-    #[clap(long, conflicts_with = "msaa4x")]
+    #[clap(long, conflicts_with_all = ["msaa1x", "msaa4x"])]
     pub msaa2x: bool,
 
     /// Force 4x backend multisample antialiasing without changing Flash StageQuality.
-    #[clap(long, conflicts_with = "msaa2x")]
+    #[clap(long, conflicts_with_all = ["msaa1x", "msaa2x"])]
     pub msaa4x: bool,
 
     /// The alignment of the stage.

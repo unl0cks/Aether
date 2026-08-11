@@ -53,6 +53,20 @@ impl MenuBar {
         dialogs: &mut Dialogs,
         mut player: Option<&mut Player>,
     ) {
+        // While the options window is waiting for a key to bind, every shortcut stands down. The
+        // press is meant for the binding, and Ctrl+O would otherwise open a file dialog rather
+        // than become the new hotkey.
+        if dialogs.aether_options_rebinding() {
+            return;
+        }
+
+        // Read from preferences on every frame rather than cached, so a rebind takes effect as
+        // soon as it is saved instead of on the next launch.
+        let options_shortcut = self.preferences.aether_options_hotkey().shortcut();
+        if egui_ctx.input_mut(|input| input.consume_shortcut(&options_shortcut)) {
+            dialogs.toggle_aether_options();
+        }
+
         // TODO(mike): Make some MenuItem struct with shortcut info to handle this more cleanly.
         if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_OPEN_ADVANCED)) {
             dialogs.open_file_advanced();
@@ -300,6 +314,20 @@ impl MenuBar {
                 self.export_bundle(ui);
             }
             ui.separator();
+
+            // Listed as well as bound to a key, so the window can still be found by someone who
+            // has rebound the shortcut to something they have since forgotten.
+            if Button::new("Aether Options")
+                .shortcut_text(
+                    ui.ctx()
+                        .format_shortcut(&self.preferences.aether_options_hotkey().shortcut()),
+                )
+                .ui(ui)
+                .clicked()
+            {
+                ui.close();
+                dialogs.toggle_aether_options();
+            }
 
             if Button::new(text(locale, "file-menu-preferences"))
                 .ui(ui)
