@@ -100,7 +100,7 @@ impl AetherOptionsDialog {
             // every frame, which is what stops a window being movable at all, and this one covers
             // the middle of the screen where the game is.
             .pivot(Align2::CENTER_CENTER)
-            .default_pos(egui_ctx.screen_rect().center())
+            .default_pos(egui_ctx.content_rect().center())
             .collapsible(false)
             .resizable(false)
             .show(egui_ctx, |ui| {

@@ -120,6 +120,11 @@ pub struct GuiController {
     consecutive_surface_failures: u32,
     /// Whether we have already told the user the device is gone.
     device_fault_reported: bool,
+    /// A rolling record of what the GPU was holding, sampled while the renderer is still healthy.
+    /// See `aether_gpu_timeline` for why this cannot be sampled at the moment of failure.
+    gpu_timeline: ruffle_render_wgpu::aether_gpu_timeline::GpuTimeline,
+    /// Optional full history on disk, one JSON object per sample.
+    gpu_timeline_file: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl GuiController {
@@ -231,6 +236,22 @@ impl GuiController {
 
         egui_extras::install_image_loaders(egui_winit.egui_ctx());
 
+        // Opened before the renderer starts so the very first samples are captured. A path that
+        // cannot be opened is reported and then ignored: the in-memory ring still reaches the
+        // crash report, which is the part that matters.
+        let gpu_timeline_file =
+            preferences
+                .cli
+                .aether_gpu_timeline_file
+                .as_ref()
+                .and_then(|path| match std::fs::File::create(path) {
+                    Ok(file) => Some(std::io::BufWriter::new(file)),
+                    Err(error) => {
+                        tracing::warn!("Could not open {}: {error}", path.display());
+                        None
+                    }
+                });
+
         Ok(Self {
             descriptors,
             egui_winit,
@@ -247,6 +268,8 @@ impl GuiController {
             theme_controller,
             consecutive_surface_failures: 0,
             device_fault_reported: false,
+            gpu_timeline: Default::default(),
+            gpu_timeline_file,
         })
     }
 
@@ -358,6 +381,30 @@ impl GuiController {
         );
     }
 
+    /// Take a GPU sample if a second has passed, and append it to the history file if one is open.
+    ///
+    /// Cheap enough to call every frame: it checks a clock, and only on the second does it read
+    /// wgpu's counters, which are plain atomics.
+    fn sample_gpu_timeline(&mut self) {
+        let Some(sample) = self.gpu_timeline.maybe_sample(&self.descriptors.device) else {
+            return;
+        };
+
+        if let Some(file) = &mut self.gpu_timeline_file {
+            use std::io::Write as _;
+            // A failed write must not take the session down; the in-memory ring is still intact
+            // and the crash report is what actually matters.
+            if let Err(error) = writeln!(file, "{}", sample.to_json_line()) {
+                tracing::warn!("Could not write the GPU timeline: {error}");
+                self.gpu_timeline_file = None;
+            } else {
+                // Flushed per sample rather than on drop. This exists to survive a crash, and a
+                // buffer that is still in memory when the process dies records nothing.
+                let _ = file.flush();
+            }
+        }
+    }
+
     /// Report the fault once, then tell the caller Aether has to shut down.
     fn report_device_fault(&mut self) -> GuiRenderOutcome {
         if !self.device_fault_reported {
@@ -384,10 +431,19 @@ impl GuiController {
                 // Always reported, metrics build or not. Device loss is the failure that ends real
                 // sessions, it is reported from ordinary release builds, and without these counts
                 // a report cannot say whether a fix changed anything on the affected machine.
-                let mut sections = vec![crate::crash_report::Section::new(
-                    "GPU resources at device loss",
-                    ruffle_render_wgpu::device_resource_report(&self.descriptors.device),
-                )];
+                let mut sections = vec![
+                    // Kept, but read it knowing what it is: wgpu has already torn the device down
+                    // by the time this runs, so it describes the aftermath. The timeline below is
+                    // the one that describes the cause.
+                    crate::crash_report::Section::new(
+                        "GPU resources after device loss",
+                        ruffle_render_wgpu::device_resource_report(&self.descriptors.device),
+                    ),
+                    crate::crash_report::Section::new(
+                        "GPU timeline before device loss",
+                        self.gpu_timeline.report(),
+                    ),
+                ];
                 #[cfg(feature = "metrics")]
                 sections.push(crate::crash_report::Section::new(
                     "Renderer texture census",
@@ -424,6 +480,11 @@ impl GuiController {
     }
 
     pub fn render(&mut self, mut player: Option<MutexGuard<Player>>) -> GuiRenderOutcome {
+        // Sampled before the fault check, not after it. Once the device is faulted the counters
+        // describe the teardown rather than the session, which is the trap the previous census
+        // fell into.
+        self.sample_gpu_timeline();
+
         // A fault reported through wgpu's device-loss or uncaptured-error channels
         // means every resource we hold may already be invalid. Touching one of them
         // panics from inside wgpu, so stop before we get there.

@@ -232,6 +232,15 @@ pub struct Opt {
     #[clap(long = "separators-from-10000")]
     pub aether_aqw_separators_from_ten_thousand: bool,
 
+    /// Write the full GPU resource history as JSON Lines, one sample per second. The crash report
+    /// always carries a summary; this is for when the whole session is wanted.
+    #[clap(long = "gpu-timeline-file")]
+    pub aether_gpu_timeline_file: Option<std::path::PathBuf>,
+
+    /// Log how long each click takes to reach the screen, broken down by stage. Development tool.
+    #[clap(long = "input-latency-probe")]
+    pub aether_input_latency_probe: bool,
+
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long = "avm-trace", alias = "aether-avm-trace")]
     pub aether_avm_trace: bool,

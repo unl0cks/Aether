@@ -17,6 +17,7 @@ mod crash_report;
 mod custom_event;
 mod dbus;
 mod gui;
+mod input_latency;
 mod log;
 mod mouse_motion;
 mod player;

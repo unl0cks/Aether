@@ -45,6 +45,7 @@ struct MainWindow {
     time: Instant,
     next_frame_time: Option<Instant>,
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
+    click_latency: crate::input_latency::ClickLatencyProbe,
     #[cfg(feature = "metrics")]
     metrics: AetherMetrics,
 }
@@ -56,6 +57,7 @@ impl MainWindow {
 
             // Don't render when minimized to avoid potential swap chain errors in `wgpu`.
             if !self.minimized {
+                self.click_latency.render_started();
                 let host_render_started = Instant::now();
                 #[cfg(feature = "metrics")]
                 let mut player_render_time = std::time::Duration::ZERO;
@@ -88,6 +90,9 @@ impl MainWindow {
                     event_loop.exit();
                     return;
                 }
+
+                // After `gui.render`, which is where the frame is submitted and presented.
+                self.click_latency.presented();
 
                 plot_stats_in_tracy(&self.gui.descriptors().wgpu_instance);
 
@@ -242,6 +247,9 @@ impl MainWindow {
                     x,
                     y,
                 );
+                if state == ElementState::Pressed {
+                    self.click_latency.pressed();
+                }
                 let event = match state {
                     // TODO We should get information about click index from the OS,
                     //   but winit does not support that yet.
@@ -254,6 +262,7 @@ impl MainWindow {
                     ElementState::Released => PlayerEvent::MouseUp { x, y, button },
                 };
                 let handled = self.player.handle_event(event);
+                self.click_latency.handled();
                 if !handled && state == ElementState::Pressed && button == RuffleMouseButton::Right
                 {
                     // Show context menu.
@@ -555,9 +564,10 @@ impl MainWindow {
         }
     }
 
-    fn check_redraw(&self) {
+    fn check_redraw(&mut self) {
         let player = self.player.get();
         if player.map(|p| p.needs_render()).unwrap_or_default() || self.gui.needs_render() {
+            self.click_latency.redraw_requested();
             self.gui.window().request_redraw();
         }
     }
@@ -716,6 +726,7 @@ impl ApplicationHandler<RuffleEvent> for App {
             let metrics = AetherMetrics::new(preferences.cli.aether_metrics, metrics_path);
             let mouse_motion_enabled = preferences.cli.aether_aqw_mouse_motion_coalescing;
 
+            let probe_enabled = preferences.cli.aether_input_latency_probe;
             self.main_window = Some(MainWindow {
                 preferences,
                 gui,
@@ -733,6 +744,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 modifiers: Modifiers::default(),
                 time: Instant::now(),
                 next_frame_time: None,
+                click_latency: crate::input_latency::ClickLatencyProbe::new(probe_enabled),
                 event_loop_proxy,
                 #[cfg(feature = "metrics")]
                 metrics,

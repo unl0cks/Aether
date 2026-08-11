@@ -29,6 +29,9 @@ type Error = Box<dyn std::error::Error>;
 #[macro_use]
 pub mod utils;
 
+// Deliberately not behind `aether_metrics`. Public builds are made without it, which is the
+// reason every AMD device-loss report so far arrived with no resource data in it.
+pub mod aether_gpu_timeline;
 #[cfg(feature = "aether_metrics")]
 pub mod aether_metrics;
 
