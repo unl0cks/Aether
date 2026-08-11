@@ -311,9 +311,26 @@ Copy-Item -LiteralPath $builtSetup -Destination $setupPath -Force
 if (-not $SkipPortableZip) {
     Write-Step 'Creating portable ZIP'
     if (Test-Path -LiteralPath $portablePath) { Remove-Item -LiteralPath $portablePath -Force }
+
+    # Staged separately rather than zipping $payloadDir. That directory has uninstall.exe added to it by
+    # then, and a portable build shipping an uninstaller is both nonsense and expensive: it was 45.8 MB of
+    # a 56.4 MB archive, four times the size of the program it came with. This is also the archive the
+    # launcher downloads, so it holds exactly what a working Aether needs and nothing else.
+    $portableStage = Join-Path $configRoot 'portable'
+    if (Test-Path -LiteralPath $portableStage) { Remove-Item -LiteralPath $portableStage -Recurse -Force }
+    [void](New-Item -ItemType Directory -Path $portableStage -Force)
+
+    Copy-Item -LiteralPath (Join-Path $payloadDir 'aether.exe') -Destination $portableStage -Force
+    foreach ($doc in @('LICENSE.md', 'README.md')) {
+        $src = Join-Path $payloadDir $doc
+        if (Test-Path -LiteralPath $src -PathType Leaf) {
+            Copy-Item -LiteralPath $src -Destination $portableStage -Force
+        }
+    }
+
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [System.IO.Compression.ZipFile]::CreateFromDirectory(
-        $payloadDir, $portablePath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
+        $portableStage, $portablePath, [System.IO.Compression.CompressionLevel]::Optimal, $false)
 }
 
 Write-Step 'Writing SHA256 checksums'
