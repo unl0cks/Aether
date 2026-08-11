@@ -6,11 +6,11 @@
 //! Two rules shape what appears:
 //!
 //! Anything that can expose credentials or exists only for debugging stays on the command line.
-//! `--avm-trace` prints the game's own trace output, which includes login and session data;
-//! `--input-trace` records keystrokes, so it captures a password being typed; `--timeline-trace`
-//! is a development tool. None of them should be one click away in a window a player opens by
-//! accident. `--socket-allow` and `--tcp-connections` are network policy and stay out for the
-//! same reason.
+//! `--avm-trace` prints the game's own trace output, which includes login and session data, and is
+//! the one with a real disclosure risk. `--input-trace` and `--timeline-trace` are development
+//! tools that write large files and mean nothing to a player; they record mouse events and AVM2
+//! frame construction respectively, not anything typed. `--socket-allow` and `--tcp-connections`
+//! are network policy. None of them should be one click away in a window opened by accident.
 //!
 //! A setting the command line pinned is shown, greyed, rather than hidden. Hiding it would leave
 //! a player looking at a window that disagrees with their game and no way to see why.
@@ -287,7 +287,7 @@ impl AetherOptionsDialog {
         );
         ui.label(
             RichText::new(
-                "Trace and diagnostic logging stays on the command line. Those options record what the game sends and what you type, which can include your login.",
+                "Trace logging stays on the command line. The ActionScript trace prints what the game itself logs, which includes login and session data.",
             )
             .small()
             .weak(),
