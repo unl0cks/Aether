@@ -166,26 +166,37 @@ enum BitmapCacheTexturePolicy {
 /// bytes. Rounding up collapses a whole run of drift into one bucket.
 const BITMAP_CACHE_SIZE_GRID: u32 = 64;
 
-/// Above this, sizes are left exact. A grid cell of slack is cheap on a 200px avatar and wasteful
-/// on a 3000px backdrop, and the very large surfaces are one-offs that never repeat anyway, so
-/// rounding them up buys nothing and costs memory.
-const BITMAP_CACHE_GRID_MAX_DIMENSION: u32 = 1_024;
+/// How many cells span a dimension, which is what makes the slack proportional.
+///
+/// The cell is the dimension's own power-of-two bracket divided by this, so a 250px avatar rounds
+/// by 64 and a 3700px backdrop rounds by 256. Both waste roughly the same share of themselves,
+/// and both collapse a run of drift into one bucket.
+const BITMAP_CACHE_GRID_STEPS: u32 = 16;
 
-/// Round a cache texture up to [`BITMAP_CACHE_SIZE_GRID`].
+/// Round a cache texture up so that a few pixels of bounds drift reuse the same texture.
 ///
 /// The texture ends up larger than its contents, which the cache already handles: `output_width`
 /// and `output_height` keep the true size, and both drawing and filtering work from that logical
 /// region rather than from the texture's dimensions.
+///
+/// Surfaces above 1024px used to be exempt, on the theory that they were one-off backdrops that
+/// never repeat. A device-loss census from an RX 6800 XT measured the opposite: 25,479 of the
+/// session's 35,551 texture allocations landed in sizes past the tracking table, accounting for
+/// 5.2 GB of the 7.3 GB churned in sixty seconds, while the pool serving them managed 84.3% reuse
+/// against the gridded pool's 99.6%. Those surfaces repeat constantly. They just never repeat
+/// exactly, because an animating object's bounds move a pixel or two per frame, and an exempt
+/// size is a bucket nothing ever asks for twice.
+///
+/// The card had 1.33 GB resident at peak and 16 GB fitted. It ran out of memory because of the
+/// churn and the fragmentation it leaves behind, not because of the total.
 fn quantise_cache_texture_size(size: (u32, u32)) -> (u32, u32) {
-    if size.0 > BITMAP_CACHE_GRID_MAX_DIMENSION || size.1 > BITMAP_CACHE_GRID_MAX_DIMENSION {
-        return size;
-    }
-
     let round = |value: u32| {
-        value
-            .div_ceil(BITMAP_CACHE_SIZE_GRID)
-            .saturating_mul(BITMAP_CACHE_SIZE_GRID)
-            .max(value)
+        // Never below the old fixed cell: small textures were already collapsing well at 64, and
+        // a finer grid there would only put the drift back.
+        let cell =
+            (value.next_power_of_two() / BITMAP_CACHE_GRID_STEPS).max(BITMAP_CACHE_SIZE_GRID);
+
+        value.div_ceil(cell).saturating_mul(cell).max(value)
     };
     (round(size.0), round(size.1))
 }
@@ -304,16 +315,60 @@ mod cache_texture_grid_tests {
         }
     }
 
+    /// Large surfaces were exempt from the grid, on the theory that they are one-off backdrops
+    /// that never repeat. A crash census from an RX 6800 XT measured the opposite: 25,479 of the
+    /// session's 35,551 texture allocations fell in sizes past the tracking table, 5.2 GB of the
+    /// 7.3 GB churned in sixty seconds, and the pool that serves them managed 84.3% reuse against
+    /// the gridded pool's 99.6%. They repeat constantly; they just never repeat *exactly*.
     #[test]
-    fn oversized_surfaces_are_left_exact() {
-        // These are one-off backdrops and full-stage effects. They never repeat, so rounding them
-        // up buys no reuse and only wastes memory.
+    fn oversized_surfaces_collapse_too() {
+        // Two sizes the same backdrop asked for moments apart, read off that census.
         assert_eq!(
+            quantise_cache_texture_size((3682, 1715)),
             quantise_cache_texture_size((3671, 1710)),
-            (3671, 1710),
-            "a surface past the grid limit must be allocated exactly"
+            "a few pixels of drift on a backdrop must not make a new bucket"
         );
-        assert_eq!(quantise_cache_texture_size((2255, 1763)), (2255, 1763));
+        assert_eq!(
+            quantise_cache_texture_size((2261, 1768)),
+            quantise_cache_texture_size((2255, 1763))
+        );
+    }
+
+    /// The cell grows with the surface, so a backdrop is not rounded by the same absolute amount
+    /// as an avatar. A fixed 64px cell would barely dent the bucket count up here; a fixed 256px
+    /// one would waste a quarter of every mid-sized surface.
+    ///
+    /// Only the large sizes are asserted. Small textures keep the existing 64px cell, where the
+    /// slack is proportionally large and absolutely trivial, and 99.6% pool reuse says that
+    /// trade was already right.
+    #[test]
+    fn the_slack_stays_proportional_on_large_surfaces() {
+        for size in [(1024, 768), (1370, 988), (2261, 1768), (3682, 1715)] {
+            let (width, height) = quantise_cache_texture_size(size);
+            let before = f64::from(size.0) * f64::from(size.1);
+            let after = f64::from(width) * f64::from(height);
+
+            assert!(
+                after / before <= 1.15,
+                "{size:?} became {width}x{height}, wasting {:.0}%",
+                (after / before - 1.0) * 100.0
+            );
+        }
+    }
+
+    /// Whatever the rounding does, it can never hand back a texture too small for its contents.
+    #[test]
+    fn quantising_never_shrinks_a_large_texture_either() {
+        for width in [1_025_u32, 2_048, 2_261, 3_682, 4_097, 8_192] {
+            for height in [1_710_u32, 1_768, 2_048, 4_096] {
+                let (quantised_width, quantised_height) =
+                    quantise_cache_texture_size((width, height));
+                assert!(
+                    quantised_width >= width && quantised_height >= height,
+                    "{width}x{height} must not shrink to {quantised_width}x{quantised_height}"
+                );
+            }
+        }
     }
 }
 
