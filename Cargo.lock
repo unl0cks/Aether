@@ -50,6 +50,7 @@ dependencies = [
  "memmap2",
  "os_info",
  "rand",
+ "reqwest",
  "rfd",
  "ruffle_core",
  "ruffle_frontend_utils",
@@ -59,6 +60,7 @@ dependencies = [
  "ruffle_video_software",
  "serde",
  "serde_json",
+ "sha2",
  "sys-locale",
  "thiserror 2.0.18",
  "tokio",
@@ -78,6 +80,7 @@ dependencies = [
  "windows-sys 0.61.2",
  "winit",
  "winresource",
+ "zip",
 ]
 
 [[package]]

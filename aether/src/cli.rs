@@ -232,6 +232,14 @@ pub struct Opt {
     #[clap(long = "separators-from-10000")]
     pub aether_aqw_separators_from_ten_thousand: bool,
 
+    /// Do not check for a newer Aether at startup.
+    #[clap(long = "no-update-check", conflicts_with = "aether_update_check")]
+    pub no_aether_update_check: bool,
+
+    /// Check for a newer Aether at startup. On by default.
+    #[clap(long = "update-check", conflicts_with = "no_aether_update_check")]
+    pub aether_update_check: bool,
+
     /// Write the full GPU resource history as JSON Lines, one sample per second. The crash report
     /// always carries a summary; this is for when the whole session is wanted.
     #[clap(long = "gpu-timeline-file")]

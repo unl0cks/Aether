@@ -22,6 +22,7 @@ mod log;
 mod mouse_motion;
 mod player;
 mod preferences;
+mod self_update;
 #[cfg(feature = "tracy")]
 mod tracy;
 mod util;
@@ -180,6 +181,30 @@ fn default_log_filter(avm_trace: bool) -> String {
     format!("warn,ruffle=info,aether=info,avm_trace={avm_trace}")
 }
 
+/// Ask GitHub whether there is a newer release, with a short leash.
+///
+/// Bounded at three seconds because this sits in front of the window. A slow or blocked connection
+/// must cost a moment, not a wait: an update check that delays every launch is a worse feature than
+/// no update check.
+fn check_for_update() -> Option<self_update::Release> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .ok()?;
+
+    let release = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            self_update::fetch_latest_release(),
+        )
+        .await
+        .ok()
+        .flatten()
+    })?;
+
+    self_update::is_newer(&release.version, env!("CARGO_PKG_VERSION")).then_some(release)
+}
+
 fn main() -> Result<(), Error> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -203,6 +228,24 @@ fn main() -> Result<(), Error> {
     ruffle_render_wgpu::set_backend_msaa_override(
         preferences.aether().msaa_samples.value.map(u32::from),
     );
+
+    // Before the window, so the dialogs are the only thing on screen rather than sitting over a
+    // half-drawn game. A local build never checks: offering it an "update" to the release it was
+    // built from would be noise every launch.
+    if let Ok(current_exe) = env::current_exe() {
+        self_update::clean_stale_backup(&current_exe);
+    }
+    if !preferences.cli.no_aether_update_check
+        && self_update::version_is_released(env!("CARGO_PKG_VERSION"))
+        && let Some(release) = check_for_update()
+        && let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        && self_update::offer_update(&release, &runtime)
+    {
+        self_update::restart();
+        return Ok(());
+    }
 
     let logs_path = &preferences.cli.cache_directory.join("log");
     let log_path = preferences.log_filename_pattern().create_path(logs_path);

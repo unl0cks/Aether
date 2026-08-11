@@ -47,6 +47,11 @@ gilrs = "0.11"
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "fs"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+# Self-update. reqwest is already in the tree via ruffle_frontend_utils, which is where the TLS
+# backend is chosen; features unify, so this does not pick a second one.
+reqwest = { workspace = true }
+sha2 = { workspace = true }
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 
 tracing-tracy = { version = "0.11.3", optional = true, features = ["demangle"] }
 rand = "0.9.1"
