@@ -27,6 +27,7 @@ struct PendingClick {
     handled: Option<Duration>,
     redraw_requested: Option<Duration>,
     render_started: Option<Duration>,
+    scene_drawn: Option<Duration>,
 }
 
 #[derive(Default)]
@@ -34,12 +35,29 @@ pub struct ClickLatencyProbe {
     enabled: bool,
     pending: Option<PendingClick>,
     samples: Vec<Duration>,
+    /// Optional file, written independently of the log.
+    ///
+    /// The first version of this only logged, on a target the default filter did not admit, so a
+    /// whole session of measurements was taken and discarded. The filter is fixed and tested, but
+    /// a diagnostic that a config change can silence is a diagnostic that will be silenced again.
+    file: Option<std::io::BufWriter<std::fs::File>>,
 }
 
 impl ClickLatencyProbe {
-    pub fn new(enabled: bool) -> Self {
+    pub fn new(enabled: bool, path: Option<&std::path::Path>) -> Self {
+        let file = path.and_then(|path| match std::fs::File::create(path) {
+            Ok(file) => Some(std::io::BufWriter::new(file)),
+            Err(error) => {
+                tracing::warn!("Could not open {}: {error}", path.display());
+                None
+            }
+        });
+
         Self {
-            enabled,
+            // A path on its own is enough to mean yes; asking for the file and not getting the
+            // measurements would be its own small trap.
+            enabled: enabled || file.is_some(),
+            file,
             ..Default::default()
         }
     }
@@ -56,6 +74,7 @@ impl ClickLatencyProbe {
                 handled: None,
                 redraw_requested: None,
                 render_started: None,
+                scene_drawn: None,
             });
         }
     }
@@ -84,6 +103,18 @@ impl ClickLatencyProbe {
         }
     }
 
+    /// `player.render()` has finished building the frame, before it is submitted.
+    ///
+    /// The split matters: everything after this is the driver and the display, and everything
+    /// before it is work we chose to do. They need opposite fixes.
+    pub fn scene_drawn(&mut self) {
+        if let Some(pending) = &mut self.pending
+            && pending.scene_drawn.is_none()
+        {
+            pending.scene_drawn = Some(pending.pressed_at.elapsed());
+        }
+    }
+
     /// The frame carrying this click has been submitted. Reports and clears.
     pub fn presented(&mut self) {
         let Some(pending) = self.pending.take() else {
@@ -97,14 +128,35 @@ impl ClickLatencyProbe {
             stage.map_or(f64::NAN, |elapsed| elapsed.as_secs_f64() * 1000.0)
         };
 
+        let handled = millis(pending.handled);
+        let redraw = millis(pending.redraw_requested);
+        let render = millis(pending.render_started);
+        let drawn = millis(pending.scene_drawn);
+        let presented = total.as_secs_f64() * 1000.0;
+
         tracing::info!(
             target: "aether::input_latency",
-            handled_ms = millis(pending.handled),
-            redraw_requested_ms = millis(pending.redraw_requested),
-            render_started_ms = millis(pending.render_started),
-            presented_ms = total.as_secs_f64() * 1000.0,
+            handled_ms = handled,
+            redraw_requested_ms = redraw,
+            render_started_ms = render,
+            scene_drawn_ms = drawn,
+            presented_ms = presented,
             "click to screen"
         );
+
+        if let Some(file) = &mut self.file {
+            use std::io::Write as _;
+            let line = format!(
+                "{{\"handled_ms\":{handled:.3},\"redraw_requested_ms\":{redraw:.3},\"render_started_ms\":{render:.3},\"scene_drawn_ms\":{drawn:.3},\"presented_ms\":{presented:.3}}}"
+            );
+            // Flushed per click: this exists to survive the session, not to be tidy.
+            if writeln!(file, "{line}")
+                .and_then(|()| file.flush())
+                .is_err()
+            {
+                self.file = None;
+            }
+        }
     }
 
     /// A summary for the end of the session.
@@ -140,7 +192,7 @@ mod tests {
 
     #[test]
     fn a_disabled_probe_records_nothing() {
-        let mut probe = ClickLatencyProbe::new(false);
+        let mut probe = ClickLatencyProbe::new(false, None);
         probe.pressed();
         probe.handled();
         probe.presented();
@@ -150,7 +202,7 @@ mod tests {
 
     #[test]
     fn a_click_is_only_reported_once_it_reaches_the_screen() {
-        let mut probe = ClickLatencyProbe::new(true);
+        let mut probe = ClickLatencyProbe::new(true, None);
 
         probe.pressed();
         probe.handled();
@@ -166,7 +218,7 @@ mod tests {
     /// Stages that never happened must not be counted as instant.
     #[test]
     fn a_present_with_no_click_in_flight_is_ignored() {
-        let mut probe = ClickLatencyProbe::new(true);
+        let mut probe = ClickLatencyProbe::new(true, None);
 
         probe.presented();
         assert!(probe.summary().is_none());
@@ -176,7 +228,7 @@ mod tests {
     /// belongs to the click it names.
     #[test]
     fn a_second_click_replaces_one_still_in_flight() {
-        let mut probe = ClickLatencyProbe::new(true);
+        let mut probe = ClickLatencyProbe::new(true, None);
 
         probe.pressed();
         probe.pressed();

@@ -237,6 +237,10 @@ pub struct Opt {
     #[clap(long = "gpu-timeline-file")]
     pub aether_gpu_timeline_file: Option<std::path::PathBuf>,
 
+    /// Write the click latency breakdown as JSON Lines. Implies --input-latency-probe.
+    #[clap(long = "input-latency-file")]
+    pub aether_input_latency_file: Option<std::path::PathBuf>,
+
     /// Log how long each click takes to reach the screen, broken down by stage. Development tool.
     #[clap(long = "input-latency-probe")]
     pub aether_input_latency_probe: bool,

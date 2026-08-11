@@ -166,6 +166,20 @@ fn panic_hook(info: &PanicHookInfo) {
     }
 }
 
+/// The tracing filter Aether uses when `RUST_LOG` is unset.
+///
+/// `aether=info` covers the whole crate rather than naming each diagnostic target. It used to list
+/// them one at a time, which meant every new target was emitted and then silently dropped until
+/// somebody remembered to add it here. That happened to the click latency probe: it measured every
+/// click correctly and threw all of them away, which is indistinguishable from a broken feature.
+///
+/// `warn` for everything else keeps other crates quiet; `ruffle=info` is what makes the ordinary
+/// session log useful.
+fn default_log_filter(avm_trace: bool) -> String {
+    let avm_trace = if avm_trace { "info" } else { "off" };
+    format!("warn,ruffle=info,aether=info,avm_trace={avm_trace}")
+}
+
 fn main() -> Result<(), Error> {
     let prev_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
@@ -215,16 +229,7 @@ fn main() -> Result<(), Error> {
     let (non_blocking_file, _file_guard) = tracing_appender::non_blocking(File::create(log_path)?);
     let (non_blocking_stdout, _stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
 
-    // Aether's own diagnostics are on `aether::*` targets, and the default filter admits `ruffle`
-    // at info but leaves everything else at warn. Without these two, the end-of-session texture
-    // census and the per-interval performance summary are both emitted and then dropped, which
-    // looks exactly like a feature that does not work.
-    let mut default_log_filter = String::from(if preferences.cli.aether_avm_trace {
-        "warn,ruffle=info,avm_trace=info"
-    } else {
-        "warn,ruffle=info,avm_trace=off"
-    });
-    default_log_filter.push_str(",aether::session=info,aether::perf=info");
+    let default_log_filter = default_log_filter(preferences.cli.aether_avm_trace);
 
     let env_filter = tracing_subscriber::EnvFilter::builder().parse_lossy(
         env::var("RUST_LOG")
@@ -476,4 +481,95 @@ fn migrate_logs(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod log_filter_tests {
+    use super::default_log_filter;
+    use tracing::Level;
+    use tracing_subscriber::EnvFilter;
+    use tracing_subscriber::layer::{Layer as _, SubscriberExt as _};
+
+    /// Whether a target would actually be recorded, asked of a real `EnvFilter` rather than by
+    /// looking for a substring. The bug this guards against was a filter that parsed perfectly and
+    /// dropped the events anyway.
+    fn admits(filter: &str, target: &str, level: Level) -> bool {
+        let filter = EnvFilter::builder().parse_lossy(filter);
+        let subscriber = tracing_subscriber::registry().with(filter.boxed());
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::dispatcher::get_default(|dispatch| {
+                dispatch.enabled(&tracing::Metadata::new(
+                    "probe",
+                    target,
+                    level,
+                    None,
+                    None,
+                    None,
+                    tracing::field::FieldSet::new(&[], tracing::callsite::Identifier(&CALLSITE)),
+                    tracing::metadata::Kind::EVENT,
+                ))
+            })
+        })
+    }
+
+    struct Callsite;
+    impl tracing::callsite::Callsite for Callsite {
+        fn set_interest(&self, _: tracing::subscriber::Interest) {}
+        fn metadata(&self) -> &tracing::Metadata<'_> {
+            unreachable!("only the identifier is used")
+        }
+    }
+    static CALLSITE: Callsite = Callsite;
+
+    /// Every diagnostic Aether writes goes to an `aether::*` target. Naming them one at a time is
+    /// what lost the click latency probe, so the filter has to admit the crate as a whole.
+    #[test]
+    fn the_default_filter_admits_every_aether_diagnostic() {
+        let filter = default_log_filter(false);
+
+        for target in [
+            "aether::input_latency",
+            "aether::session",
+            "aether::perf",
+            "aether::gui::controller",
+        ] {
+            assert!(
+                admits(&filter, target, Level::INFO),
+                "{target} would be dropped by {filter}"
+            );
+        }
+    }
+
+    /// The filter that shipped in 0.5.1, kept as a specimen. It parses cleanly and drops the
+    /// probe, which is why nothing looked wrong until a whole test session came back empty.
+    #[test]
+    fn the_enumerated_filter_that_lost_the_probe_is_still_caught() {
+        let shipped = "warn,ruffle=info,avm_trace=off,aether::session=info,aether::perf=info";
+
+        assert!(admits(shipped, "aether::session", Level::INFO));
+        assert!(
+            !admits(shipped, "aether::input_latency", Level::INFO),
+            "this filter is the bug; if it now admits the probe the test proves nothing"
+        );
+    }
+
+    /// Other crates stay quiet, which is the reason the filter exists at all.
+    #[test]
+    fn the_default_filter_still_keeps_unrelated_crates_at_warn() {
+        let filter = default_log_filter(false);
+
+        assert!(!admits(&filter, "wgpu_core::device", Level::INFO));
+        assert!(admits(&filter, "wgpu_core::device", Level::WARN));
+    }
+
+    /// The ActionScript trace carries session data, so it is off unless asked for by name.
+    #[test]
+    fn the_actionscript_trace_is_off_unless_requested() {
+        assert!(!admits(
+            &default_log_filter(false),
+            "avm_trace",
+            Level::INFO
+        ));
+        assert!(admits(&default_log_filter(true), "avm_trace", Level::INFO));
+    }
 }

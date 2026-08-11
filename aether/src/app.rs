@@ -77,6 +77,9 @@ impl MainWindow {
                     }
                 }
 
+                // Between building the frame and handing it to the driver.
+                self.click_latency.scene_drawn();
+
                 #[cfg(feature = "metrics")]
                 let gui_started = Instant::now();
                 let gui_render_outcome = self.gui.render(player);
@@ -727,6 +730,7 @@ impl ApplicationHandler<RuffleEvent> for App {
             let mouse_motion_enabled = preferences.cli.aether_aqw_mouse_motion_coalescing;
 
             let probe_enabled = preferences.cli.aether_input_latency_probe;
+            let probe_path = preferences.cli.aether_input_latency_file.clone();
             self.main_window = Some(MainWindow {
                 preferences,
                 gui,
@@ -744,7 +748,10 @@ impl ApplicationHandler<RuffleEvent> for App {
                 modifiers: Modifiers::default(),
                 time: Instant::now(),
                 next_frame_time: None,
-                click_latency: crate::input_latency::ClickLatencyProbe::new(probe_enabled),
+                click_latency: crate::input_latency::ClickLatencyProbe::new(
+                    probe_enabled,
+                    probe_path.as_deref(),
+                ),
                 event_loop_proxy,
                 #[cfg(feature = "metrics")]
                 metrics,
