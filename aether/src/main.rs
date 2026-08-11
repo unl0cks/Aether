@@ -328,6 +328,13 @@ fn main() -> Result<(), Error> {
         ruffle_core::aether_compatibility::HpSeparator::None
     };
     ruffle_core::aether_compatibility::set_hp_separator(hp_separator);
+    ruffle_core::aether_compatibility::set_separator_min_digits(
+        if preferences.cli.aether_aqw_separators_from_ten_thousand {
+            5
+        } else {
+            4
+        },
+    );
 
     let rebind_enabled = aqw_mode && preferences.cli.aether_aqw_timeline_child_rebind;
     ruffle_core::aether_compatibility::set_timeline_child_rebind_enabled(rebind_enabled);

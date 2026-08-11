@@ -1757,6 +1757,88 @@ pub fn hp_separator() -> HpSeparator {
 /// and monsters, so matching this one field name covers every health readout in the game.
 const AQW_HP_TEXT_FIELD: &str = "strIntHP";
 
+/// AQW text fields that carry quantities worth grouping, beyond the portrait health readout.
+///
+/// A name that AQW does not actually use costs nothing: the field never appears, so the rule never
+/// fires. That makes a slightly generous list safe, which matters because these are quest and
+/// detail panels whose exact field names are not all confirmed.
+const AQW_QUANTITY_TEXT_FIELDS: &[&str] =
+    &["tDesc", "tbDesc", "strDesc", "txtDetail", "tDetailTemplate"];
+
+/// Smallest digit run worth grouping.
+static SEPARATOR_MIN_DIGITS: AtomicU8 = AtomicU8::new(4);
+
+/// Group from a thousand (`4`) or from ten thousand (`5`).
+///
+/// Four-digit numbers are common in ordinary play and some readers find `2,750` busier than
+/// `2750`, so where grouping starts is a preference rather than a fixed rule.
+#[inline]
+pub fn set_separator_min_digits(min_digits: u8) {
+    SEPARATOR_MIN_DIGITS.store(min_digits.clamp(4, 9), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn separator_min_digits() -> u8 {
+    SEPARATOR_MIN_DIGITS.load(Ordering::Relaxed)
+}
+
+/// Whether this text assignment is one AQW fills with quantities.
+pub fn is_aqw_quantity_text_field(field_name: Option<&str>) -> bool {
+    field_name.is_some_and(|name| AQW_QUANTITY_TEXT_FIELDS.contains(&name))
+}
+
+/// Group every standalone number inside a line of text, as `Bones 152197/1000000` to
+/// `Bones 152,197/1,000,000`.
+///
+/// A digit run is only grouped when it stands alone as a quantity. A run touching a letter, a dot
+/// or a hyphen is left alone, which keeps identifiers, version numbers, decimals and negatives
+/// intact. `citadelruins-99922` is the case that motivated the hyphen rule.
+pub fn group_number_runs(text: &str, separator: HpSeparator, min_digits: usize) -> Option<String> {
+    if separator.character().is_none() {
+        return None;
+    }
+
+    let bytes = text.as_bytes();
+    let mut grouped = String::with_capacity(text.len() + text.len() / 3);
+    let mut index = 0;
+    let mut changed = false;
+
+    while index < bytes.len() {
+        if !bytes[index].is_ascii_digit() {
+            grouped.push(bytes[index] as char);
+            index += 1;
+            continue;
+        }
+
+        let start = index;
+        while index < bytes.len() && bytes[index].is_ascii_digit() {
+            index += 1;
+        }
+
+        let joined_before = start
+            .checked_sub(1)
+            .is_some_and(|before| is_number_glue(bytes[before]));
+        let joined_after = bytes.get(index).copied().is_some_and(is_number_glue);
+        let run = &text[start..index];
+
+        match group_digits(run, separator, min_digits) {
+            Some(separated) if !joined_before && !joined_after => {
+                grouped.push_str(&separated);
+                changed = true;
+            }
+            _ => grouped.push_str(run),
+        }
+    }
+
+    changed.then_some(grouped)
+}
+
+/// Whether a byte next to a digit run means the run is part of a larger token rather than a
+/// quantity of its own.
+fn is_number_glue(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || byte == b'-' || byte == b'.' || byte == b'_'
+}
+
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
 ///
 /// Requested by a dyslexic player who could read the digits but not the magnitude: with boss health
@@ -1765,11 +1847,11 @@ const AQW_HP_TEXT_FIELD: &str = "strIntHP";
 ///
 /// Only an unbroken run of digits is touched. Anything AQW puts in this field that is not a bare
 /// number, such as the literal `X` it writes for a dead target, is passed through unchanged.
-pub fn group_hp_digits(text: &str, separator: HpSeparator) -> Option<String> {
+pub fn group_digits(text: &str, separator: HpSeparator, min_digits: usize) -> Option<String> {
     let separator = separator.character()?;
     // Four digits is where grouping starts helping and where Flash's own number formatting would
     // have begun. Below that it only adds noise.
-    if text.len() < 4 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+    if text.len() < min_digits || !text.bytes().all(|byte| byte.is_ascii_digit()) {
         return None;
     }
 
@@ -1793,36 +1875,41 @@ pub fn is_aqw_hp_text_field(field_name: Option<&str>) -> bool {
 /// Returns `None` for every other text assignment in the game, so chat, item names, coin totals
 /// and everything else reach the field untouched.
 pub fn aqw_grouped_hp_text(field_name: Option<&str>, text: &str) -> Option<String> {
-    if !is_aqw_hp_text_field(field_name) {
-        return None;
+    let min_digits = separator_min_digits() as usize;
+    if is_aqw_hp_text_field(field_name) {
+        return group_digits(text, hp_separator(), min_digits);
     }
-    group_hp_digits(text, hp_separator())
+    if is_aqw_quantity_text_field(field_name) {
+        // These carry sentences, so group the numbers inside rather than the whole string.
+        return group_number_runs(text, hp_separator(), min_digits);
+    }
+    None
 }
 
 #[cfg(test)]
 mod hp_separator_tests {
-    use super::{HpSeparator, group_hp_digits, is_aqw_hp_text_field};
+    use super::{HpSeparator, group_digits, group_number_runs, is_aqw_hp_text_field};
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
         assert_eq!(
-            group_hp_digits("1250000", HpSeparator::Comma).as_deref(),
+            group_digits("1250000", HpSeparator::Comma, 4).as_deref(),
             Some("1,250,000")
         );
         assert_eq!(
-            group_hp_digits("999999999", HpSeparator::Comma).as_deref(),
+            group_digits("999999999", HpSeparator::Comma, 4).as_deref(),
             Some("999,999,999")
         );
         assert_eq!(
-            group_hp_digits("1000", HpSeparator::Comma).as_deref(),
+            group_digits("1000", HpSeparator::Comma, 4).as_deref(),
             Some("1,000")
         );
         assert_eq!(
-            group_hp_digits("12345", HpSeparator::Comma).as_deref(),
+            group_digits("12345", HpSeparator::Comma, 4).as_deref(),
             Some("12,345")
         );
         assert_eq!(
-            group_hp_digits("123456", HpSeparator::Comma).as_deref(),
+            group_digits("123456", HpSeparator::Comma, 4).as_deref(),
             Some("123,456")
         );
     }
@@ -1830,34 +1917,83 @@ mod hp_separator_tests {
     #[test]
     fn spaces_group_the_same_places_as_commas() {
         assert_eq!(
-            group_hp_digits("1250000", HpSeparator::Space).as_deref(),
+            group_digits("1250000", HpSeparator::Space, 4).as_deref(),
             Some("1 250 000")
         );
         assert_eq!(
-            group_hp_digits("12345", HpSeparator::Space).as_deref(),
+            group_digits("12345", HpSeparator::Space, 4).as_deref(),
             Some("12 345")
         );
         // Off means untouched, whatever the number.
-        assert_eq!(group_hp_digits("1250000", HpSeparator::None), None);
+        assert_eq!(group_digits("1250000", HpSeparator::None, 4), None);
+    }
+
+    #[test]
+    fn quest_progress_lines_group_both_sides_of_the_slash() {
+        assert_eq!(
+            group_number_runs(
+                "Unleash Doom: Inquisitor Bones 152197/1000000",
+                HpSeparator::Comma,
+                4
+            )
+            .as_deref(),
+            Some("Unleash Doom: Inquisitor Bones 152,197/1,000,000")
+        );
+        assert_eq!(
+            group_number_runs("Refined Metal 0/1000000", HpSeparator::Comma, 4).as_deref(),
+            Some("Refined Metal 0/1,000,000")
+        );
+    }
+
+    #[test]
+    fn room_numbers_and_other_identifiers_are_never_grouped() {
+        // The case from a real screenshot. A room name is not a quantity.
+        assert_eq!(
+            group_number_runs("1 player in citadelruins-99922", HpSeparator::Comma, 4),
+            None
+        );
+        // Anything welded to letters, dots or underscores is part of a token, not a count.
+        assert_eq!(group_number_runs("v1000000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_number_runs("item_10000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_number_runs("1.50000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_number_runs("-25000", HpSeparator::Comma, 4), None);
+        assert_eq!(
+            group_number_runs("spider.swf?ver=0.60398", HpSeparator::Comma, 4),
+            None
+        );
+    }
+
+    #[test]
+    fn grouping_can_start_at_ten_thousand_instead() {
+        // 2750 reads fine unseparated; 12750 is where it starts to help.
+        assert_eq!(group_digits("2750", HpSeparator::Comma, 5), None);
+        assert_eq!(
+            group_digits("12750", HpSeparator::Comma, 5).as_deref(),
+            Some("12,750")
+        );
+        assert_eq!(
+            group_number_runs("Bones 2750/1000000", HpSeparator::Comma, 5).as_deref(),
+            Some("Bones 2750/1,000,000")
+        );
     }
 
     #[test]
     fn short_numbers_are_left_alone() {
         // Grouping these would add noise without making the magnitude any clearer.
-        assert_eq!(group_hp_digits("0", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("42", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("999", HpSeparator::Comma), None);
+        assert_eq!(group_digits("0", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("42", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("999", HpSeparator::Comma, 4), None);
     }
 
     #[test]
     fn anything_that_is_not_a_bare_number_is_untouched() {
         // AQW writes a literal X into this field for a dead target.
-        assert_eq!(group_hp_digits("X", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("1,250,000", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("12000/45000", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("-5000", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("", HpSeparator::Comma), None);
-        assert_eq!(group_hp_digits("1234 HP", HpSeparator::Comma), None);
+        assert_eq!(group_digits("X", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("1,250,000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("12000/45000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("-5000", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("1234 HP", HpSeparator::Comma, 4), None);
     }
 
     #[test]

@@ -220,6 +220,10 @@ pub struct Opt {
     #[clap(long = "hp-separator-space")]
     pub aether_aqw_hp_separator_space: bool,
 
+    /// Only separate numbers from ten thousand upwards, so 2750 stays as it is.
+    #[clap(long = "separators-from-10000")]
+    pub aether_aqw_separators_from_ten_thousand: bool,
+
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long = "avm-trace", alias = "aether-avm-trace")]
     pub aether_avm_trace: bool,
