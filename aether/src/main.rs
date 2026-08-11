@@ -318,16 +318,16 @@ fn main() -> Result<(), Error> {
     let cache_texture_grid = aqw_mode && preferences.cli.aether_aqw_cache_texture_grid;
     ruffle_core::aether_performance::set_cache_texture_grid_enabled(cache_texture_grid);
 
-    let hp_separator = if aqw_mode && preferences.cli.aether_aqw_hp_separators {
+    let number_separator = if aqw_mode && preferences.cli.aether_aqw_hp_separators {
         if preferences.cli.aether_aqw_hp_separator_space {
-            ruffle_core::aether_compatibility::HpSeparator::Space
+            ruffle_core::aether_compatibility::NumberSeparator::Space
         } else {
-            ruffle_core::aether_compatibility::HpSeparator::Comma
+            ruffle_core::aether_compatibility::NumberSeparator::Comma
         }
     } else {
-        ruffle_core::aether_compatibility::HpSeparator::None
+        ruffle_core::aether_compatibility::NumberSeparator::None
     };
-    ruffle_core::aether_compatibility::set_hp_separator(hp_separator);
+    ruffle_core::aether_compatibility::set_number_separator(number_separator);
     ruffle_core::aether_compatibility::set_separator_min_digits(
         if preferences.cli.aether_aqw_separators_from_ten_thousand {
             5

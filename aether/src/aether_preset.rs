@@ -76,12 +76,15 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // contents; it never reuses one across a bounds change. Corrupting the same things the avatar
     // cache does proved the oversizing was to blame rather than the reuse, and that is where the
     // filter UV bug turned out to be.
-    // Requested by a dyslexic player: boss health runs to eight and nine digits and changes
-    // several times a second, and without separators there is nothing to anchor where the
-    // millions place sits. Display only, so it is on unless asked otherwise.
-    opt.aether_aqw_hp_separators = !opt.no_aether_aqw_hp_separators;
     opt.aether_aqw_cache_texture_grid = !opt.no_aether_aqw_cache_texture_grid;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
+
+    // Requested by a dyslexic player: boss health runs to eight and nine digits and changes
+    // several times a second, and without separators there is nothing to anchor where the
+    // millions place sits. The same is true of the gold total, the experience and reputation
+    // bars, quest progress and item counts, so it covers every number the game displays. Display
+    // only, so it is on unless asked otherwise.
+    opt.aether_aqw_hp_separators = !opt.no_aether_aqw_hp_separators;
 
     // Retain exact-sized offscreen surfaces only long enough for immediately repeating equipment
     // and combat-filter work to reuse them. The renderer also derives a smaller 32 MiB companion
@@ -367,13 +370,21 @@ mod tests {
     }
 
     #[test]
-    fn aqw_preset_groups_hp_numbers_by_default() {
+    fn aqw_preset_groups_numbers_by_default() {
         assert!(parse_and_apply(&["aether"]).aether_aqw_hp_separators);
     }
 
     #[test]
-    fn aqw_preset_allows_hp_separator_opt_out() {
+    fn aqw_preset_allows_separator_opt_out() {
+        assert!(!parse_and_apply(&["aether", "--no-number-separators"]).aether_aqw_hp_separators);
+    }
+
+    /// The flags shipped as `--hp-separators` before the feature covered gold, experience,
+    /// reputation and quest text as well. Anyone whose shortcut still says that keeps working.
+    #[test]
+    fn the_original_hp_flag_names_still_work() {
         assert!(!parse_and_apply(&["aether", "--no-hp-separators"]).aether_aqw_hp_separators);
+        assert!(parse_and_apply(&["aether", "--hp-separator-space"]).aether_aqw_hp_separator_space);
     }
 
     #[test]

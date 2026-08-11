@@ -1702,9 +1702,9 @@ pub fn take_aqw_definition_lookup_miss_count() -> u64 {
     AQW_DEFINITION_LOOKUP_MISSES.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-/// How AQW's portrait health numbers are grouped, if at all.
+/// How AQW's on-screen numbers are grouped, if at all.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HpSeparator {
+pub enum NumberSeparator {
     /// Leave the number exactly as AQW wrote it.
     None,
     /// `1,250,000`.
@@ -1714,56 +1714,41 @@ pub enum HpSeparator {
     Space,
 }
 
-impl HpSeparator {
+impl NumberSeparator {
     fn character(self) -> Option<char> {
         match self {
-            HpSeparator::None => None,
-            HpSeparator::Comma => Some(','),
+            NumberSeparator::None => None,
+            NumberSeparator::Comma => Some(','),
             // A plain ASCII space, not a thin or non-breaking one. AQW's embedded fonts cannot be
             // relied on to carry the typographically correct glyphs.
-            HpSeparator::Space => Some(' '),
+            NumberSeparator::Space => Some(' '),
         }
     }
 }
 
-static HP_SEPARATOR: AtomicU8 = AtomicU8::new(0);
+static NUMBER_SEPARATOR: AtomicU8 = AtomicU8::new(0);
 
-/// Group AQW's portrait health numbers for readability.
+/// Group AQW's on-screen numbers for readability.
 #[inline]
-pub fn set_hp_separator(separator: HpSeparator) {
-    HP_SEPARATOR.store(
+pub fn set_number_separator(separator: NumberSeparator) {
+    NUMBER_SEPARATOR.store(
         match separator {
-            HpSeparator::None => 0,
-            HpSeparator::Comma => 1,
-            HpSeparator::Space => 2,
+            NumberSeparator::None => 0,
+            NumberSeparator::Comma => 1,
+            NumberSeparator::Space => 2,
         },
         Ordering::Relaxed,
     );
 }
 
 #[inline]
-pub fn hp_separator() -> HpSeparator {
-    match HP_SEPARATOR.load(Ordering::Relaxed) {
-        1 => HpSeparator::Comma,
-        2 => HpSeparator::Space,
-        _ => HpSeparator::None,
+pub fn number_separator() -> NumberSeparator {
+    match NUMBER_SEPARATOR.load(Ordering::Relaxed) {
+        1 => NumberSeparator::Comma,
+        2 => NumberSeparator::Space,
+        _ => NumberSeparator::None,
     }
 }
-
-/// The AQW portrait TextField that receives a character's current hit points.
-///
-/// `World/updatePortrait` assigns it directly: `strIntHP.text = String(intHP)`, with no separators
-/// and no formatting of any kind. The same portrait code runs for the local player, other players
-/// and monsters, so matching this one field name covers every health readout in the game.
-const AQW_HP_TEXT_FIELD: &str = "strIntHP";
-
-/// AQW text fields that carry quantities worth grouping, beyond the portrait health readout.
-///
-/// A name that AQW does not actually use costs nothing: the field never appears, so the rule never
-/// fires. That makes a slightly generous list safe, which matters because these are quest and
-/// detail panels whose exact field names are not all confirmed.
-const AQW_QUANTITY_TEXT_FIELDS: &[&str] =
-    &["tDesc", "tbDesc", "strDesc", "txtDetail", "tDetailTemplate"];
 
 /// Smallest digit run worth grouping.
 static SEPARATOR_MIN_DIGITS: AtomicU8 = AtomicU8::new(4);
@@ -1782,30 +1767,66 @@ pub fn separator_min_digits() -> u8 {
     SEPARATOR_MIN_DIGITS.load(Ordering::Relaxed)
 }
 
-/// Whether this text assignment is one AQW fills with quantities.
-pub fn is_aqw_quantity_text_field(field_name: Option<&str>) -> bool {
-    field_name.is_some_and(|name| AQW_QUANTITY_TEXT_FIELDS.contains(&name))
-}
-
 /// Group every standalone number inside a line of text, as `Bones 152197/1000000` to
 /// `Bones 152,197/1,000,000`.
 ///
 /// A digit run is only grouped when it stands alone as a quantity. A run touching a letter, a dot
 /// or a hyphen is left alone, which keeps identifiers, version numbers, decimals and negatives
 /// intact. `citadelruins-99922` is the case that motivated the hyphen rule.
-pub fn group_number_runs(text: &str, separator: HpSeparator, min_digits: usize) -> Option<String> {
-    if separator.character().is_none() {
+pub fn group_number_runs(
+    text: &str,
+    separator: NumberSeparator,
+    min_digits: usize,
+) -> Option<String> {
+    if separator.character().is_none() || !has_groupable_run(text, min_digits) {
         return None;
     }
 
-    let bytes = text.as_bytes();
     let mut grouped = String::with_capacity(text.len() + text.len() / 3);
+    let changed = group_number_runs_into(&mut grouped, text, separator, min_digits);
+    changed.then_some(grouped)
+}
+
+/// Whether `text` holds a digit run long enough to be worth a closer look.
+///
+/// This runs on every text assignment AQW makes, including each line of chat and each damage
+/// number, and almost none of them contain a long number. Answering no here costs one pass over
+/// the bytes and no allocation at all, where the grouping pass would allocate a buffer first and
+/// only then discover there was nothing to do.
+fn has_groupable_run(text: &str, min_digits: usize) -> bool {
+    let mut run = 0;
+    for byte in text.bytes() {
+        if byte.is_ascii_digit() {
+            run += 1;
+            if run >= min_digits {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+    false
+}
+
+/// Append `text` to `grouped`, separating any digit run that reads as a quantity. Reports whether
+/// anything was actually rewritten.
+///
+/// A digit run is ASCII by definition, so the scan can index bytes to find one. Everything between
+/// the runs is copied back as whole characters: AQW carries accented item names and symbol glyphs,
+/// and copying those a byte at a time would turn each one into mojibake.
+fn group_number_runs_into(
+    grouped: &mut String,
+    text: &str,
+    separator: NumberSeparator,
+    min_digits: usize,
+) -> bool {
+    let bytes = text.as_bytes();
     let mut index = 0;
+    let mut copied_from = 0;
     let mut changed = false;
 
     while index < bytes.len() {
         if !bytes[index].is_ascii_digit() {
-            grouped.push(bytes[index] as char);
             index += 1;
             continue;
         }
@@ -1815,28 +1836,99 @@ pub fn group_number_runs(text: &str, separator: HpSeparator, min_digits: usize) 
             index += 1;
         }
 
-        let joined_before = start
-            .checked_sub(1)
-            .is_some_and(|before| is_number_glue(bytes[before]));
-        let joined_after = bytes.get(index).copied().is_some_and(is_number_glue);
-        let run = &text[start..index];
+        let joined_before = text[..start]
+            .chars()
+            .next_back()
+            .is_some_and(is_number_glue);
+        let joined_after = text[index..].chars().next().is_some_and(is_number_glue);
 
-        match group_digits(run, separator, min_digits) {
-            Some(separated) if !joined_before && !joined_after => {
-                grouped.push_str(&separated);
-                changed = true;
-            }
-            _ => grouped.push_str(run),
+        if joined_before || joined_after {
+            continue;
+        }
+
+        if let Some(separated) = group_digits(&text[start..index], separator, min_digits) {
+            grouped.push_str(&text[copied_from..start]);
+            grouped.push_str(&separated);
+            copied_from = index;
+            changed = true;
         }
     }
 
+    grouped.push_str(&text[copied_from..]);
+    changed
+}
+
+/// Group the numbers in a line of Flash HTML, leaving the markup itself alone.
+///
+/// AQW colours its quest rewards, so a reward line arrives as `<font color="#FFFF00">10000000</font>
+/// gold` rather than as plain text. Only the text between the tags is a quantity. A number inside a
+/// tag is a colour, a font size, a tab stop or the target of a chat link, and rewriting one would
+/// change what the markup means.
+///
+/// Character entities are skipped for the same reason: `&#8203;` is a single character written as a
+/// number, and separating it would print the entity instead of the glyph.
+pub fn group_number_runs_in_html(
+    html: &str,
+    separator: NumberSeparator,
+    min_digits: usize,
+) -> Option<String> {
+    /// `&` plus the longest entity name Flash recognises plus `;`, with room to spare. Bounding
+    /// the search stops a bare `&` in chat from swallowing the rest of the line.
+    const MAX_ENTITY_LEN: usize = 12;
+
+    if separator.character().is_none() || !has_groupable_run(html, min_digits) {
+        return None;
+    }
+
+    let bytes = html.as_bytes();
+    let mut grouped = String::with_capacity(html.len() + html.len() / 3);
+    let mut changed = false;
+    let mut index = 0;
+    let mut text_from = 0;
+
+    while index < bytes.len() {
+        // A tag runs to the next `>`, or to the end of the string if AQW left one unclosed.
+        let skip_to = match bytes[index] {
+            b'<' => html[index..]
+                .find('>')
+                .map_or(bytes.len(), |end| index + end + 1),
+            // An entity is `&`, up to a handful of name or digit characters, then `;`. A longer
+            // run without a `;` is a stray ampersand, which is ordinary text.
+            b'&' => {
+                let limit = bytes.len().min(index + MAX_ENTITY_LEN);
+                match bytes[index..limit].iter().position(|&byte| byte == b';') {
+                    Some(end) => index + end + 1,
+                    None => {
+                        index += 1;
+                        continue;
+                    }
+                }
+            }
+            _ => {
+                index += 1;
+                continue;
+            }
+        };
+
+        changed |=
+            group_number_runs_into(&mut grouped, &html[text_from..index], separator, min_digits);
+        grouped.push_str(&html[index..skip_to]);
+        index = skip_to;
+        text_from = skip_to;
+    }
+
+    changed |= group_number_runs_into(&mut grouped, &html[text_from..], separator, min_digits);
     changed.then_some(grouped)
 }
 
-/// Whether a byte next to a digit run means the run is part of a larger token rather than a
+/// Whether the character next to a digit run means the run is part of a larger token rather than a
 /// quantity of its own.
-fn is_number_glue(byte: u8) -> bool {
-    byte.is_ascii_alphabetic() || byte == b'-' || byte == b'.' || byte == b'_'
+///
+/// Letters are tested with the full Unicode rule rather than the ASCII one, so an accented item
+/// name glued to digits is treated the same way an unaccented one would be. Symbols are not glue:
+/// a currency mark or a bullet sitting against a number still leaves a quantity behind it.
+fn is_number_glue(character: char) -> bool {
+    character.is_alphabetic() || character == '-' || character == '.' || character == '_'
 }
 
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
@@ -1847,7 +1939,7 @@ fn is_number_glue(byte: u8) -> bool {
 ///
 /// Only an unbroken run of digits is touched. Anything AQW puts in this field that is not a bare
 /// number, such as the literal `X` it writes for a dead target, is passed through unchanged.
-pub fn group_digits(text: &str, separator: HpSeparator, min_digits: usize) -> Option<String> {
+pub fn group_digits(text: &str, separator: NumberSeparator, min_digits: usize) -> Option<String> {
     let separator = separator.character()?;
     // Four digits is where grouping starts helping and where Flash's own number formatting would
     // have begun. Below that it only adds noise.
@@ -1865,51 +1957,51 @@ pub fn group_digits(text: &str, separator: HpSeparator, min_digits: usize) -> Op
     Some(grouped)
 }
 
-/// Whether this text assignment is AQW writing a health value into a portrait.
-pub fn is_aqw_hp_text_field(field_name: Option<&str>) -> bool {
-    field_name == Some(AQW_HP_TEXT_FIELD)
+/// Rewrite a display text assignment with grouped numbers, or `None` to leave it alone.
+///
+/// This runs on every display field AQW writes, not on a list of known field names. The list came
+/// first and it never finished: health, then quest progress, then the gold total, the experience
+/// and reputation bars, quest rewards, item stacks, each one a separate name to discover, and each
+/// screenshot found more. Deciding by what the text looks like instead of where it is going covers
+/// all of them at once, including the panels nobody has looked at yet.
+///
+/// The safety comes from the shape of the value rather than from the field: only a digit run
+/// standing alone as a quantity is touched, and only in a display field. Editable fields are
+/// excluded by the caller, so anything the game reads back, parses, or sends to the server is
+/// never rewritten.
+pub fn aqw_grouped_text(text: &str) -> Option<String> {
+    group_number_runs(text, number_separator(), separator_min_digits() as usize)
 }
 
-/// Rewrite an AQW portrait health value with thousands separators, if that is what this is.
-///
-/// Returns `None` for every other text assignment in the game, so chat, item names, coin totals
-/// and everything else reach the field untouched.
-pub fn aqw_grouped_hp_text(field_name: Option<&str>, text: &str) -> Option<String> {
-    let min_digits = separator_min_digits() as usize;
-    if is_aqw_hp_text_field(field_name) {
-        return group_digits(text, hp_separator(), min_digits);
-    }
-    if is_aqw_quantity_text_field(field_name) {
-        // These carry sentences, so group the numbers inside rather than the whole string.
-        return group_number_runs(text, hp_separator(), min_digits);
-    }
-    None
+/// The same rewrite for a field being assigned HTML rather than plain text.
+pub fn aqw_grouped_html(html: &str) -> Option<String> {
+    group_number_runs_in_html(html, number_separator(), separator_min_digits() as usize)
 }
 
 #[cfg(test)]
-mod hp_separator_tests {
-    use super::{HpSeparator, group_digits, group_number_runs, is_aqw_hp_text_field};
+mod digit_grouping_tests {
+    use super::{NumberSeparator, group_digits, group_number_runs};
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
         assert_eq!(
-            group_digits("1250000", HpSeparator::Comma, 4).as_deref(),
+            group_digits("1250000", NumberSeparator::Comma, 4).as_deref(),
             Some("1,250,000")
         );
         assert_eq!(
-            group_digits("999999999", HpSeparator::Comma, 4).as_deref(),
+            group_digits("999999999", NumberSeparator::Comma, 4).as_deref(),
             Some("999,999,999")
         );
         assert_eq!(
-            group_digits("1000", HpSeparator::Comma, 4).as_deref(),
+            group_digits("1000", NumberSeparator::Comma, 4).as_deref(),
             Some("1,000")
         );
         assert_eq!(
-            group_digits("12345", HpSeparator::Comma, 4).as_deref(),
+            group_digits("12345", NumberSeparator::Comma, 4).as_deref(),
             Some("12,345")
         );
         assert_eq!(
-            group_digits("123456", HpSeparator::Comma, 4).as_deref(),
+            group_digits("123456", NumberSeparator::Comma, 4).as_deref(),
             Some("123,456")
         );
     }
@@ -1917,15 +2009,15 @@ mod hp_separator_tests {
     #[test]
     fn spaces_group_the_same_places_as_commas() {
         assert_eq!(
-            group_digits("1250000", HpSeparator::Space, 4).as_deref(),
+            group_digits("1250000", NumberSeparator::Space, 4).as_deref(),
             Some("1 250 000")
         );
         assert_eq!(
-            group_digits("12345", HpSeparator::Space, 4).as_deref(),
+            group_digits("12345", NumberSeparator::Space, 4).as_deref(),
             Some("12 345")
         );
         // Off means untouched, whatever the number.
-        assert_eq!(group_digits("1250000", HpSeparator::None, 4), None);
+        assert_eq!(group_digits("1250000", NumberSeparator::None, 4), None);
     }
 
     #[test]
@@ -1933,14 +2025,14 @@ mod hp_separator_tests {
         assert_eq!(
             group_number_runs(
                 "Unleash Doom: Inquisitor Bones 152197/1000000",
-                HpSeparator::Comma,
+                NumberSeparator::Comma,
                 4
             )
             .as_deref(),
             Some("Unleash Doom: Inquisitor Bones 152,197/1,000,000")
         );
         assert_eq!(
-            group_number_runs("Refined Metal 0/1000000", HpSeparator::Comma, 4).as_deref(),
+            group_number_runs("Refined Metal 0/1000000", NumberSeparator::Comma, 4).as_deref(),
             Some("Refined Metal 0/1,000,000")
         );
     }
@@ -1949,16 +2041,25 @@ mod hp_separator_tests {
     fn room_numbers_and_other_identifiers_are_never_grouped() {
         // The case from a real screenshot. A room name is not a quantity.
         assert_eq!(
-            group_number_runs("1 player in citadelruins-99922", HpSeparator::Comma, 4),
+            group_number_runs("1 player in citadelruins-99922", NumberSeparator::Comma, 4),
             None
         );
         // Anything welded to letters, dots or underscores is part of a token, not a count.
-        assert_eq!(group_number_runs("v1000000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_number_runs("item_10000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_number_runs("1.50000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_number_runs("-25000", HpSeparator::Comma, 4), None);
         assert_eq!(
-            group_number_runs("spider.swf?ver=0.60398", HpSeparator::Comma, 4),
+            group_number_runs("v1000000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("item_10000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("1.50000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(group_number_runs("-25000", NumberSeparator::Comma, 4), None);
+        assert_eq!(
+            group_number_runs("spider.swf?ver=0.60398", NumberSeparator::Comma, 4),
             None
         );
     }
@@ -1966,13 +2067,13 @@ mod hp_separator_tests {
     #[test]
     fn grouping_can_start_at_ten_thousand_instead() {
         // 2750 reads fine unseparated; 12750 is where it starts to help.
-        assert_eq!(group_digits("2750", HpSeparator::Comma, 5), None);
+        assert_eq!(group_digits("2750", NumberSeparator::Comma, 5), None);
         assert_eq!(
-            group_digits("12750", HpSeparator::Comma, 5).as_deref(),
+            group_digits("12750", NumberSeparator::Comma, 5).as_deref(),
             Some("12,750")
         );
         assert_eq!(
-            group_number_runs("Bones 2750/1000000", HpSeparator::Comma, 5).as_deref(),
+            group_number_runs("Bones 2750/1000000", NumberSeparator::Comma, 5).as_deref(),
             Some("Bones 2750/1,000,000")
         );
     }
@@ -1980,52 +2081,169 @@ mod hp_separator_tests {
     #[test]
     fn short_numbers_are_left_alone() {
         // Grouping these would add noise without making the magnitude any clearer.
-        assert_eq!(group_digits("0", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("42", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("999", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("0", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("42", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("999", NumberSeparator::Comma, 4), None);
     }
 
     #[test]
     fn anything_that_is_not_a_bare_number_is_untouched() {
         // AQW writes a literal X into this field for a dead target.
-        assert_eq!(group_digits("X", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("1,250,000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("12000/45000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("-5000", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("", HpSeparator::Comma, 4), None);
-        assert_eq!(group_digits("1234 HP", HpSeparator::Comma, 4), None);
+        assert_eq!(group_digits("X", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("1,250,000", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("12000/45000", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("-5000", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("", NumberSeparator::Comma, 4), None);
+        assert_eq!(group_digits("1234 HP", NumberSeparator::Comma, 4), None);
+    }
+}
+
+#[cfg(test)]
+mod number_separator_tests {
+    use super::{
+        NumberSeparator, aqw_grouped_html, aqw_grouped_text, group_number_runs,
+        group_number_runs_in_html,
+    };
+
+    /// Every place a screenshot showed an ungrouped number. The field-name allow list this
+    /// replaced only reached two of them.
+    #[test]
+    fn the_readouts_players_actually_look_at_are_grouped() {
+        for (before, after) in [
+            // The gold total under the character portrait.
+            ("1217613", "1,217,613"),
+            // The experience bar, and the reputation bar, both hover readouts.
+            (
+                "Level 65 : 1453237 / 1680000 (86%)",
+                "Level 65 : 1,453,237 / 1,680,000 (86%)",
+            ),
+            (
+                "Soul Cleaver, Rank 8 : 32651/72900 (44%)",
+                "Soul Cleaver, Rank 8 : 32,651/72,900 (44%)",
+            ),
+            // Quest item counts, in the tooltip and in the preview panel.
+            ("Item - 1/20000", "Item - 1/20,000"),
+            ("Quest Item - 1/10000", "Quest Item - 1/10,000"),
+            // Inventory stack sizes.
+            ("32000", "32,000"),
+        ] {
+            assert_eq!(
+                group_number_runs(before, NumberSeparator::Comma, 4).as_deref(),
+                Some(after),
+                "{before}"
+            );
+        }
+    }
+
+    /// Quest rewards are coloured, so they arrive as HTML rather than plain text.
+    #[test]
+    fn quest_reward_html_is_grouped_without_disturbing_the_markup() {
+        assert_eq!(
+            group_number_runs_in_html(
+                "<font color=\"#FFFF00\">10000000</font> gold<br><font color=\"#9900FF\">30000</font> xp",
+                NumberSeparator::Comma,
+                4,
+            )
+            .as_deref(),
+            Some(
+                "<font color=\"#FFFF00\">10,000,000</font> gold<br><font color=\"#9900FF\">30,000</font> xp"
+            )
+        );
+    }
+
+    /// A number inside a tag is markup, not a quantity. Rewriting one would change a colour, a
+    /// font size, or the target of a chat link.
+    #[test]
+    fn numbers_inside_tags_are_left_exactly_as_written() {
+        for markup in [
+            "<font size=\"10000\">hi</font>",
+            "<a href=\"event:trade,1234567\">Player</a>",
+            "<textformat tabstops=\"[10000]\">x</textformat>",
+            "<img src=\"item12345678.png\">",
+        ] {
+            assert_eq!(
+                group_number_runs_in_html(markup, NumberSeparator::Comma, 4),
+                None,
+                "{markup}"
+            );
+        }
+    }
+
+    /// `&#12345;` is one character, not a number. Splitting it would print a literal entity.
+    #[test]
+    fn html_entities_are_left_exactly_as_written() {
+        assert_eq!(
+            group_number_runs_in_html("&#100000; and 25000", NumberSeparator::Comma, 4).as_deref(),
+            Some("&#100000; and 25,000")
+        );
+        assert_eq!(
+            group_number_runs_in_html("&amp;&nbsp;&#8203;", NumberSeparator::Comma, 4),
+            None
+        );
+    }
+
+    /// The scanner walks bytes to find digits. Everything else has to come back out as it went
+    /// in, including the multi-byte characters in item and player names.
+    #[test]
+    fn non_ascii_text_survives_the_scan() {
+        assert_eq!(
+            group_number_runs("Café Sol 25000", NumberSeparator::Comma, 4).as_deref(),
+            Some("Café Sol 25,000")
+        );
+        assert_eq!(
+            group_number_runs("☠ 1250000 ☠", NumberSeparator::Comma, 4).as_deref(),
+            Some("☠ 1,250,000 ☠")
+        );
+        assert_eq!(
+            group_number_runs("Café Sol", NumberSeparator::Comma, 4),
+            None
+        );
+    }
+
+    /// The glue rule asks whether the neighbouring character is a letter, in the full Unicode
+    /// sense rather than the ASCII one. A symbol is not a letter, so a quantity behind one still
+    /// reads as a quantity.
+    #[test]
+    fn accented_letters_glue_but_symbols_do_not() {
+        assert_eq!(
+            group_number_runs("Café25000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("€1000000", NumberSeparator::Comma, 4).as_deref(),
+            Some("€1,000,000")
+        );
+    }
+
+    /// Grouping already-grouped text has to be a no-op, because AQW reassigns the same fields
+    /// every frame and some of its own panels already carry separators.
+    #[test]
+    fn grouping_the_same_text_twice_changes_nothing() {
+        assert_eq!(
+            group_number_runs("1,250,000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("1 250 000", NumberSeparator::Space, 4),
+            None
+        );
     }
 
     #[test]
     fn the_feature_is_inert_until_it_is_switched_on() {
-        use super::{aqw_grouped_hp_text, set_hp_separator};
+        use super::{set_number_separator, set_separator_min_digits};
 
-        set_hp_separator(HpSeparator::None);
-        assert_eq!(aqw_grouped_hp_text(Some("strIntHP"), "1250000"), None);
+        set_number_separator(NumberSeparator::None);
+        assert_eq!(aqw_grouped_text("1250000"), None);
+        assert_eq!(aqw_grouped_html("<b>1250000</b>"), None);
 
-        set_hp_separator(HpSeparator::Comma);
-        assert_eq!(
-            aqw_grouped_hp_text(Some("strIntHP"), "1250000").as_deref(),
-            Some("1,250,000")
-        );
-        // Every other field in the game is left alone even while the feature is on.
-        assert_eq!(aqw_grouped_hp_text(Some("txtChat"), "1250000"), None);
-        assert_eq!(aqw_grouped_hp_text(None, "1250000"), None);
+        set_number_separator(NumberSeparator::Comma);
+        assert_eq!(aqw_grouped_text("1250000").as_deref(), Some("1,250,000"));
 
-        set_hp_separator(HpSeparator::Space);
-        assert_eq!(
-            aqw_grouped_hp_text(Some("strIntHP"), "1250000").as_deref(),
-            Some("1 250 000")
-        );
-        set_hp_separator(HpSeparator::None);
-    }
+        set_separator_min_digits(5);
+        assert_eq!(aqw_grouped_text("2750"), None);
+        set_separator_min_digits(4);
 
-    #[test]
-    fn only_the_portrait_health_field_is_rewritten() {
-        assert!(is_aqw_hp_text_field(Some("strIntHP")));
-        assert!(!is_aqw_hp_text_field(Some("strIntHPMax")));
-        assert!(!is_aqw_hp_text_field(Some("xstrIntHP")));
-        assert!(!is_aqw_hp_text_field(Some("txtChat")));
-        assert!(!is_aqw_hp_text_field(None));
+        set_number_separator(NumberSeparator::None);
     }
 }

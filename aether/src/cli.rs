@@ -208,16 +208,24 @@ pub struct Opt {
     )]
     pub no_aether_aqw_cache_texture_grid: bool,
 
-    /// Group AQW health numbers with thousands separators, as 1,250,000. On by default.
-    #[clap(long = "hp-separators", conflicts_with = "no_aether_aqw_hp_separators")]
+    /// Group AQW numbers with thousands separators, as 1,250,000. On by default.
+    #[clap(
+        long = "number-separators",
+        alias = "hp-separators",
+        conflicts_with = "no_aether_aqw_hp_separators"
+    )]
     pub aether_aqw_hp_separators: bool,
 
-    /// Show AQW health numbers exactly as the game writes them, with no separators.
-    #[clap(long = "no-hp-separators", conflicts_with = "aether_aqw_hp_separators")]
+    /// Show AQW numbers exactly as the game writes them, with no separators.
+    #[clap(
+        long = "no-number-separators",
+        alias = "no-hp-separators",
+        conflicts_with = "aether_aqw_hp_separators"
+    )]
     pub no_aether_aqw_hp_separators: bool,
 
-    /// Separate AQW health numbers with spaces rather than commas, as 1 250 000.
-    #[clap(long = "hp-separator-space")]
+    /// Separate AQW numbers with spaces rather than commas, as 1 250 000.
+    #[clap(long = "number-separator-space", alias = "hp-separator-space")]
     pub aether_aqw_hp_separator_space: bool,
 
     /// Only separate numbers from ten thousand upwards, so 2750 stays as it is.

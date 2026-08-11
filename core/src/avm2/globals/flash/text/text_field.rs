@@ -14,6 +14,75 @@ use crate::{avm2_stub_getter, avm2_stub_setter};
 use ruffle_macros::istr;
 use swf::{Color, Point};
 
+/// Group the numbers in a value on its way into a display field, or `None` to leave it alone.
+///
+/// Editable fields are excluded and that exclusion is the whole safety argument. An input field is
+/// one the game reads back: a login box, a chat entry, the quantity on a sell or trade dialog.
+/// Putting separators in one would send `1,250,000` where the game expected `1250000`, and a
+/// parse of that yields `1`. A display field is written by the game and only ever read by a
+/// player, so rewriting one can misdraw a number but cannot change what the game does with it.
+#[cfg(feature = "aether_compatibility")]
+fn aether_grouped_display_text(
+    this: EditText<'_>,
+    text: &ruffle_wstr::WStr,
+) -> Option<ruffle_wstr::WString> {
+    if this.is_editable() || !aether_worth_grouping(text) {
+        return None;
+    }
+
+    let grouped = crate::aether_compatibility::aqw_grouped_text(&text.to_utf8_lossy())?;
+    Some(ruffle_wstr::WString::from_utf8(&grouped))
+}
+
+/// Whether a value is even a candidate, decided without converting it.
+///
+/// Every text assignment in the game reaches here, and converting each one to UTF-8 just to find
+/// no long number in it would allocate a string per chat line and per damage number. The units of
+/// a `WStr` are code points, so counting digits needs no conversion.
+#[cfg(feature = "aether_compatibility")]
+fn aether_worth_grouping(text: &ruffle_wstr::WStr) -> bool {
+    use crate::aether_compatibility::NumberSeparator;
+
+    if crate::aether_compatibility::number_separator() == NumberSeparator::None {
+        return false;
+    }
+
+    let min_digits = crate::aether_compatibility::separator_min_digits() as usize;
+    let mut run = 0;
+
+    for unit in text.iter() {
+        if (b'0' as u16..=b'9' as u16).contains(&unit) {
+            run += 1;
+            if run >= min_digits {
+                return true;
+            }
+        } else {
+            run = 0;
+        }
+    }
+
+    false
+}
+
+/// The same, for a value being assigned as HTML.
+///
+/// `replaceText` and `replaceSelectedText` are deliberately not covered. Both splice at caller
+/// supplied offsets, and inserting a separator changes the length of what lands at those offsets,
+/// so any arithmetic the caller does afterwards would be off by the separators. `text`, `htmlText`
+/// and `appendText` all replace or extend the tail, and carry no offsets to invalidate.
+#[cfg(feature = "aether_compatibility")]
+fn aether_grouped_display_html(
+    this: EditText<'_>,
+    html: &ruffle_wstr::WStr,
+) -> Option<ruffle_wstr::WString> {
+    if this.is_editable() || !aether_worth_grouping(html) {
+        return None;
+    }
+
+    let grouped = crate::aether_compatibility::aqw_grouped_html(&html.to_utf8_lossy())?;
+    Some(ruffle_wstr::WString::from_utf8(&grouped))
+}
+
 pub fn text_field_allocator<'gc>(
     class: ClassObject<'gc>,
     activation: &mut Activation<'_, 'gc>,
@@ -437,6 +506,15 @@ pub fn set_html_text<'gc>(
         let html_text = args.get_string(activation, 0);
 
         this.set_is_html(true);
+
+        // Quest rewards and chat are coloured, so they reach the field as HTML. Group the numbers
+        // in the text between the tags and leave the markup itself untouched.
+        #[cfg(feature = "aether_compatibility")]
+        if let Some(grouped) = aether_grouped_display_html(this, &html_text) {
+            this.set_html_text(&grouped, activation.context);
+            return Ok(Value::Undefined);
+        }
+
         this.set_html_text(&html_text, activation.context);
     }
 
@@ -562,24 +640,14 @@ pub fn set_text<'gc>(
     {
         let text = args.get_string_non_null(activation, 0, "text")?;
 
-        // AQW writes raw health numbers straight into its portrait fields, so boss health arrives
-        // as an unbroken run of digits. Group it here, where the assignment happens, rather than
-        // anywhere the value is later measured or compared.
+        // AQW writes raw numbers straight into its display fields: health, gold, experience,
+        // reputation, quest progress and item counts all arrive as unbroken runs of digits. Group
+        // them here, where the assignment happens, rather than anywhere the value is later
+        // measured or compared.
         #[cfg(feature = "aether_compatibility")]
-        {
-            use crate::display_object::TDisplayObject as _;
-            let name = this.name().map(|name| name.to_utf8_lossy().into_owned());
-            let grouped = crate::aether_compatibility::aqw_grouped_hp_text(
-                name.as_deref(),
-                &text.to_utf8_lossy(),
-            );
-            if let Some(grouped) = grouped {
-                this.set_text(
-                    &ruffle_wstr::WString::from_utf8(&grouped),
-                    activation.context,
-                );
-                return Ok(Value::Undefined);
-            }
+        if let Some(grouped) = aether_grouped_display_text(this, &text) {
+            this.set_text(&grouped, activation.context);
+            return Ok(Value::Undefined);
         }
 
         this.set_text(&text, activation.context);
@@ -770,6 +838,19 @@ pub fn append_text<'gc>(
     {
         let new_text = args.get_string_non_null(activation, 0, "text")?;
         let existing_length = this.text_length();
+
+        // The chat log grows by `appendText`, one line at a time. Only the appended line needs
+        // grouping; whatever is already in the field was grouped when it arrived.
+        #[cfg(feature = "aether_compatibility")]
+        if let Some(grouped) = aether_grouped_display_text(this, &new_text) {
+            this.replace_text(
+                existing_length,
+                existing_length,
+                &grouped,
+                activation.context,
+            );
+            return Ok(Value::Undefined);
+        }
 
         this.replace_text(
             existing_length,
