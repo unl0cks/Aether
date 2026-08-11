@@ -216,6 +216,10 @@ pub struct Opt {
     #[clap(long = "no-hp-separators", conflicts_with = "aether_aqw_hp_separators")]
     pub no_aether_aqw_hp_separators: bool,
 
+    /// Separate AQW health numbers with spaces rather than commas, as 1 250 000.
+    #[clap(long = "hp-separator-space")]
+    pub aether_aqw_hp_separator_space: bool,
+
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long = "avm-trace", alias = "aether-avm-trace")]
     pub aether_avm_trace: bool,

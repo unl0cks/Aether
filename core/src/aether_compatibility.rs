@@ -11,7 +11,7 @@ use crate::display_object::{
 use crate::locale::get_current_date_time;
 use crate::string::AvmString;
 use crate::timer::TimerCallback;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 static TIMELINE_CHILD_REBIND_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -1702,17 +1702,52 @@ pub fn take_aqw_definition_lookup_miss_count() -> u64 {
     AQW_DEFINITION_LOOKUP_MISSES.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
 
-static HP_THOUSANDS_SEPARATORS: AtomicBool = AtomicBool::new(false);
+/// How AQW's portrait health numbers are grouped, if at all.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum HpSeparator {
+    /// Leave the number exactly as AQW wrote it.
+    None,
+    /// `1,250,000`.
+    Comma,
+    /// `1 250 000`. Some readers find a comma easy to mistake for a decimal point, and much of
+    /// the world writes decimals that way, so a space is the less ambiguous choice for them.
+    Space,
+}
+
+impl HpSeparator {
+    fn character(self) -> Option<char> {
+        match self {
+            HpSeparator::None => None,
+            HpSeparator::Comma => Some(','),
+            // A plain ASCII space, not a thin or non-breaking one. AQW's embedded fonts cannot be
+            // relied on to carry the typographically correct glyphs.
+            HpSeparator::Space => Some(' '),
+        }
+    }
+}
+
+static HP_SEPARATOR: AtomicU8 = AtomicU8::new(0);
 
 /// Group AQW's portrait health numbers for readability.
 #[inline]
-pub fn set_hp_thousands_separators_enabled(enabled: bool) {
-    HP_THOUSANDS_SEPARATORS.store(enabled, Ordering::Relaxed);
+pub fn set_hp_separator(separator: HpSeparator) {
+    HP_SEPARATOR.store(
+        match separator {
+            HpSeparator::None => 0,
+            HpSeparator::Comma => 1,
+            HpSeparator::Space => 2,
+        },
+        Ordering::Relaxed,
+    );
 }
 
 #[inline]
-pub fn hp_thousands_separators_enabled() -> bool {
-    HP_THOUSANDS_SEPARATORS.load(Ordering::Relaxed)
+pub fn hp_separator() -> HpSeparator {
+    match HP_SEPARATOR.load(Ordering::Relaxed) {
+        1 => HpSeparator::Comma,
+        2 => HpSeparator::Space,
+        _ => HpSeparator::None,
+    }
 }
 
 /// The AQW portrait TextField that receives a character's current hit points.
@@ -1730,7 +1765,8 @@ const AQW_HP_TEXT_FIELD: &str = "strIntHP";
 ///
 /// Only an unbroken run of digits is touched. Anything AQW puts in this field that is not a bare
 /// number, such as the literal `X` it writes for a dead target, is passed through unchanged.
-pub fn group_hp_digits(text: &str) -> Option<String> {
+pub fn group_hp_digits(text: &str, separator: HpSeparator) -> Option<String> {
+    let separator = separator.character()?;
     // Four digits is where grouping starts helping and where Flash's own number formatting would
     // have begun. Below that it only adds noise.
     if text.len() < 4 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
@@ -1740,7 +1776,7 @@ pub fn group_hp_digits(text: &str) -> Option<String> {
     let mut grouped = String::with_capacity(text.len() + text.len() / 3);
     for (position, digit) in text.chars().enumerate() {
         if position > 0 && (text.len() - position) % 3 == 0 {
-            grouped.push(',');
+            grouped.push(separator);
         }
         grouped.push(digit);
     }
@@ -1757,52 +1793,81 @@ pub fn is_aqw_hp_text_field(field_name: Option<&str>) -> bool {
 /// Returns `None` for every other text assignment in the game, so chat, item names, coin totals
 /// and everything else reach the field untouched.
 pub fn aqw_grouped_hp_text(field_name: Option<&str>, text: &str) -> Option<String> {
-    if !hp_thousands_separators_enabled() || !is_aqw_hp_text_field(field_name) {
+    if !is_aqw_hp_text_field(field_name) {
         return None;
     }
-    group_hp_digits(text)
+    group_hp_digits(text, hp_separator())
 }
 
 #[cfg(test)]
 mod hp_separator_tests {
-    use super::{group_hp_digits, is_aqw_hp_text_field};
+    use super::{HpSeparator, group_hp_digits, is_aqw_hp_text_field};
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
-        assert_eq!(group_hp_digits("1250000").as_deref(), Some("1,250,000"));
-        assert_eq!(group_hp_digits("999999999").as_deref(), Some("999,999,999"));
-        assert_eq!(group_hp_digits("1000").as_deref(), Some("1,000"));
-        assert_eq!(group_hp_digits("12345").as_deref(), Some("12,345"));
-        assert_eq!(group_hp_digits("123456").as_deref(), Some("123,456"));
+        assert_eq!(
+            group_hp_digits("1250000", HpSeparator::Comma).as_deref(),
+            Some("1,250,000")
+        );
+        assert_eq!(
+            group_hp_digits("999999999", HpSeparator::Comma).as_deref(),
+            Some("999,999,999")
+        );
+        assert_eq!(
+            group_hp_digits("1000", HpSeparator::Comma).as_deref(),
+            Some("1,000")
+        );
+        assert_eq!(
+            group_hp_digits("12345", HpSeparator::Comma).as_deref(),
+            Some("12,345")
+        );
+        assert_eq!(
+            group_hp_digits("123456", HpSeparator::Comma).as_deref(),
+            Some("123,456")
+        );
+    }
+
+    #[test]
+    fn spaces_group_the_same_places_as_commas() {
+        assert_eq!(
+            group_hp_digits("1250000", HpSeparator::Space).as_deref(),
+            Some("1 250 000")
+        );
+        assert_eq!(
+            group_hp_digits("12345", HpSeparator::Space).as_deref(),
+            Some("12 345")
+        );
+        // Off means untouched, whatever the number.
+        assert_eq!(group_hp_digits("1250000", HpSeparator::None), None);
     }
 
     #[test]
     fn short_numbers_are_left_alone() {
         // Grouping these would add noise without making the magnitude any clearer.
-        assert_eq!(group_hp_digits("0"), None);
-        assert_eq!(group_hp_digits("42"), None);
-        assert_eq!(group_hp_digits("999"), None);
+        assert_eq!(group_hp_digits("0", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("42", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("999", HpSeparator::Comma), None);
     }
 
     #[test]
     fn anything_that_is_not_a_bare_number_is_untouched() {
         // AQW writes a literal X into this field for a dead target.
-        assert_eq!(group_hp_digits("X"), None);
-        assert_eq!(group_hp_digits("1,250,000"), None);
-        assert_eq!(group_hp_digits("12000/45000"), None);
-        assert_eq!(group_hp_digits("-5000"), None);
-        assert_eq!(group_hp_digits(""), None);
-        assert_eq!(group_hp_digits("1234 HP"), None);
+        assert_eq!(group_hp_digits("X", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("1,250,000", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("12000/45000", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("-5000", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("", HpSeparator::Comma), None);
+        assert_eq!(group_hp_digits("1234 HP", HpSeparator::Comma), None);
     }
 
     #[test]
     fn the_feature_is_inert_until_it_is_switched_on() {
-        use super::{aqw_grouped_hp_text, set_hp_thousands_separators_enabled};
+        use super::{aqw_grouped_hp_text, set_hp_separator};
 
-        set_hp_thousands_separators_enabled(false);
+        set_hp_separator(HpSeparator::None);
         assert_eq!(aqw_grouped_hp_text(Some("strIntHP"), "1250000"), None);
 
-        set_hp_thousands_separators_enabled(true);
+        set_hp_separator(HpSeparator::Comma);
         assert_eq!(
             aqw_grouped_hp_text(Some("strIntHP"), "1250000").as_deref(),
             Some("1,250,000")
@@ -1810,7 +1875,13 @@ mod hp_separator_tests {
         // Every other field in the game is left alone even while the feature is on.
         assert_eq!(aqw_grouped_hp_text(Some("txtChat"), "1250000"), None);
         assert_eq!(aqw_grouped_hp_text(None, "1250000"), None);
-        set_hp_thousands_separators_enabled(false);
+
+        set_hp_separator(HpSeparator::Space);
+        assert_eq!(
+            aqw_grouped_hp_text(Some("strIntHP"), "1250000").as_deref(),
+            Some("1 250 000")
+        );
+        set_hp_separator(HpSeparator::None);
     }
 
     #[test]
