@@ -11,7 +11,11 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-wgpu = { workspace = true, features = ["naga-ir"] }
+# `counters` is always on, not just in diagnostic builds. It is a handful of atomics on
+# resource creation, and it is the only way a crash report from a normal release build can
+# say how many textures, buffers and bind groups were live when the device died. Three AMD
+# fixes shipped without that number because it was gated behind the metrics feature.
+wgpu = { workspace = true, features = ["naga-ir", "counters"] }
 tracing = { workspace = true }
 ruffle_render = { path = "..", features = ["tessellator", "wgpu"] }
 bytemuck = { workspace = true, features = ["derive"] }

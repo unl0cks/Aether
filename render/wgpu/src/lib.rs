@@ -293,3 +293,98 @@ impl Texture {
         })
     }
 }
+
+/// How many GPU objects were alive, for a crash report.
+///
+/// Deliberately not behind the metrics feature. The AMD device-loss crashes are reported against
+/// normal release builds, and every report so far has arrived with no resource counts at all, so
+/// three separate fixes shipped without anyone being able to see whether they moved the numbers on
+/// the affected machine.
+///
+/// `memory_allocations` is the one to read first: it counts real driver allocations, and Vulkan
+/// caps those per device. A driver can answer `VK_ERROR_OUT_OF_DEVICE_MEMORY` on that limit while
+/// most of the card's memory is still free, which is exactly the shape these crashes have.
+pub fn device_resource_report(device: &wgpu::Device) -> String {
+    format_hal_counters(&device.get_internal_counters().hal)
+}
+
+fn format_hal_counters(hal: &wgpu::HalCounters) -> String {
+    let counts = [
+        ("textures", &hal.textures),
+        ("texture views", &hal.texture_views),
+        ("buffers", &hal.buffers),
+        ("bind groups", &hal.bind_groups),
+        ("bind group layouts", &hal.bind_group_layouts),
+        ("samplers", &hal.samplers),
+        ("render pipelines", &hal.render_pipelines),
+        ("compute pipelines", &hal.compute_pipelines),
+        ("pipeline layouts", &hal.pipeline_layouts),
+        ("shader modules", &hal.shader_modules),
+        ("command encoders", &hal.command_encoders),
+        ("query sets", &hal.query_sets),
+        ("fences", &hal.fences),
+        ("memory allocations", &hal.memory_allocations),
+    ];
+
+    let mut report = String::from(
+        "live GPU objects:
+",
+    );
+    for (name, counter) in counts {
+        report.push_str(&format!(
+            "  {name:<20} {}
+",
+            counter.read()
+        ));
+    }
+
+    report.push_str(&format!(
+        "
+GPU memory attributed by wgpu-hal:
+  {:<20} {:.1} MB
+  {:<20} {:.1} MB
+",
+        "textures",
+        hal.texture_memory.read() as f64 / 1_048_576.0,
+        "buffers",
+        hal.buffer_memory.read() as f64 / 1_048_576.0,
+    ));
+    report
+}
+
+#[cfg(test)]
+mod device_resource_report_tests {
+    use super::format_hal_counters;
+
+    /// Pins what a crash reader depends on. A `Device` cannot be built without a GPU, so this
+    /// drives the formatter on the same type wgpu hands back.
+    #[test]
+    fn the_report_names_every_resource_class_and_its_memory() {
+        let mut hal = wgpu::HalCounters::default();
+        hal.textures.add(28_504);
+        hal.bind_groups.add(29_240);
+        hal.buffers.add(21_410);
+        hal.memory_allocations.add(4_096);
+        hal.texture_memory.add(7 * 1_048_576);
+
+        let report = format_hal_counters(&hal);
+
+        // The four numbers the AMD investigation actually turns on.
+        assert!(report.contains("textures             28504"), "{report}");
+        assert!(report.contains("bind groups          29240"), "{report}");
+        assert!(report.contains("buffers              21410"), "{report}");
+        assert!(
+            report.contains("memory allocations   4096"),
+            "driver allocation count is the suspected cap: {report}"
+        );
+        assert!(report.contains("7.0 MB"), "{report}");
+    }
+
+    #[test]
+    fn a_healthy_device_reports_zeros_rather_than_nothing() {
+        let report = format_hal_counters(&wgpu::HalCounters::default());
+
+        assert!(report.contains("textures             0"), "{report}");
+        assert!(report.contains("memory allocations   0"), "{report}");
+    }
+}

@@ -381,13 +381,18 @@ impl GuiController {
                     Some(fault) => format!("{}: {}", fault.kind.summary(), fault.detail),
                     None => "the graphics device stopped responding".to_string(),
                 };
+                // Always reported, metrics build or not. Device loss is the failure that ends real
+                // sessions, it is reported from ordinary release builds, and without these counts
+                // a report cannot say whether a fix changed anything on the affected machine.
+                let mut sections = vec![crate::crash_report::Section::new(
+                    "GPU resources at device loss",
+                    ruffle_render_wgpu::device_resource_report(&self.descriptors.device),
+                )];
                 #[cfg(feature = "metrics")]
-                let sections = vec![crate::crash_report::Section::new(
+                sections.push(crate::crash_report::Section::new(
                     "Renderer texture census",
                     ruffle_render_wgpu::aether_metrics::texture_census_report(24).join("\n"),
-                )];
-                #[cfg(not(feature = "metrics"))]
-                let sections: Vec<crate::crash_report::Section> = Vec::new();
+                ));
 
                 if let Some(path) =
                     crate::crash_report::write("graphics device lost", &detail, &sections)
