@@ -562,6 +562,26 @@ pub fn set_text<'gc>(
     {
         let text = args.get_string_non_null(activation, 0, "text")?;
 
+        // AQW writes raw health numbers straight into its portrait fields, so boss health arrives
+        // as an unbroken run of digits. Group it here, where the assignment happens, rather than
+        // anywhere the value is later measured or compared.
+        #[cfg(feature = "aether_compatibility")]
+        {
+            use crate::display_object::TDisplayObject as _;
+            let name = this.name().map(|name| name.to_utf8_lossy().into_owned());
+            let grouped = crate::aether_compatibility::aqw_grouped_hp_text(
+                name.as_deref(),
+                &text.to_utf8_lossy(),
+            );
+            if let Some(grouped) = grouped {
+                this.set_text(
+                    &ruffle_wstr::WString::from_utf8(&grouped),
+                    activation.context,
+                );
+                return Ok(Value::Undefined);
+            }
+        }
+
         this.set_text(&text, activation.context);
     }
 

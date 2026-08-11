@@ -208,6 +208,14 @@ pub struct Opt {
     )]
     pub no_aether_aqw_cache_texture_grid: bool,
 
+    /// Group AQW health numbers with thousands separators, as 1,250,000. On by default.
+    #[clap(long = "hp-separators", conflicts_with = "no_aether_aqw_hp_separators")]
+    pub aether_aqw_hp_separators: bool,
+
+    /// Show AQW health numbers exactly as the game writes them, with no separators.
+    #[clap(long = "no-hp-separators", conflicts_with = "aether_aqw_hp_separators")]
+    pub no_aether_aqw_hp_separators: bool,
+
     /// Enable raw ActionScript trace output. This may contain account or session data.
     #[clap(long = "avm-trace", alias = "aether-avm-trace")]
     pub aether_avm_trace: bool,

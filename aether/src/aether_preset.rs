@@ -76,6 +76,10 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // contents; it never reuses one across a bounds change. Corrupting the same things the avatar
     // cache does proved the oversizing was to blame rather than the reuse, and that is where the
     // filter UV bug turned out to be.
+    // Requested by a dyslexic player: boss health runs to eight and nine digits and changes
+    // several times a second, and without separators there is nothing to anchor where the
+    // millions place sits. Display only, so it is on unless asked otherwise.
+    opt.aether_aqw_hp_separators = !opt.no_aether_aqw_hp_separators;
     opt.aether_aqw_cache_texture_grid = !opt.no_aether_aqw_cache_texture_grid;
     opt.aether_aqw_idle_gpu_upload_eviction = !opt.no_aether_aqw_idle_gpu_upload_eviction;
 
@@ -360,6 +364,16 @@ mod tests {
     #[test]
     fn crash_reports_can_be_disabled() {
         assert!(!parse_and_apply(&["aether", "--no-crash-report"]).aether_crash_report);
+    }
+
+    #[test]
+    fn aqw_preset_groups_hp_numbers_by_default() {
+        assert!(parse_and_apply(&["aether"]).aether_aqw_hp_separators);
+    }
+
+    #[test]
+    fn aqw_preset_allows_hp_separator_opt_out() {
+        assert!(!parse_and_apply(&["aether", "--no-hp-separators"]).aether_aqw_hp_separators);
     }
 
     #[test]

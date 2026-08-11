@@ -1701,3 +1701,124 @@ pub(crate) fn record_definition_lookup_miss() {
 pub fn take_aqw_definition_lookup_miss_count() -> u64 {
     AQW_DEFINITION_LOOKUP_MISSES.swap(0, std::sync::atomic::Ordering::Relaxed)
 }
+
+static HP_THOUSANDS_SEPARATORS: AtomicBool = AtomicBool::new(false);
+
+/// Group AQW's portrait health numbers for readability.
+#[inline]
+pub fn set_hp_thousands_separators_enabled(enabled: bool) {
+    HP_THOUSANDS_SEPARATORS.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn hp_thousands_separators_enabled() -> bool {
+    HP_THOUSANDS_SEPARATORS.load(Ordering::Relaxed)
+}
+
+/// The AQW portrait TextField that receives a character's current hit points.
+///
+/// `World/updatePortrait` assigns it directly: `strIntHP.text = String(intHP)`, with no separators
+/// and no formatting of any kind. The same portrait code runs for the local player, other players
+/// and monsters, so matching this one field name covers every health readout in the game.
+const AQW_HP_TEXT_FIELD: &str = "strIntHP";
+
+/// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
+///
+/// Requested by a dyslexic player who could read the digits but not the magnitude: with boss health
+/// in the millions there is nothing to anchor where the millions place sits, and the number changes
+/// several times a second during a fight.
+///
+/// Only an unbroken run of digits is touched. Anything AQW puts in this field that is not a bare
+/// number, such as the literal `X` it writes for a dead target, is passed through unchanged.
+pub fn group_hp_digits(text: &str) -> Option<String> {
+    // Four digits is where grouping starts helping and where Flash's own number formatting would
+    // have begun. Below that it only adds noise.
+    if text.len() < 4 || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+
+    let mut grouped = String::with_capacity(text.len() + text.len() / 3);
+    for (position, digit) in text.chars().enumerate() {
+        if position > 0 && (text.len() - position) % 3 == 0 {
+            grouped.push(',');
+        }
+        grouped.push(digit);
+    }
+    Some(grouped)
+}
+
+/// Whether this text assignment is AQW writing a health value into a portrait.
+pub fn is_aqw_hp_text_field(field_name: Option<&str>) -> bool {
+    field_name == Some(AQW_HP_TEXT_FIELD)
+}
+
+/// Rewrite an AQW portrait health value with thousands separators, if that is what this is.
+///
+/// Returns `None` for every other text assignment in the game, so chat, item names, coin totals
+/// and everything else reach the field untouched.
+pub fn aqw_grouped_hp_text(field_name: Option<&str>, text: &str) -> Option<String> {
+    if !hp_thousands_separators_enabled() || !is_aqw_hp_text_field(field_name) {
+        return None;
+    }
+    group_hp_digits(text)
+}
+
+#[cfg(test)]
+mod hp_separator_tests {
+    use super::{group_hp_digits, is_aqw_hp_text_field};
+
+    #[test]
+    fn boss_health_gets_separators_at_every_thousand() {
+        assert_eq!(group_hp_digits("1250000").as_deref(), Some("1,250,000"));
+        assert_eq!(group_hp_digits("999999999").as_deref(), Some("999,999,999"));
+        assert_eq!(group_hp_digits("1000").as_deref(), Some("1,000"));
+        assert_eq!(group_hp_digits("12345").as_deref(), Some("12,345"));
+        assert_eq!(group_hp_digits("123456").as_deref(), Some("123,456"));
+    }
+
+    #[test]
+    fn short_numbers_are_left_alone() {
+        // Grouping these would add noise without making the magnitude any clearer.
+        assert_eq!(group_hp_digits("0"), None);
+        assert_eq!(group_hp_digits("42"), None);
+        assert_eq!(group_hp_digits("999"), None);
+    }
+
+    #[test]
+    fn anything_that_is_not_a_bare_number_is_untouched() {
+        // AQW writes a literal X into this field for a dead target.
+        assert_eq!(group_hp_digits("X"), None);
+        assert_eq!(group_hp_digits("1,250,000"), None);
+        assert_eq!(group_hp_digits("12000/45000"), None);
+        assert_eq!(group_hp_digits("-5000"), None);
+        assert_eq!(group_hp_digits(""), None);
+        assert_eq!(group_hp_digits("1234 HP"), None);
+    }
+
+    #[test]
+    fn the_feature_is_inert_until_it_is_switched_on() {
+        use super::{aqw_grouped_hp_text, set_hp_thousands_separators_enabled};
+
+        set_hp_thousands_separators_enabled(false);
+        assert_eq!(aqw_grouped_hp_text(Some("strIntHP"), "1250000"), None);
+
+        set_hp_thousands_separators_enabled(true);
+        assert_eq!(
+            aqw_grouped_hp_text(Some("strIntHP"), "1250000").as_deref(),
+            Some("1,250,000")
+        );
+        // Every other field in the game is left alone even while the feature is on.
+        assert_eq!(aqw_grouped_hp_text(Some("txtChat"), "1250000"), None);
+        assert_eq!(aqw_grouped_hp_text(None, "1250000"), None);
+        set_hp_thousands_separators_enabled(false);
+    }
+
+    #[test]
+    fn only_the_portrait_health_field_is_rewritten() {
+        assert!(is_aqw_hp_text_field(Some("strIntHP")));
+        assert!(!is_aqw_hp_text_field(Some("strIntHPMax")));
+        assert!(!is_aqw_hp_text_field(Some("xstrIntHP")));
+        assert!(!is_aqw_hp_text_field(Some("txtChat")));
+        assert!(!is_aqw_hp_text_field(None));
+    }
+}
