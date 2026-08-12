@@ -93,7 +93,8 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
             DrawCommand::RenderShape {
                 shape,
                 transform_buffer,
-            } => self.render_shape(shape, *transform_buffer),
+                blend_mode,
+            } => self.render_shape(shape, *transform_buffer, *blend_mode),
             DrawCommand::DrawRect { transform_buffer } => self.draw_rect(*transform_buffer),
             DrawCommand::DrawLine { transform_buffer } => {
                 self.draw_lines::<false>(*transform_buffer)
@@ -114,13 +115,13 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         }
     }
 
-    pub fn prep_color(&mut self) {
+    pub fn prep_color(&mut self, blend_mode: TrivialBlend) {
         if self.needs_stencil {
             self.render_pass
-                .set_pipeline(self.pipelines.color.pipeline_for(self.mask_state));
+                .set_pipeline(self.pipelines.color[blend_mode].pipeline_for(self.mask_state));
         } else {
             self.render_pass
-                .set_pipeline(self.pipelines.color.stencilless_pipeline());
+                .set_pipeline(self.pipelines.color[blend_mode].stencilless_pipeline());
         }
     }
 
@@ -139,13 +140,14 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         bind_group: &'pass wgpu::BindGroup,
         texture_transforms_offset: wgpu::DynamicOffset,
         gradient_offset: wgpu::DynamicOffset,
+        blend_mode: TrivialBlend,
     ) {
         if self.needs_stencil {
             self.render_pass
-                .set_pipeline(self.pipelines.gradients.pipeline_for(self.mask_state));
+                .set_pipeline(self.pipelines.gradients[blend_mode].pipeline_for(self.mask_state));
         } else {
             self.render_pass
-                .set_pipeline(self.pipelines.gradients.stencilless_pipeline());
+                .set_pipeline(self.pipelines.gradients[blend_mode].stencilless_pipeline());
         }
 
         self.render_pass.set_bind_group(
@@ -278,6 +280,7 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         &mut self,
         shape: &'frame ShapeHandle,
         transform_buffer: wgpu::DynamicOffset,
+        blend_mode: TrivialBlend,
     ) {
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.push_debug_group("render_shape");
@@ -299,17 +302,22 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
 
             match &draw.draw_type {
                 DrawType::Color => {
-                    self.prep_color();
+                    self.prep_color(blend_mode);
                 }
                 DrawType::Gradient {
                     bind_group,
                     texture_transforms_offset,
                     gradient_offset,
                 } => {
-                    self.prep_gradient(bind_group, *texture_transforms_offset, *gradient_offset);
+                    self.prep_gradient(
+                        bind_group,
+                        *texture_transforms_offset,
+                        *gradient_offset,
+                        blend_mode,
+                    );
                 }
                 DrawType::Bitmap { binds, .. } => {
-                    self.prep_bitmap(&binds.bind_group, TrivialBlend::Normal, false);
+                    self.prep_bitmap(&binds.bind_group, blend_mode, false);
                 }
             }
             self.render_pass.set_bind_group(
@@ -363,7 +371,9 @@ impl<'pass, 'frame: 'pass, 'global: 'frame> CommandRenderer<'pass, 'frame, 'glob
         if cfg!(feature = "render_debug_labels") {
             self.render_pass.push_debug_group("draw_rect");
         }
-        self.prep_color();
+        // A rectangle is only ever drawn on its own account, never as the draw a blend collapsed
+        // into, so it stays at Normal.
+        self.prep_color(TrivialBlend::Normal);
 
         self.render_pass.set_bind_group(
             1,
@@ -494,6 +504,7 @@ pub enum DrawCommand {
     RenderShape {
         shape: ShapeHandle,
         transform_buffer: wgpu::DynamicOffset,
+        blend_mode: TrivialBlend,
     },
     DrawRect {
         transform_buffer: wgpu::DynamicOffset,
@@ -661,6 +672,19 @@ impl<'a> WgpuCommandHandler<'a> {
             color_transform,
             [1.0, 1.0],
             command_builder,
+        );
+    }
+
+    /// Queue a shape draw carrying `blend_mode` on the pipelines that draw it.
+    fn draw_shape(&mut self, shape: ShapeHandle, transform: Transform, blend_mode: TrivialBlend) {
+        self.add_to_current(
+            transform.matrix,
+            transform.color_transform,
+            |transform_buffer| DrawCommand::RenderShape {
+                shape,
+                transform_buffer,
+                blend_mode,
+            },
         );
     }
 
@@ -888,6 +912,26 @@ fn sole_bitmap_draw(commands: &CommandList) -> Option<&Command> {
     }
 }
 
+/// The single shape draw a command list consists of, if that is all it is and if that shape is a
+/// single mesh draw.
+///
+/// The second half is not a detail. One `RenderShape` can be several fills, and a blend applied to
+/// each of them separately is not the blend applied to the group: where two fills overlap, drawing
+/// both with Add adds twice, while the long way round composes them in the target first and adds
+/// once. So this only answers for a mesh with exactly one drawable piece, which is what a weapon
+/// highlight or a glow layer is.
+fn sole_shape_draw(commands: &CommandList) -> Option<&Command> {
+    let [only @ Command::RenderShape { shape, .. }] = &commands.commands[..] else {
+        return None;
+    };
+    let drawable = as_mesh(shape)
+        .draws
+        .iter()
+        .filter(|draw| draw.num_indices > 0)
+        .count();
+    (drawable == 1).then_some(only)
+}
+
 /// Whether a blend around a single draw can be replaced by that draw carrying the blend itself.
 ///
 /// Only the trivial blends, and that is the whole of the argument. A trivial blend is a blend state
@@ -971,6 +1015,14 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 *source_size,
                 trivial,
             );
+            return;
+        }
+
+        if let BlendType::Trivial(trivial) = blend_type
+            && blend_can_be_carried_by_its_draw(&blend_type)
+            && let Some(Command::RenderShape { shape, transform }) = sole_shape_draw(&commands)
+        {
+            self.draw_shape(shape.clone(), transform.clone(), trivial);
             return;
         }
 
@@ -1132,14 +1184,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
-        self.add_to_current(
-            transform.matrix,
-            transform.color_transform,
-            |transform_buffer| DrawCommand::RenderShape {
-                shape,
-                transform_buffer,
-            },
-        );
+        self.draw_shape(shape, transform, TrivialBlend::Normal);
     }
 
     fn draw_rect(&mut self, color: Color, matrix: Matrix) {

@@ -44,6 +44,8 @@ fn main() {
     // What AQW actually uses. VoidKnightStar.swf carries no filters at all: the glow on a weapon
     // is blendMode 13, Overlay, which is a complex blend and takes the long way through a target.
     let overlay = rest.iter().any(|arg| arg == "overlay");
+    // No filter, so the square stays a shape draw instead of being cached into a bitmap.
+    let noglow = rest.iter().any(|arg| arg == "noglow");
 
     let square = Rectangle {
         x_min: Twips::ZERO,
@@ -141,7 +143,7 @@ fn main() {
         name: None,
         clip_depth: None,
         class_name: None,
-        filters: (!nested).then(|| glow.clone()),
+        filters: (!nested && !noglow).then(|| glow.clone()),
         background_color: None,
         blend_mode: if overlay {
             Some(BlendMode::Overlay.into())

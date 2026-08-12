@@ -32,7 +32,11 @@ pub struct ShapePipeline {
 
 #[derive(Debug)]
 pub struct Pipelines {
-    pub color: ShapePipeline,
+    /// One per trivial blend, so a shape can carry a blend the way a bitmap can.
+    ///
+    /// Lines are deliberately left single. A stroke is never the sole draw of a shape that a
+    /// blend was wrapped around, so a variant for it would be pipelines built and never bound.
+    pub color: EnumMap<TrivialBlend, ShapePipeline>,
     pub lines: ShapePipeline,
     /// Renders a bitmap without any blending, and does
     /// not write to the alpha channel. This is used for
@@ -44,7 +48,7 @@ pub struct Pipelines {
     /// or use it in any way.
     pub bitmap_opaque_dummy_stencil: wgpu::RenderPipeline,
     pub bitmap: EnumMap<TrivialBlend, ShapePipeline>,
-    pub gradients: ShapePipeline,
+    pub gradients: EnumMap<TrivialBlend, ShapePipeline>,
     pub complex_blends: EnumMap<ComplexBlend, ShapePipeline>,
     pub alpha_mask: ShapePipeline,
 }
@@ -82,18 +86,20 @@ impl Pipelines {
     ) -> Self {
         let colort_bindings = vec![&bind_layouts.globals, &bind_layouts.transforms];
 
-        let color_pipelines = create_shape_pipeline(
-            "Color",
-            device,
-            format,
-            &shaders.color_shader,
-            msaa_sample_count,
-            &VERTEX_BUFFERS_DESCRIPTION_COLOR,
-            &colort_bindings,
-            BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
-            PrimitiveTopology::TriangleList,
-        );
+        let color_pipelines = EnumMap::from_fn(|blend: TrivialBlend| {
+            create_shape_pipeline(
+                &format!("Color ({blend:?})"),
+                device,
+                format,
+                &shaders.color_shader,
+                msaa_sample_count,
+                &VERTEX_BUFFERS_DESCRIPTION_COLOR,
+                &colort_bindings,
+                blend.blend_state(),
+                &[],
+                PrimitiveTopology::TriangleList,
+            )
+        });
 
         let lines_pipelines = create_shape_pipeline(
             "Lines",
@@ -114,18 +120,20 @@ impl Pipelines {
             &bind_layouts.gradient,
         ];
 
-        let gradient_pipeline = create_shape_pipeline(
-            "Gradient",
-            device,
-            format,
-            &shaders.gradient_shader,
-            msaa_sample_count,
-            &VERTEX_BUFFERS_DESCRIPTION_POS,
-            &gradient_bindings,
-            BlendState::PREMULTIPLIED_ALPHA_BLENDING,
-            &[],
-            PrimitiveTopology::TriangleList,
-        );
+        let gradient_pipeline = EnumMap::from_fn(|blend: TrivialBlend| {
+            create_shape_pipeline(
+                &format!("Gradient ({blend:?})"),
+                device,
+                format,
+                &shaders.gradient_shader,
+                msaa_sample_count,
+                &VERTEX_BUFFERS_DESCRIPTION_POS,
+                &gradient_bindings,
+                blend.blend_state(),
+                &[],
+                PrimitiveTopology::TriangleList,
+            )
+        });
 
         let complex_blend_bindings = vec![
             &bind_layouts.globals,
