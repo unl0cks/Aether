@@ -99,6 +99,15 @@ use super::dialogs::export_bundle_dialog::ExportBundleDialogConfiguration;
 use super::{DialogDescriptor, FilePicker};
 
 /// Integration layer connecting wgpu+winit to egui.
+/// Whether a size the window reported is worth rebuilding the swapchain for.
+///
+/// A zero dimension means the window was minimised, and configuring a swapchain to it is an error.
+/// A size we are already at is what a window move reports on Windows, and rebuilding for it is the
+/// most expensive way to do nothing.
+fn resize_is_worth_applying(current: PhysicalSize<u32>, reported: PhysicalSize<u32>) -> bool {
+    reported.width > 0 && reported.height > 0 && reported != current
+}
+
 pub struct GuiController {
     descriptors: Arc<Descriptors>,
     egui_winit: egui_winit::State,
@@ -113,6 +122,14 @@ pub struct GuiController {
     // Note that `window.get_inner_size` can change at any point on x11, even between two lines of code.
     // Use this instead.
     size: PhysicalSize<u32>,
+    /// The most recent size the window has reported, if it has not been applied yet.
+    ///
+    /// Winit reports one of these per frame for the whole of a resize drag, and on Windows
+    /// reports them during a plain window move as well. Reconfiguring the swapchain for each
+    /// one is both wasted work and, at the rate a drag produces them, enough to lose the
+    /// device outright: a 3080 faulted after seven seconds of it. So the reports are
+    /// collapsed here and the last one is applied once, on the next frame that renders.
+    pending_size: Option<PhysicalSize<u32>>,
     /// If this is set, we should not render the main menu.
     no_gui: bool,
     theme_controller: ThemeController,
@@ -264,6 +281,7 @@ impl GuiController {
             surface_format,
             movie_view_renderer,
             size,
+            pending_size: None,
             no_gui,
             theme_controller,
             consecutive_surface_failures: 0,
@@ -290,10 +308,25 @@ impl GuiController {
     }
 
     pub fn resize(&mut self, size: PhysicalSize<u32>) {
-        if size.width > 0 && size.height > 0 {
+        if resize_is_worth_applying(self.size, size) {
             self.size = size;
             self.reconfigure_surface();
         }
+    }
+
+    /// Apply the last size the window reported, and return it if anything changed.
+    ///
+    /// Called once per rendered frame rather than once per event, so a drag costs one swapchain
+    /// reconfiguration per frame instead of one per report. A report for the size already in use
+    /// costs nothing at all, which is the case a window move produces.
+    pub fn apply_pending_resize(&mut self) -> Option<PhysicalSize<u32>> {
+        let size = self.pending_size.take()?;
+        if !resize_is_worth_applying(self.size, size) {
+            return None;
+        }
+        self.size = size;
+        self.reconfigure_surface();
+        Some(size)
     }
 
     pub fn reconfigure_surface(&self) {
@@ -323,7 +356,7 @@ impl GuiController {
     #[must_use]
     pub fn handle_event(&mut self, event: &WindowEvent) -> bool {
         if let WindowEvent::Resized(size) = &event {
-            self.resize(*size);
+            self.pending_size = Some(*size);
         }
 
         if let WindowEvent::ThemeChanged(theme) = &event {
@@ -944,8 +977,8 @@ fn mmap_system_font(path: &Path) -> anyhow::Result<memmap2::Mmap> {
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_CONSECUTIVE_SURFACE_FAILURES, SurfaceErrorHandling, SurfaceFailureCause,
-        surface_error_handling,
+        MAX_CONSECUTIVE_SURFACE_FAILURES, PhysicalSize, SurfaceErrorHandling, SurfaceFailureCause,
+        resize_is_worth_applying, surface_error_handling,
     };
     use wgpu::SurfaceError;
 
@@ -963,6 +996,30 @@ mod tests {
             surface_error_handling(&SurfaceError::Timeout, 0, false),
             SurfaceErrorHandling::SkipFrame
         );
+    }
+
+    /// The case that lost a graphics device. Dragging a window by the title bar reports its
+    /// unchanged size once per frame, and each report was reconfiguring the swapchain.
+    #[test]
+    fn a_report_for_the_size_we_already_have_is_not_worth_applying() {
+        let current = PhysicalSize::new(1280, 720);
+        assert!(!resize_is_worth_applying(current, current));
+    }
+
+    #[test]
+    fn a_real_resize_is_worth_applying() {
+        let current = PhysicalSize::new(1280, 720);
+        assert!(resize_is_worth_applying(current, PhysicalSize::new(1281, 720)));
+        assert!(resize_is_worth_applying(current, PhysicalSize::new(1280, 721)));
+    }
+
+    /// Minimising reports a zero dimension, and a swapchain cannot be configured to one.
+    #[test]
+    fn a_minimised_window_is_not_worth_applying() {
+        let current = PhysicalSize::new(1280, 720);
+        assert!(!resize_is_worth_applying(current, PhysicalSize::new(0, 720)));
+        assert!(!resize_is_worth_applying(current, PhysicalSize::new(1280, 0)));
+        assert!(!resize_is_worth_applying(current, PhysicalSize::new(0, 0)));
     }
 
     #[test]

@@ -30,9 +30,9 @@ Moving or resizing the window made everything slow, and staying at the new size 
 
 Windows reports a resize once per frame for the whole time a window is being dragged, and reports one for a plain move as well, where nothing has changed at all. Every one of those emptied both texture caches and rebuilt every render target. So a two second drag threw away and rebuilt the entire cache a hundred times, and a graphics driver cannot reclaim a texture until the card has finished with the frame that used it. Asked faster than the card retires them, the ones waiting to be freed are the memory. A 10 GB card reached 44.2 GB that way while the renderer had only asked for 14.2 GB, and died on the next large allocation, which is why maximising the window was often the moment it went.
 
-A resize that changes nothing is now ignored, and a real one keeps the caches. Nothing in them depends on how big the window is: a texture is keyed by its own size, and the ones that no longer fit the new viewport expire on their own a couple of seconds later.
+Three things changed. A resize is now applied once per drawn frame rather than once per report, so a drag costs one rebuild a frame instead of a hundred a second. A report for the size already in use is dropped entirely, which is every report a window move produces. And a real resize now keeps both caches, because nothing in them depends on how big the window is: a texture is keyed by its own size, and the ones that no longer suit the new viewport expire on their own a couple of seconds later.
 
-Thanks to Laaiti for finding it. The client had been crashing without a pattern, and the pattern was the window.
+Thanks to Laaiti for finding it, and for going back and breaking it again twice after the first fix. The client had been crashing without a pattern, and the pattern was the window.
 
 The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
 

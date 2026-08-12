@@ -53,6 +53,8 @@ struct MainWindow {
 impl MainWindow {
     pub fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         if matches!(&event, WindowEvent::RedrawRequested) {
+            self.apply_pending_resize();
+
             let rendered_mouse_move = self.flush_render_mouse_move(Instant::now());
 
             // Don't render when minimized to avoid potential swap chain errors in `wgpu`.
@@ -163,14 +165,10 @@ impl MainWindow {
                 // TODO: Change this when winit adds a `Window::minimized` or `WindowEvent::Minimize`.
                 self.minimized = size.width == 0 && size.height == 0;
 
-                if let Some(mut player) = self.player.get() {
-                    let viewport_scale_factor = self.gui.window().scale_factor();
-                    player.set_viewport_dimensions(ViewportDimensions {
-                        width: size.width,
-                        height: size.height.saturating_sub(self.gui.height_offset() as u32),
-                        scale_factor: viewport_scale_factor,
-                    });
-                }
+                // The size is not applied here. `GuiController` has recorded it, and the next frame
+                // that renders applies whichever report was last. A drag delivers one of these per
+                // frame and a window move delivers them with nothing changed, and rebuilding the
+                // swapchain and every render target for each was enough to lose the graphics device.
                 self.gui.window().request_redraw();
                 if matches!(self.loaded, LoadingState::WaitingForResize) {
                     self.loaded = LoadingState::Loaded;
@@ -389,6 +387,27 @@ impl MainWindow {
         if request_redraw {
             self.check_redraw();
         }
+    }
+
+    /// Hand the renderer the last size the window reported, at most once per frame.
+    ///
+    /// Both halves of a resize are expensive and neither is safe to do at the rate winit reports
+    /// them: the swapchain is reconfigured, and every render target is rebuilt. Collapsing them to
+    /// one per frame is what makes a drag survivable, and a report for a size already in use is
+    /// dropped entirely, which is what a window move produces.
+    fn apply_pending_resize(&mut self) {
+        let Some(size) = self.gui.apply_pending_resize() else {
+            return;
+        };
+        let Some(mut player) = self.player.get() else {
+            return;
+        };
+        let viewport_scale_factor = self.gui.window().scale_factor();
+        player.set_viewport_dimensions(ViewportDimensions {
+            width: size.width,
+            height: size.height.saturating_sub(self.gui.height_offset() as u32),
+            scale_factor: viewport_scale_factor,
+        });
     }
 
     fn flush_pending_mouse_move(&mut self, now: Instant, request_redraw: bool) {
