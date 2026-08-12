@@ -20,6 +20,11 @@ So the outer bloom is red and ramps to orange at the blade, which is what the ar
 other clients show. The whole ramp is carried now, up to fifteen stops, and a plain glow is simply
 the case with no ramp at all -- it renders exactly as it did.
 
+A glow still covers the same number of screen pixels however large or small the thing wearing it is
+drawn. Making it shrink with the object was tried in between and was wrong: on an avatar drawn at a
+third of its authored size a 17 pixel blur becomes six, and the glow all but disappears. What looked
+like a glow fading out on a small character was this flat colour, not its size.
+
 ## Updates that could not be downloaded
 
 Two players were offered an update and then told it could not be downloaded. GitHub serves a release
@@ -50,19 +55,6 @@ they are drawn at.
 
 Weapons cost slightly more to draw than they did, because a glow that is allowed to exist takes up
 room that was previously not allocated at all.
-
-## A glow did not shrink with the weapon wearing it
-
-A blur was measured in screen pixels rather than in the object's own, so the kernel that keeps a
-full-size weapon's glow bright spread a quarter-size one's thin. The glow did not shrink with the
-weapon -- it diluted.
-
-Measured on the real weapon at half and quarter size, as a fraction of its full-size width: 0.534 to
-0.511, and 0.301 to 0.262, against 0.50 and 0.25. Filters now scale by the whole transform down to
-the object, taken as the length of its basis vectors rather than as two of its four numbers, so a
-weapon turned a quarter turn keeps the size its matrix actually carries.
-
-If a map background looks softer than it did, that is this change and worth reporting.
 
 ## A division by zero in every blend that reads what is behind it
 
