@@ -1,4 +1,25 @@
-A measurement, and a switch to settle the weapon glow with.
+A division by zero in every blend that reads what is behind it.
+
+## Weapon glows
+
+A blend that reads what is behind it -- Overlay, Multiply, Hardlight, Darken, Lighten, Difference,
+Invert -- has to recover the colour underneath from a form that has already been multiplied by how
+solid it is. Where nothing has been drawn behind, that is nothing divided by nothing.
+
+The result of that is not a number, and unlike a real number it does not disappear when it is
+multiplied by zero further along the same line. It survives to the screen, as a solid block the size
+of whatever was being drawn.
+
+Measured on a test case: a square blended this way over an empty background came out **solid black
+across all 14,400 of its pixels**, and now comes out its own colour. Nothing else in the frame
+moves.
+
+This is why a weapon's glow appears as a hard-edged rectangle. A glow is soft everywhere; nothing
+soft can produce a straight edge. The rectangle was never the glow, it was the block.
+
+The same recovery is guarded everywhere else in the renderer. These seven were the exception.
+
+## The glow does not scale with the weapon, and that part is unresolved
 
 ## The weapon glow, measured at last
 

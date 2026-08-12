@@ -52,6 +52,23 @@ fn common__linear_to_srgb(linear_: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(mix(a, b, c) * linear_.a, linear_.a);
 }
 
+/// Recovers a straight colour from a premultiplied one.
+///
+/// A fully transparent pixel is (0, 0, 0, 0), so recovering its colour is a division of zero by
+/// zero. The NaN that produces does not then vanish when it is multiplied by that same zero alpha,
+/// the way a real number would: it survives, and reaches the screen as a block of garbage the size
+/// of whatever was being drawn.
+///
+/// Every complex blend needs its destination this way, and a destination is transparent wherever
+/// nothing has been drawn behind the blend -- inside a cached bitmap, or in any part of a blend's
+/// own sub-target that nothing reached.
+fn common__unmultiply(premultiplied: vec4<f32>) -> vec3<f32> {
+    if (premultiplied.a > 0.0) {
+        return premultiplied.rgb / premultiplied.a;
+    }
+    return vec3<f32>(0.0);
+}
+
 /// Converts a color from sRGB to linear color space.
 fn common__srgb_to_linear(srgb: vec4<f32>) -> vec4<f32> {
     var rgb: vec3<f32> = srgb.rgb;
