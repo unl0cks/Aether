@@ -10,15 +10,19 @@ Aether now loads the same loader the website does, so it gets whatever build AQW
 
 One consequence worth stating plainly. Every compatibility repair in Aether was written against `spider.swf` and gated on recognising that file by name, so switching builds would have silently switched all of them off: the aura fixes, the avatar cache, the movement guard, the settings panel repair. Those gates now ask one shared question, which handles a build name that changes every release, and each one has a test pinning it. But the game itself is a build nobody has run Aether against yet, so if something behaves oddly that did not before, that is the first place to look.
 
-## Numbers in chat, properly this time
+## Numbers, everywhere except where somebody typed them
 
-The last release stopped chat being rewritten by only grouping numbers in single-line fields. That was wrong, and it took the quest panel with it. Necro's quest rewards stopped showing separators, and anything else that wraps would have too.
+0.5.13 stopped chat being rewritten by only grouping numbers in single-line fields. That was wrong and it took the quest panel with it, because a reward list wraps like any other paragraph. A quest panel and a line of chat are the same kind of field: read-only, multiline, word-wrapped, HTML. Nothing about a field says whether it holds a quantity or a sentence.
 
-The reason it was wrong: a quest reward panel and a line of chat are the same kind of field. Both read-only, both multiline, both word-wrapped, both HTML. Nothing about the field says which is a quantity and which is a sentence, so no test of that sort could ever have separated them.
+The fix after that named the fields to group instead, which worked but was never going to finish. Gold and health were obvious, then quest rewards, then the experience bar, then item stacks, then the reputation panel. Each one had to be noticed by somebody before it could be fixed.
 
-Grouping is now granted by name, to the fields AQW writes a number into and to nothing else. Gold, health, mana, soul points, class rank, quest rewards, quest requirements, item counts, and the numbers that float over an avatar when something takes damage. Chat is not on the list and cannot get onto it, whatever it is holding or however it is written.
+So it is the other way round now. Every field the game writes gets separators, and grouping is refused in the places a player writes: the chat log, in both the current chat interface and the older one, and the speech balloon over a character's head. That list is short and it is finished, which the other one was not.
 
-The old guess about room numbers is gone with it. It existed to keep `join room 9922` intact in chat, and chat is no longer somewhere this runs.
+Which means these all read properly now, including the three that were still missing: the experience bar, item counts in the inventory, and the reputation standings list. Along with gold, health, mana, soul points, class rank, AC, quest rewards and requirements, and the damage, healing and critical numbers that float over a character.
+
+Two things are still never touched. An editable field, because that is one the game reads back, and a separator in one would send `1,250,000` where `1250000` was meant. And a number welded to a name, which is what keeps `citadelruins-99922` a room rather than a count.
+
+The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
 
 ## Lag when a control deck launches it
 

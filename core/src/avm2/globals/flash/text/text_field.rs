@@ -28,20 +28,22 @@ fn aether_grouped_display_text(
     Some(ruffle_wstr::WString::from_utf8(&grouped))
 }
 
-/// Whether a field is a quantity the game is displaying, rather than prose.
+/// Whether a field is a quantity the game is displaying, rather than something a person wrote.
 ///
-/// Grouping is granted by name, to the fields AQW writes a number into, and to nothing else. The
-/// shape of a field cannot decide this. A quest reward panel and a line of chat are both read-only,
-/// multiline, word-wrapped HTML, so the earlier single-line rule that kept chat safe stopped the
-/// quest numbers with it. See [`is_aqw_number_readout`] for the list and why it is a list.
+/// Two exclusions, and between them they are the whole safety argument.
 ///
-/// Editability is still tested, ahead of the name, and it is not redundant. Nothing on the list is
-/// an input field today, but a separator in one would be the damaging kind of wrong: the game reads
-/// an input field back, so `1,250,000` reaches it where `1250000` was meant and parses as `1`. The
-/// list is a claim about AQW, which can change; this is a property of the field itself, which
-/// cannot, so it is the one that gets the last word.
+/// An editable field is one the game reads back: a login box, a chat entry, the quantity on a sell
+/// or trade dialog, the steppers inside AQW's own UI components. Putting separators in one would
+/// send `1,250,000` where the game expected `1250000`, and a parse of that yields `1`. Every place
+/// in AQW that reads a number out of a field reads it out of an input field, so this is the line
+/// between rewriting how a number looks and rewriting what the game does.
 ///
-/// [`is_aqw_number_readout`]: crate::aether_compatibility::is_aqw_number_readout
+/// The other is chat, which is a log of what people typed rather than a readout, and which no
+/// property of the field can identify: a chat line and a quest reward panel are both read-only,
+/// both multiline, both word-wrapped and both HTML. What tells them apart is where they hang. See
+/// [`is_aqw_player_text_container`] for the clips and why they are the shorter list to keep.
+///
+/// [`is_aqw_player_text_container`]: crate::aether_compatibility::is_aqw_player_text_container
 #[cfg(feature = "aether_compatibility")]
 fn aether_field_is_a_readout(this: EditText<'_>) -> bool {
     use crate::display_object::TDisplayObject;
@@ -50,12 +52,26 @@ fn aether_field_is_a_readout(this: EditText<'_>) -> bool {
         return false;
     }
 
-    let Some(name) = this.name() else {
-        return false;
-    };
-    let parent = this.parent().and_then(|parent| parent.name());
+    // Walked rather than checked one level up, because the two chat interfaces hang their lines at
+    // different depths: the current one wraps each line in its own container before adding it, the
+    // older one puts the field straight into the log clip. Bounded so that a display list which is
+    // somehow cyclic or absurdly deep costs a fixed amount rather than the frame.
+    const MAX_ANCESTRY: usize = 32;
 
-    crate::aether_compatibility::is_aqw_number_readout(&name, parent.as_deref())
+    let mut ancestor = this.parent();
+    for _ in 0..MAX_ANCESTRY {
+        let Some(clip) = ancestor else {
+            break;
+        };
+        if let Some(name) = clip.name()
+            && crate::aether_compatibility::is_aqw_player_text_container(&name)
+        {
+            return false;
+        }
+        ancestor = clip.parent();
+    }
+
+    true
 }
 
 /// Whether a value is even a candidate, decided without converting it.

@@ -1996,55 +1996,29 @@ fn is_number_glue(character: char) -> bool {
     character.is_alphabetic() || character == '-' || character == '.' || character == '_'
 }
 
-/// The fields AQW writes a quantity into, by the instance name it gave each one.
+/// The clips AQW puts text written by people inside.
 ///
-/// Named individually because no property of a field distinguishes a quantity from a sentence. The
-/// quest reward panel and a line of chat are both read-only, both multiline, both word-wrapped and
-/// both HTML; they are the same kind of field holding different kinds of writing. Grouping was
-/// first restricted to single-line fields for exactly that reason and it took the quest numbers
-/// with it, because a reward list wraps like any other paragraph.
+/// Grouping is granted to every display field by default and refused under one of these, which is
+/// the opposite of how this started. The turn is because the two lists are not the same shape. The
+/// places a *number* appears have no end: gold and health were the obvious pair, then quest
+/// rewards, then the experience bar, then item stacks, then the reputation panel, each one its own
+/// name to discover and each discovery costing a release. The places a *player* writes do end, and
+/// this is all of them.
 ///
-/// So the rule is a list rather than a test. Everything on it is written by the game, holds one
-/// number, and is only ever read by a player. Nothing a player typed can reach any of them, which
-/// is the whole safety argument: a separator in an editable field would send `1,250,000` where the
-/// game expected `1250000` and a parse of that yields `1`, and a separator in chat rewrites what
-/// somebody said.
+/// `nc` and `ncTextLine` hold the chat log. `textLine` and `bmp` hold the same log in AQW's older
+/// chat interface, which is still selectable and builds its lines a different way, so both have to
+/// be named. `bubble` is the speech balloon over a character's head, the one place chat is drawn
+/// outside the chat window.
 ///
-/// A name AQW later changes drops off this list silently and its number stops being grouped. That
-/// is the failure this should have: a number that reads slightly worse, rather than a message that
-/// says something its sender did not.
-const NUMBER_READOUT_FIELDS: [&[u8]; 12] = [
-    // The gold total on the interface, in the house shop, and in the temporary inventory.
-    b"strGold",
-    // Health, mana and soul points, on both portraits and on every party bar.
-    b"strIntHP",
-    b"strIntMP",
-    b"strIntSP",
-    // The class rank line, which carries the reputation figures.
-    b"strRep",
-    // The quest panel: rewards, then the items the quest asks for.
-    b"strRew",
-    b"strReq",
-    // Item quantities, on reward frames, drop frames and the action bar.
-    b"strQ",
-    b"tQty",
-    b"txtQty",
-    // Quest objective counts, and the coin figure on the reward scene.
-    b"txtObjective",
-    b"tbCoinExp",
-];
+/// None of these names is used for anything else in AQW; `textLine` occurs exactly once in the
+/// whole game, as the legacy chat container.
+const PLAYER_TEXT_CONTAINERS: [&[u8]; 5] = [b"nc", b"ncTextLine", b"textLine", b"bmp", b"bubble"];
 
-/// Whether a field is one AQW writes a quantity into.
-///
-/// The floating numbers over an avatar are the one case a name alone cannot settle. Damage, crits,
-/// damage over time, experience and gold gains, level ups and rank ups all share one library field
-/// called `ti`, and so does the speech bubble over a player's head. What separates them is the clip
-/// between: every popup puts its field inside a child named `t`, and the bubble does not.
-pub fn is_aqw_number_readout(field: &crate::string::WStr, parent: Option<&crate::string::WStr>) -> bool {
-    NUMBER_READOUT_FIELDS
+/// Whether a clip on the path down to a field means the field holds what somebody typed.
+pub fn is_aqw_player_text_container(name: &crate::string::WStr) -> bool {
+    PLAYER_TEXT_CONTAINERS
         .iter()
-        .any(|readout| field == *readout)
-        || (field == b"ti" && parent.is_some_and(|parent| parent == b"t"))
+        .any(|container| name == *container)
 }
 
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
@@ -2076,10 +2050,10 @@ pub fn group_digits(text: &str, separator: NumberSeparator, min_digits: usize) -
 /// Rewrite a display text assignment with grouped numbers, or `None` to leave it alone.
 ///
 /// Two things have to agree before a digit run is touched, and they guard different mistakes. The
-/// caller decides whether the field is one AQW writes a quantity into, which is what keeps this
-/// away from anything a player wrote; see [`is_aqw_number_readout`]. This decides whether the run
-/// is a quantity rather than part of a token, which is what keeps `v1000000` and `1.50000` intact
-/// inside a field that does hold numbers.
+/// caller decides whether the field is one a player could have written into, which is what keeps
+/// this out of chat; see [`is_aqw_player_text_container`]. This decides whether the run is a
+/// quantity rather than part of a token, which is what keeps `v1000000` and `1.50000` intact, and
+/// what keeps a room number safe once it is welded to its map as `citadelruins-99922`.
 pub fn aqw_grouped_text(text: &str) -> Option<String> {
     group_number_runs(text, number_separator(), separator_min_digits() as usize)
 }
@@ -2091,7 +2065,7 @@ pub fn aqw_grouped_html(html: &str) -> Option<String> {
 
 #[cfg(test)]
 mod digit_grouping_tests {
-    use super::{NumberSeparator, group_digits, group_number_runs, is_aqw_number_readout};
+    use super::{NumberSeparator, group_digits, group_number_runs, is_aqw_player_text_container};
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
@@ -2148,52 +2122,61 @@ mod digit_grouping_tests {
         );
     }
 
-    fn readout(field: &[u8], parent: Option<&[u8]>) -> bool {
-        is_aqw_number_readout(
-            crate::string::WStr::from_units(field),
-            parent.map(crate::string::WStr::from_units),
-        )
+    fn player_text(name: &[u8]) -> bool {
+        is_aqw_player_text_container(crate::string::WStr::from_units(name))
     }
 
-    /// The fields the feature was asked for. Boss health is the one it was requested over: it runs
-    /// to eight digits and changes several times a second, so there is nothing to anchor where the
-    /// millions place sits.
+    /// The chat log, in both of AQW's chat interfaces. `nc` and `ncTextLine` are the current one,
+    /// `textLine` and `bmp` the older one that is still selectable in the options.
     #[test]
-    fn the_fields_aqw_writes_a_number_into_are_grouped() {
-        assert!(readout(b"strIntHP", Some(b"HP")));
-        assert!(readout(b"strGold", Some(b"mcGold")));
-        assert!(readout(b"strRep", Some(b"mcRepBar")));
-        assert!(readout(b"strQ", Some(b"cnt")));
+    fn the_chat_log_is_where_players_write() {
+        assert!(player_text(b"nc"));
+        assert!(player_text(b"ncTextLine"));
+        assert!(player_text(b"textLine"));
+        assert!(player_text(b"bmp"));
     }
 
-    /// The quest panel, which the single-line rule had stopped. `strRew` holds the gold and
-    /// experience a quest pays; `strReq` holds the `4/4` counts of what it asks for. Both wrap,
-    /// both are multiline, both are read-only HTML, which is exactly what a line of chat is.
+    /// The one place chat is drawn outside the chat window.
     #[test]
-    fn the_quest_panel_is_grouped_despite_reading_like_prose() {
-        assert!(readout(b"strRew", Some(b"rewards")));
-        assert!(readout(b"strReq", Some(b"display")));
+    fn the_speech_balloon_is_where_players_write() {
+        assert!(player_text(b"bubble"));
     }
 
-    /// Damage, crits, damage over time, experience and gold gains, level ups and rank ups are one
-    /// library field named `ti`, told apart from the speech bubble by the `t` clip around it.
+    /// Everything a number lands in. Naming these was the losing side of this problem: each one
+    /// was found by somebody noticing a number that read badly, one release at a time.
     #[test]
-    fn a_floating_number_over_an_avatar_is_grouped_but_a_speech_bubble_is_not() {
-        assert!(readout(b"ti", Some(b"t")));
-        assert!(!readout(b"ti", Some(b"bubble")));
-        assert!(!readout(b"ti", None));
+    fn the_places_numbers_land_are_not_excluded() {
+        for readout in [
+            // Gold, health, mana, soul points, the class rank line.
+            &b"mcGold"[..],
+            b"strIntHP",
+            b"strRep",
+            // The quest panel, the experience bar, the reputation standings list.
+            b"strRew",
+            b"strReq",
+            b"strXP",
+            b"fList",
+            // Item stacks, and the numbers that float over an avatar.
+            b"strQ",
+            b"tQty",
+            b"t",
+        ] {
+            assert!(
+                !player_text(readout),
+                "{} must stay groupable",
+                String::from_utf8_lossy(readout)
+            );
+        }
     }
 
-    /// The case that started this. A chat line is built at runtime and carries none of these names,
-    /// so nothing a player typed can reach the grouper however it is written.
+    /// A name that merely starts or ends like one on the list is not one on the list.
     #[test]
-    fn chat_is_not_a_readout_under_any_name_it_arrives_with() {
-        assert!(!readout(b"line", Some(b"mcChat")));
-        assert!(!readout(b"instance42", Some(b"instance41")));
-        assert!(!readout(b"te", Some(b"mci")));
-        // A name that merely starts or ends like one on the list is not one on the list.
-        assert!(!readout(b"strGoldRush", Some(b"mcGold")));
-        assert!(!readout(b"mystrGold", Some(b"mcGold")));
+    fn a_near_miss_on_a_container_name_is_not_a_container() {
+        assert!(!player_text(b"ncTextLines"));
+        assert!(!player_text(b"mcTextLine"));
+        assert!(!player_text(b"bubbles"));
+        assert!(!player_text(b"n"));
+        assert!(!player_text(b""));
     }
 
     #[test]
