@@ -460,6 +460,19 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             ),
             1,
         );
+        // Dragging a window on Windows delivers one of these per frame for the whole drag, and
+        // dragging it by the title bar delivers them with nothing changed at all. Everything below
+        // is expensive, so the size it is already at costs nothing.
+        if !viewport_change_is_real(
+            self.surface.size(),
+            self.viewport_scale_factor,
+            width,
+            height,
+            dimensions.scale_factor,
+        ) {
+            return;
+        }
+
         self.target.resize(&self.descriptors.device, width, height);
 
         self.surface = Surface::new(
@@ -471,8 +484,21 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         );
 
         self.viewport_scale_factor = dimensions.scale_factor;
-        self.texture_pool.reset();
-        self.offscreen_texture_pool.reset();
+
+        // The pools are deliberately not reset here, and that is a change.
+        //
+        // A pooled texture is keyed by its size, usage, format and sample count, and a new viewport
+        // invalidates none of those. The old stage-sized targets simply stop being asked for and age
+        // out; the globals cache is keyed by viewport and ages out the same way. What a reset threw
+        // away with them was everything else in both pools, which on a busy map is thousands of
+        // small avatar and filter textures that have nothing to do with how big the window is.
+        //
+        // Emptying them per resize event is what turned a drag into a torrent: every frame of the
+        // drag destroyed the whole cache and allocated a fresh one, and wgpu cannot reclaim a
+        // destroyed texture until the GPU has finished with the submission that referenced it. Ask
+        // faster than the GPU retires and the pending-destruction queue is the memory. A 10 GB card
+        // reached 44.2 GB of texture memory that way, against 14.2 GB the renderer had actually
+        // asked for, and died on the next large allocation.
     }
 
     fn create_context3d(
@@ -1486,6 +1512,29 @@ impl<T> SubmissionRetirement<T> {
     }
 }
 
+/// Whether a viewport report actually differs from the one the renderer is already built for.
+///
+/// Winit reports a resize per frame of a drag, and on Windows it reports one for a window move as
+/// well, where nothing has changed. Answering those rebuilds the swapchain and every render target
+/// for a size the renderer already has.
+///
+/// The scale factor is part of the question because dragging a window between monitors of different
+/// DPI changes it while the pixel size stays put, and the renderer does have to hear about that.
+fn viewport_change_is_real(
+    current: wgpu::Extent3d,
+    current_scale_factor: f64,
+    width: u32,
+    height: u32,
+    scale_factor: f64,
+) -> bool {
+    current.width != width
+        || current.height != height
+        // Compared exactly, because it is carried through unchanged rather than computed: winit
+        // hands back the same f64 for an unchanged monitor, and a bit of drift here is a rebuild
+        // that is wanted rather than one that is wasted.
+        || current_scale_factor != scale_factor
+}
+
 /// Whether a quality change leaves the texture pools holding nothing usable.
 ///
 /// Sample count is part of a pooled texture's identity, so changing it means no entry can answer a
@@ -1498,6 +1547,46 @@ fn quality_change_strands_pooled_textures(before: StageQuality, after: StageQual
 #[cfg(test)]
 mod quality_change_tests {
     use super::*;
+
+    fn extent(width: u32, height: u32) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    /// The one that mattered. Dragging a window by its title bar reports a resize per frame with
+    /// the size unchanged, and answering each one rebuilt the swapchain and every render target.
+    #[test]
+    fn a_resize_report_for_the_size_we_already_have_is_not_a_change() {
+        assert!(!viewport_change_is_real(
+            extent(1280, 720),
+            1.0,
+            1280,
+            720,
+            1.0
+        ));
+    }
+
+    #[test]
+    fn a_real_resize_is_a_change() {
+        assert!(viewport_change_is_real(extent(1280, 720), 1.0, 1281, 720, 1.0));
+        assert!(viewport_change_is_real(extent(1280, 720), 1.0, 1280, 721, 1.0));
+    }
+
+    /// Dragging a window onto a monitor at a different DPI keeps the pixel size and changes the
+    /// scale factor, and the renderer does have to hear about that one.
+    #[test]
+    fn a_scale_factor_change_alone_is_a_change() {
+        assert!(viewport_change_is_real(
+            extent(1280, 720),
+            1.0,
+            1280,
+            720,
+            1.5
+        ));
+    }
 
     /// Low and Best differ in sample count, so nothing pooled at one is usable at the other.
     #[test]
