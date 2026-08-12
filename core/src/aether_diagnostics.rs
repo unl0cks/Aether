@@ -891,6 +891,8 @@ pub struct BlendObservation {
     pub pixel_area: u64,
     /// Draw commands inside the blend, which is roughly how much art the sub-target holds.
     pub sub_commands: u64,
+    /// What the subtree is, when it is exactly one thing. See `sole_command_kind`.
+    pub sole_command_kind: &'static str,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -906,6 +908,9 @@ pub struct BlendSiteSummary {
     pub sub_commands: u64,
     pub total_pixel_area: u64,
     pub max_pixel_area: u64,
+    /// How the site's blends break down by what their subtree holds, so the count of blends a
+    /// single-draw bypass could actually take is readable rather than inferred.
+    pub sole_command_kinds: BTreeMap<&'static str, u64>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -915,6 +920,7 @@ pub struct BlendAttributionReport {
     pub total_pixel_area: u64,
     pub by_mode: BTreeMap<&'static str, u64>,
     pub by_actor: BTreeMap<&'static str, u64>,
+    pub by_sole_command: BTreeMap<&'static str, u64>,
     pub top: Vec<BlendSiteSummary>,
     /// Blends belonging to sites that did not make the table, so the top rows can be read as a
     /// share of the frame rather than as the whole of it.
@@ -945,6 +951,7 @@ struct BlendSiteRecord {
     total_pixel_area: u64,
     max_pixel_area: u64,
     instances: HashSet<u64>,
+    sole_command_kinds: BTreeMap<&'static str, u64>,
 }
 
 impl BlendSiteRecord {
@@ -956,6 +963,10 @@ impl BlendSiteRecord {
         if self.instances.len() < MAX_BLEND_SITE_INSTANCES {
             self.instances.insert(observation.instance_key);
         }
+        *self
+            .sole_command_kinds
+            .entry(observation.sole_command_kind)
+            .or_default() += 1;
     }
 
     fn summary(&self, key: &BlendSiteKey) -> BlendSiteSummary {
@@ -971,6 +982,7 @@ impl BlendSiteRecord {
             sub_commands: self.sub_commands,
             total_pixel_area: self.total_pixel_area,
             max_pixel_area: self.max_pixel_area,
+            sole_command_kinds: self.sole_command_kinds.clone(),
         }
     }
 }
@@ -1021,6 +1033,9 @@ impl BlendAttributionState {
                 .by_actor
                 .entry(record.identity.actor_classification)
                 .or_default() += record.blends;
+            for (kind, count) in &record.sole_command_kinds {
+                *report.by_sole_command.entry(kind).or_default() += count;
+            }
             ranked.push((key, record));
         }
 
@@ -1080,6 +1095,7 @@ pub fn record_blend(
     object: DisplayObject<'_>,
     pixel_area: u64,
     sub_commands: u64,
+    sole_command_kind: &'static str,
 ) {
     if !blend_attribution_enabled() {
         return;
@@ -1094,6 +1110,7 @@ pub fn record_blend(
         instance_key: object.as_ptr() as u64,
         pixel_area,
         sub_commands,
+        sole_command_kind,
     };
 
     let mut state = match blend_attribution_state().lock() {
@@ -2857,6 +2874,7 @@ mod blend_attribution_tests {
             instance_key: 1,
             pixel_area,
             sub_commands,
+            sole_command_kind: "bitmap",
         }
     }
 

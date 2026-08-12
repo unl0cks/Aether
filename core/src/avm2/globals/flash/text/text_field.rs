@@ -26,12 +26,38 @@ fn aether_grouped_display_text(
     this: EditText<'_>,
     text: &ruffle_wstr::WStr,
 ) -> Option<ruffle_wstr::WString> {
-    if this.is_editable() || !aether_worth_grouping(text) {
+    if !aether_field_is_a_readout(this) || !aether_worth_grouping(text) {
         return None;
     }
 
     let grouped = crate::aether_compatibility::aqw_grouped_text(&text.to_utf8_lossy())?;
     Some(ruffle_wstr::WString::from_utf8(&grouped))
+}
+
+/// Whether a field is a quantity the game is displaying, rather than prose.
+///
+/// Two exclusions, and between them they are the whole safety argument.
+///
+/// An editable field is one the game reads back: a login box, a chat entry, the quantity on a sell
+/// or trade dialog. Putting separators in one would send `1,250,000` where the game expected
+/// `1250000`, and a parse of that yields `1`.
+///
+/// A field that holds running text, whether by being multiline or by wrapping, is a log or a
+/// passage of prose rather than a readout. Chat is the case that matters: players type room numbers
+/// as `battleon 99222`, and a bare digit run between two spaces is indistinguishable from a
+/// quantity by anything around it. The map name in front is arbitrary, so no list of words can
+/// recognise it, and the number is echoed into the log a moment after being typed, so the same text
+/// appears ungrouped while typing and grouped once sent. Nothing about the digits tells the two
+/// apart; the kind of field they landed in does.
+///
+/// Both shapes are tested because either can hold a chat log. Wrapping is checked as well as
+/// multiline so the rule does not rest on which of the two AQW happens to have set.
+///
+/// That leaves grouping where it earns its keep. Gold, experience, boss health, damage numbers and
+/// quest counters are each one value in its own field, sized to that value, updated by the game.
+#[cfg(feature = "aether_compatibility")]
+fn aether_field_is_a_readout(this: EditText<'_>) -> bool {
+    !this.is_editable() && !this.is_multiline() && !this.is_word_wrap()
 }
 
 /// Whether a value is even a candidate, decided without converting it.
@@ -75,7 +101,7 @@ fn aether_grouped_display_html(
     this: EditText<'_>,
     html: &ruffle_wstr::WStr,
 ) -> Option<ruffle_wstr::WString> {
-    if this.is_editable() || !aether_worth_grouping(html) {
+    if !aether_field_is_a_readout(this) || !aether_worth_grouping(html) {
         return None;
     }
 

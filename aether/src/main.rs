@@ -236,7 +236,10 @@ fn main() -> Result<(), Error> {
         self_update::clean_stale_backup(&current_exe);
     }
     if !preferences.cli.no_aether_update_check
-        && self_update::version_is_released(env!("CARGO_PKG_VERSION"))
+        && self_update::version_is_released(&self_update::build_version(
+            env!("CARGO_PKG_VERSION"),
+            env!("CFG_RELEASE_CHANNEL"),
+        ))
         && let Some(release) = check_for_update()
         && let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
             .enable_all()

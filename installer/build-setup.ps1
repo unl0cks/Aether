@@ -238,6 +238,12 @@ if (-not $SkipCargo) {
     $previousRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
     $env:CARGO_ENCODED_RUSTFLAGS = $remap -join "`u{001f}"
 
+    # Without this the channel defaults to "local", so a published build called itself
+    # "0.5.10-local" in every log and crash report, and the guard that stops a developer build from
+    # offering itself an update could never tell the two apart.
+    $previousChannel = $env:CFG_RELEASE_CHANNEL
+    $env:CFG_RELEASE_CHANNEL = 'release'
+
     try {
         $cargoArgs = @('build', '--release', '-p', 'aether_player')
         if ($CargoFeatures) { $cargoArgs += @('--features', $CargoFeatures) }
@@ -246,6 +252,7 @@ if (-not $SkipCargo) {
     }
     finally {
         $env:CARGO_ENCODED_RUSTFLAGS = $previousRustFlags
+        $env:CFG_RELEASE_CHANNEL = $previousChannel
     }
 
     # Changing RUSTFLAGS changes the fingerprint, so this rebuilds rather than reusing a plain

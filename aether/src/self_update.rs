@@ -131,12 +131,28 @@ fn components(version: &str) -> Vec<u64> {
     parts
 }
 
+/// The version a build reports: the package version and the channel it was built with.
+///
+/// One function so the update check and everything that displays a version cannot disagree about
+/// what this build calls itself.
+pub fn build_version(package_version: &str, channel: &str) -> String {
+    if channel.is_empty() {
+        package_version.to_owned()
+    } else {
+        format!("{package_version}-{channel}")
+    }
+}
+
 /// Whether this build should check at all.
 ///
-/// A build made here rather than released carries a channel suffix, and offering it an "update" to
+/// A build made here rather than released carries a `local` channel, and offering it an "update" to
 /// the release it was built from would be noise during development.
+///
+/// Give this the whole reported version, not the package version. The channel is the only thing
+/// that distinguishes a local build from a released one, and it does not appear in the package
+/// version at all: handing that over made this answer "released" for every build ever made.
 pub fn version_is_released(version: &str) -> bool {
-    !version.contains("-aether-local") && !components(version).is_empty()
+    !version.contains("local") && !components(version).is_empty()
 }
 
 /// Read a `sha256sum` listing into name against hash.
@@ -469,13 +485,26 @@ mod tests {
         assert!(!is_newer("0.5.2", "v0.5.3"));
     }
 
+    /// The guard is given the string a build actually reports, which is the package version and the
+    /// release channel joined by a hyphen. It was previously handed the package version alone, where
+    /// the channel cannot appear, so it answered "released" for every build including local ones.
     #[test]
     fn a_local_build_does_not_offer_to_update_to_the_release_it_came_from() {
+        assert!(!version_is_released("0.5.2-local"));
         assert!(!version_is_released("0.5.2-aether-local"));
+        assert!(version_is_released("0.5.2-release"));
         assert!(version_is_released("0.5.2"));
 
         // The suffix must not make it look older either, or it would nag every launch.
         assert!(!is_newer("0.5.2", "0.5.2-aether-local"));
+    }
+
+    /// What main.rs hands the guard, spelled out, because the bug was entirely in what got passed
+    /// rather than in the comparison. A released build must check; a developer build must not.
+    #[test]
+    fn the_guard_is_decided_by_the_channel_the_build_was_made_with() {
+        assert!(version_is_released(&build_version("0.5.11", "release")));
+        assert!(!version_is_released(&build_version("0.5.11", "local")));
     }
 
     #[test]

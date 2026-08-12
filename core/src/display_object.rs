@@ -1588,6 +1588,39 @@ fn extended_blend_mode_name(mode: ExtendedBlendMode) -> &'static str {
     }
 }
 
+/// What a blend's subtree consists of, when it consists of exactly one thing.
+///
+/// A blend wrapping a single draw does not need its own offscreen target: compositing a group that
+/// holds one draw is the same as drawing it with the group's blend state, and 89% of the blends AQW
+/// issues are that shape. Whether the saving is available depends on WHICH draw, though. A bitmap
+/// or an already-rendered texture carries a trivial blend mode on the draw itself, so the bypass is
+/// free. A shape does not, and worse, one shape is several overlapping mesh draws internally, so
+/// blending each of them separately is not the same picture.
+///
+/// This reports which, so the bypass is built against what AQW actually emits rather than a guess.
+#[cfg(feature = "aether_diagnostics")]
+fn sole_command_kind(commands: &CommandList) -> &'static str {
+    use ruffle_render::commands::Command;
+
+    let [only] = &commands.commands[..] else {
+        return "several";
+    };
+
+    match only {
+        Command::RenderBitmap { .. } => "bitmap",
+        Command::RenderStage3D { .. } => "stage3d",
+        Command::RenderShape { .. } => "shape",
+        Command::RenderAlphaMask { .. } => "alpha_mask",
+        Command::DrawRect { .. } => "rect",
+        Command::DrawLine { .. } => "line",
+        Command::DrawLineRect { .. } => "line_rect",
+        Command::Blend(..) => "blend",
+        Command::PushMask | Command::ActivateMask | Command::DeactivateMask | Command::PopMask => {
+            "mask"
+        }
+    }
+}
+
 pub fn render_base<'gc>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
@@ -2020,6 +2053,7 @@ pub fn render_base<'gc>(
                     this,
                     pixel_area,
                     sub_commands.commands.len() as u64,
+                    sole_command_kind(&sub_commands),
                 );
             }
 
