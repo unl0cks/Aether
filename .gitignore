@@ -26,3 +26,6 @@ RECOVER_*.fla
 /installer/dist/
 /installer/**/bin/
 /installer/**/obj/
+
+# Local release staging and metrics captures
+/dist/

@@ -60,6 +60,20 @@ pub struct GpuSample {
     pub memory_allocations: u64,
     pub texture_memory_bytes: u64,
     pub buffer_memory_bytes: u64,
+    /// How many blocks the allocator has reserved from the driver, and how much they hold in
+    /// total. Textures are suballocated out of these rather than allocated individually.
+    pub allocator_blocks: u64,
+    pub allocator_reserved_bytes: u64,
+    /// The largest contiguous free run in any block, which is the real ceiling on the next
+    /// allocation that can be served without asking the driver for another block. Free bytes far
+    /// above this is fragmentation, and is what a failure with memory to spare looks like.
+    pub allocator_largest_free_run_bytes: u64,
+    /// 1 when the backend supplied an allocator report, 0 when it does not implement one.
+    ///
+    /// Only DX12 implements it today, so a Vulkan session reports zeroes for every field above.
+    /// Without this flag those zeroes read as a perfectly unfragmented allocator, which is the
+    /// opposite of what they mean.
+    pub allocator_report_available: u64,
 }
 
 impl GpuSample {
@@ -67,6 +81,13 @@ impl GpuSample {
     pub fn capture(device: &wgpu::Device, at_ms: u64) -> Self {
         let counters = device.get_internal_counters();
         let hal = &counters.hal;
+        // Only DX12 implements this today. Vulkan returns nothing, which is why the flag below
+        // exists: the zeroes that follow would otherwise read as an allocator with no holes in it.
+        let report = device.generate_allocator_report();
+        let fragmentation = report
+            .as_ref()
+            .map(crate::aether_allocator_report::summarise)
+            .unwrap_or_default();
 
         Self {
             at_ms,
@@ -86,6 +107,10 @@ impl GpuSample {
             memory_allocations: hal.memory_allocations.read() as u64,
             texture_memory_bytes: hal.texture_memory.read() as u64,
             buffer_memory_bytes: hal.buffer_memory.read() as u64,
+            allocator_blocks: fragmentation.blocks as u64,
+            allocator_reserved_bytes: fragmentation.reserved_bytes,
+            allocator_largest_free_run_bytes: fragmentation.largest_free_run_bytes,
+            allocator_report_available: u64::from(report.is_some()),
         }
     }
 
@@ -93,7 +118,7 @@ impl GpuSample {
     ///
     /// Returned as a list so the summary, the peak table and the JSON line all walk the same set
     /// and cannot drift apart as fields are added.
-    pub fn tracked(&self) -> [(&'static str, u64); 16] {
+    pub fn tracked(&self) -> [(&'static str, u64); 20] {
         [
             ("textures", self.textures),
             ("texture_views", self.texture_views),
@@ -111,6 +136,13 @@ impl GpuSample {
             ("memory_allocations", self.memory_allocations),
             ("texture_memory_bytes", self.texture_memory_bytes),
             ("buffer_memory_bytes", self.buffer_memory_bytes),
+            ("allocator_blocks", self.allocator_blocks),
+            ("allocator_reserved_bytes", self.allocator_reserved_bytes),
+            (
+                "allocator_largest_free_run_bytes",
+                self.allocator_largest_free_run_bytes,
+            ),
+            ("allocator_report_available", self.allocator_report_available),
         ]
     }
 
@@ -316,6 +348,44 @@ mod tests {
             at_ms,
             textures,
             ..Default::default()
+        }
+    }
+
+    /// Only the DX12 backend implements wgpu's allocator report; Vulkan returns nothing at all.
+    /// A zero largest-free-run therefore has two very different meanings, and the reader has to be
+    /// able to tell "measured, not fragmented" from "this backend never told us". The last report
+    /// that could not distinguish those cost a round trip to a tester and a wrong conclusion.
+    #[test]
+    fn an_unavailable_allocator_report_is_flagged_rather_than_read_as_zero_fragmentation() {
+        let tracked: Vec<&'static str> = sample(0, 0)
+            .tracked()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+
+        assert!(tracked.contains(&"allocator_report_available"));
+        // Default is "we have not been told", not "there is nothing there".
+        assert_eq!(sample(0, 0).allocator_report_available, 0);
+    }
+
+    /// A device lost to "out of memory" holding half a gigabyte on a sixteen gigabyte card is not
+    /// short of memory, so the timeline has to carry the shape of the allocator's free space and not
+    /// just its totals. Without the largest free run there is no way to tell a full allocator from a
+    /// fragmented one after the fact.
+    #[test]
+    fn the_timeline_tracks_the_shape_of_free_space_and_not_only_its_size() {
+        let tracked: Vec<&'static str> = sample(0, 0)
+            .tracked()
+            .iter()
+            .map(|(name, _)| *name)
+            .collect();
+
+        for name in [
+            "allocator_blocks",
+            "allocator_reserved_bytes",
+            "allocator_largest_free_run_bytes",
+        ] {
+            assert!(tracked.contains(&name), "{name} is not being recorded");
         }
     }
 

@@ -52,3 +52,7 @@ ignored = [
     # Not used directly, declared only to enable its `profile-with-tracy` feature.
     "profiling"
 ]
+
+[dev-dependencies]
+# Only to build report fixtures in tests; wgpu re-exports AllocatorReport but not its parts.
+wgpu-types = "27.0.1"

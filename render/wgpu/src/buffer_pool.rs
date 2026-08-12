@@ -10,6 +10,31 @@ use std::fmt::{Debug, Formatter};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex, Weak};
 
+/// Steps the pool's size buckets sit on.
+///
+/// A flat grid cannot serve both ends of the range: 128 leaves a 40x28 target paying for 128x128,
+/// while 8 barely dents a 2048x960 one. Deriving the cell from the size keeps the waste
+/// proportional, so every bucket costs about the same fraction of itself no matter how big it is.
+const POOL_SIZE_GRID_STEPS: u32 = 16;
+
+/// Smallest step, so tiny targets do not each get their own bucket a few pixels apart.
+const MIN_POOL_SIZE_GRID: u32 = 8;
+
+/// Round a requested texture size out to the pool's grid.
+///
+/// Only ever grows: callers draw into the full extent they asked for, so a smaller texture would
+/// clip their content.
+fn quantise_pool_texture_size(size: (u32, u32)) -> (u32, u32) {
+    let round = |value: u32| {
+        if value == 0 {
+            return 0;
+        }
+        let cell = (value.next_power_of_two() / POOL_SIZE_GRID_STEPS).max(MIN_POOL_SIZE_GRID);
+        value.div_ceil(cell).saturating_mul(cell).max(value)
+    };
+    (round(size.0), round(size.1))
+}
+
 type PoolInner<T> = Mutex<Vec<T>>;
 type Constructor<Type, Description> = Box<dyn Fn(&Descriptors, &Description) -> Type>;
 
@@ -34,6 +59,13 @@ pub struct TexturePool {
     pools: FnvHashMap<TextureKey, TextureBucket>,
     globals_cache: FnvHashMap<GlobalsKey, GlobalsEntry>,
     policy: OffscreenTexturePoolPolicy,
+    /// Whether requested sizes are rounded out to a grid before bucketing.
+    ///
+    /// On for the offscreen pool, whose sizes are the measured bounds of small display objects and
+    /// which was minting 1,450 buckets against a 2,048 entry cap. Off for the general pool, which
+    /// holds stage-sized targets already snapped to 128px by their callers, reuses 99.8% as it is,
+    /// and includes the surface that gets blitted to the window.
+    quantise_sizes: bool,
     submitted_frame: u64,
     #[cfg(feature = "aether_metrics")]
     metrics_kind: crate::aether_metrics::TexturePoolKind,
@@ -42,12 +74,14 @@ pub struct TexturePool {
 impl TexturePool {
     pub fn new(
         policy: OffscreenTexturePoolPolicy,
+        quantise_sizes: bool,
         #[cfg(feature = "aether_metrics")] metrics_kind: crate::aether_metrics::TexturePoolKind,
     ) -> Self {
         Self {
             pools: FnvHashMap::default(),
             globals_cache: FnvHashMap::default(),
             policy,
+            quantise_sizes,
             submitted_frame: 0,
             #[cfg(feature = "aether_metrics")]
             metrics_kind,
@@ -64,10 +98,14 @@ impl TexturePool {
         );
 
         let policy = self.policy;
+        // Carried across explicitly. A reset happens on every resize, and rebuilding without it
+        // would quietly turn the bucketing back off for the rest of the session.
+        let quantise_sizes = self.quantise_sizes;
         #[cfg(feature = "aether_metrics")]
         let metrics_kind = self.metrics_kind;
         *self = Self::new(
             policy,
+            quantise_sizes,
             #[cfg(feature = "aether_metrics")]
             metrics_kind,
         );
@@ -81,6 +119,22 @@ impl TexturePool {
         format: wgpu::TextureFormat,
         sample_count: u32,
     ) -> PoolEntry<(wgpu::Texture, wgpu::TextureView), AlwaysCompatible> {
+        // Round out to a grid before keying, so content whose measured bounds wobble by a pixel
+        // reuses one bucket instead of minting a new one. Callers already treat a pooled texture as
+        // possibly larger than the region they are drawing: `CommandTarget` keeps its own logical
+        // size, and `FilterRegion` normalises UVs against the texture while taking the extent from
+        // the region. Growing a texture is therefore invisible to them, and shrinking one would
+        // clip, which is why the rounding only ever goes up.
+        let size = if self.quantise_sizes {
+            let (width, height) = quantise_pool_texture_size((size.width, size.height));
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: size.depth_or_array_layers,
+            }
+        } else {
+            size
+        };
         let key = TextureKey {
             size,
             usage,
@@ -424,6 +478,75 @@ impl<Type, Description: BufferDescription> Deref for PoolEntry<Type, Description
 
 #[cfg(test)]
 mod tests {
+    use super::quantise_pool_texture_size;
+
+    /// The offscreen pool keys buckets on exact dimensions, and the sizes it is handed are the
+    /// measured bounds of small display objects, so near-identical content mints a fresh bucket
+    /// each time. A crash census showed 1,450 live buckets against a 2,048 entry cap -- under one
+    /// and a half cached textures per size -- and the sixteen allocations before the fault included
+    /// 39x27, 40x27 and 40x28, which are one size wearing three hats.
+    #[test]
+    fn near_identical_sizes_collapse_onto_one_bucket() {
+        let collapsed = [(39, 27), (40, 27), (40, 28), (37, 25)]
+            .map(quantise_pool_texture_size)
+            .to_vec();
+
+        assert_eq!(
+            collapsed.iter().collect::<std::collections::HashSet<_>>().len(),
+            1,
+            "these four should share a bucket, got {collapsed:?}"
+        );
+    }
+
+    /// A pooled texture is handed to callers that draw into its full extent, so rounding may only
+    /// ever grow it. Returning something smaller would silently clip content.
+    #[test]
+    fn quantising_never_returns_a_smaller_texture() {
+        for size in [(1, 1), (37, 25), (128, 128), (960, 550), (2048, 960), (4096, 4096)] {
+            let (width, height) = quantise_pool_texture_size(size);
+            assert!(width >= size.0 && height >= size.1, "{size:?} shrank to {width}x{height}");
+        }
+    }
+
+    /// The padding is wasted memory and, for a blur, wasted sampling, so the cell has to scale with
+    /// the size rather than being a flat grid that swamps a 40px texture or barely dents a 4K one.
+    #[test]
+    fn the_slack_stays_proportional_across_the_size_range() {
+        for size in [(37, 25), (167, 53), (332, 175), (960, 550), (2048, 960)] {
+            let (width, height) = quantise_pool_texture_size(size);
+            let requested = f64::from(size.0) * f64::from(size.1);
+            let allocated = f64::from(width) * f64::from(height);
+            assert!(
+                allocated / requested <= 1.60,
+                "{size:?} -> {width}x{height} wastes too much"
+            );
+        }
+    }
+
+    /// A reset rebuilds the pool from its own fields, and it runs on every window resize. Losing
+    /// the flag there would turn bucketing off for the rest of the session, silently.
+    #[test]
+    fn a_reset_keeps_quantising() {
+        let mut pool = TexturePool::new(
+            OffscreenTexturePoolPolicy::Ephemeral,
+            true,
+            #[cfg(feature = "aether_metrics")]
+            crate::aether_metrics::TexturePoolKind::Offscreen,
+        );
+        pool.reset();
+        assert!(pool.quantise_sizes);
+    }
+
+    /// Sizes already on the grid must be left alone, or the general pool's 128px blend targets and
+    /// the stage surface would all shift and lose their existing reuse.
+    #[test]
+    fn sizes_already_on_the_grid_are_untouched() {
+        // Powers of two and the 128px blend grid, which is what the callers actually produce.
+        for size in [(128, 128), (256, 256), (1024, 512), (2048, 1024)] {
+            assert_eq!(quantise_pool_texture_size(size), size);
+        }
+    }
+
     use super::*;
     #[cfg(feature = "aether_metrics")]
     use crate::aether_metrics::TexturePoolKind;
@@ -455,6 +578,7 @@ mod tests {
         };
         let mut pool = TexturePool::new(
             OffscreenTexturePoolPolicy::BoundedReuse(limits),
+            false,
             #[cfg(feature = "aether_metrics")]
             TexturePoolKind::Offscreen,
         );
@@ -472,6 +596,7 @@ mod tests {
     fn ephemeral_pool_discards_descriptor_buckets_at_frame_end() {
         let mut pool = TexturePool::new(
             OffscreenTexturePoolPolicy::Ephemeral,
+            false,
             #[cfg(feature = "aether_metrics")]
             TexturePoolKind::General,
         );
@@ -508,6 +633,7 @@ mod tests {
                 max_idle_frames: 1,
                 max_cached_globals: 32,
             }),
+            false,
             #[cfg(feature = "aether_metrics")]
             TexturePoolKind::General,
         );
@@ -596,6 +722,7 @@ mod aether_metrics_tests {
         let _ = take_snapshot();
         let mut pool = TexturePool::new(
             crate::texture_pool_policy::OffscreenTexturePoolPolicy::Ephemeral,
+            false,
             TexturePoolKind::Offscreen,
         );
 

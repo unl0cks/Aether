@@ -221,7 +221,10 @@ impl Surface {
             texture_pool,
         );
 
-        for chunk in chunks {
+        // Peekable so a complex blend can gather the run of blends that follow it, which is what
+        // lets a batch of them share one pass.
+        let mut chunks = chunks.into_iter().peekable();
+        while let Some(chunk) = chunks.next() {
             match chunk {
                 Chunk::Draw {
                     chunk,
@@ -337,52 +340,128 @@ impl Surface {
                         _ => &target,
                     };
 
-                    #[cfg(feature = "aether_metrics")]
+                    // Gather the run of blends this one can share a pass with.
+                    //
+                    // Frame time on this renderer is render passes, not draws, and a crowded AQW
+                    // map spends about three passes on every complex blend. Blends that do not
+                    // overlap cannot read what the others wrote, so a run of them composites
+                    // identically whether it happens in one pass or several. Two modes account for
+                    // 98% of the blends AQW issues, so such runs are the common case rather than a
+                    // lucky one.
+                    //
+                    // Alpha and Erase stay out of it: they resolve their parent through the nearest
+                    // layer and may be skipped entirely, which a batch would have to special-case
+                    // for no gain, since between them they are a rounding error of AQW's blends.
+                    let mut batch = vec![(texture, region)];
+                    if crate::surface::commands::blend_batching_enabled()
+                        && !matches!(blend_mode, ComplexBlend::Alpha | ComplexBlend::Erase)
                     {
-                        crate::aether_metrics::record_encoded_chunk(0, true);
-                        crate::aether_metrics::record_complex_blend(blend_mode.metrics_index());
+                        while let Some(Chunk::Blend {
+                            blend_mode: ChunkBlendMode::Complex(next_mode),
+                            needs_stencil: next_needs_stencil,
+                            region: next_region,
+                            ..
+                        }) = chunks.peek()
+                        {
+                            // Same pipeline, same stencil setup, and nothing it would need to read
+                            // back from a blend already in the batch.
+                            if std::mem::discriminant(next_mode)
+                                != std::mem::discriminant(&blend_mode)
+                                || *next_needs_stencil != needs_stencil
+                                || batch.iter().any(|(_, region)| {
+                                    crate::surface::commands::blend_regions_overlap(
+                                        *region,
+                                        *next_region,
+                                    )
+                                })
+                            {
+                                break;
+                            }
+
+                            let Some(Chunk::Blend { texture, region, .. }) = chunks.next() else {
+                                unreachable!("peek just matched a complex blend")
+                            };
+                            batch.push((texture, region));
+                        }
                     }
-                    let parent_blend_buffer =
-                        parent.update_blend_buffer(descriptors, texture_pool, draw_encoder, region);
 
                     #[cfg(feature = "aether_metrics")]
-                    crate::aether_metrics::record_bind_group_created();
-                    let blend_bind_group =
-                        descriptors
-                            .device
-                            .create_bind_group(&wgpu::BindGroupDescriptor {
-                                label: create_debug_label!(
-                                    "Complex blend binds {:?} {}",
-                                    blend_mode,
-                                    if needs_stencil {
-                                        "(with stencil)"
-                                    } else {
-                                        "(Stencilless)"
-                                    }
-                                )
-                                .as_deref(),
-                                layout: &descriptors.bind_layouts.blend,
-                                entries: &[
-                                    wgpu::BindGroupEntry {
-                                        binding: 0,
-                                        resource: wgpu::BindingResource::TextureView(
-                                            parent_blend_buffer.view(),
-                                        ),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 1,
-                                        resource: wgpu::BindingResource::TextureView(
-                                            texture.view(),
-                                        ),
-                                    },
-                                    wgpu::BindGroupEntry {
-                                        binding: 2,
-                                        resource: wgpu::BindingResource::Sampler(
-                                            descriptors.bitmap_samplers.get_sampler(false, false),
-                                        ),
-                                    },
-                                ],
-                            });
+                    {
+                        // One pass for the batch, but each blend is still a blend.
+                        crate::aether_metrics::record_encoded_chunk(0, true);
+                        for _ in 0..batch.len() {
+                            crate::aether_metrics::record_complex_blend(blend_mode.metrics_index());
+                        }
+                    }
+
+                    // Every region is snapshotted before anything draws, so each blend reads the
+                    // parent as it stood before the batch began. That is the same backdrop it would
+                    // have read one pass at a time, precisely because none of them overlap.
+                    let mut parent_blend_buffer = None;
+                    for (_, region) in &batch {
+                        parent_blend_buffer = Some(parent.update_blend_buffer(
+                            descriptors,
+                            texture_pool,
+                            draw_encoder,
+                            *region,
+                        ));
+                    }
+                    let parent_blend_buffer =
+                        parent_blend_buffer.expect("a batch always holds at least one blend");
+
+                    let blend_bind_groups = batch
+                        .iter()
+                        .map(|(texture, _)| {
+                            #[cfg(feature = "aether_metrics")]
+                            crate::aether_metrics::record_bind_group_created();
+                            descriptors
+                                .device
+                                .create_bind_group(&wgpu::BindGroupDescriptor {
+                                    label: create_debug_label!(
+                                        "Complex blend binds {:?} {}",
+                                        blend_mode,
+                                        if needs_stencil {
+                                            "(with stencil)"
+                                        } else {
+                                            "(Stencilless)"
+                                        }
+                                    )
+                                    .as_deref(),
+                                    layout: &descriptors.bind_layouts.blend,
+                                    entries: &[
+                                        wgpu::BindGroupEntry {
+                                            binding: 0,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                parent_blend_buffer.view(),
+                                            ),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 1,
+                                            resource: wgpu::BindingResource::TextureView(
+                                                texture.view(),
+                                            ),
+                                        },
+                                        wgpu::BindGroupEntry {
+                                            binding: 2,
+                                            resource: wgpu::BindingResource::Sampler(
+                                                descriptors
+                                                    .bitmap_samplers
+                                                    .get_sampler(false, false),
+                                            ),
+                                        },
+                                    ],
+                                })
+                        })
+                        .collect::<Vec<_>>();
+
+                    // A child covering only part of the target needs its quad placed there and its
+                    // own UV remap; a full-surface child keeps the cached whole-frame group.
+                    let region_bind_groups = batch
+                        .iter()
+                        .map(|(_, region)| {
+                            region.map(|region| target.region_frame_bind_group(descriptors, region))
+                        })
+                        .collect::<Vec<_>>();
 
                     let mut render_pass =
                         draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -428,28 +507,39 @@ impl Surface {
                         );
                     }
 
-                    // A child covering only part of the target needs its quad placed there and its
-                    // own UV remap; a full-surface child keeps the cached whole-frame group.
-                    let region_bind_group =
-                        region.map(|region| target.region_frame_bind_group(descriptors, region));
-                    render_pass.set_bind_group(
-                        1,
-                        region_bind_group
-                            .as_ref()
-                            .unwrap_or_else(|| target.whole_frame_bind_group(descriptors)),
-                        &[0],
-                    );
-                    render_pass.set_bind_group(2, &blend_bind_group, &[]);
-
                     render_pass.set_vertex_buffer(0, descriptors.quad.vertices_pos.slice(..));
                     render_pass.set_index_buffer(
                         descriptors.quad.indices.slice(..),
                         wgpu::IndexFormat::Uint32,
                     );
 
-                    render_pass.draw_indexed(0..6, 0, 0..1);
+                    // The geometry and pipeline are set once for the batch; only the two bind
+                    // groups that identify a particular child change between draws.
+                    for (blend_bind_group, region_bind_group) in
+                        blend_bind_groups.iter().zip(&region_bind_groups)
+                    {
+                        render_pass.set_bind_group(
+                            1,
+                            region_bind_group
+                                .as_ref()
+                                .unwrap_or_else(|| target.whole_frame_bind_group(descriptors)),
+                            &[0],
+                        );
+                        render_pass.set_bind_group(2, blend_bind_group, &[]);
+                        render_pass.draw_indexed(0..6, 0, 0..1);
+                    }
                 }
             }
+
+            // The pass is encoded and its borrow of the encoder has ended, so this is the only
+            // point in the loop where the command buffer can be handed over. A crowded map encodes
+            // hundreds of passes here and every one of them used to reach the driver as a single
+            // submission; see `submission_splitter` for why that is suspected of losing the device.
+            crate::submission_splitter::note_pass_and_maybe_split(
+                descriptors,
+                draw_encoder,
+                staging_belt,
+            );
         }
 
         // If nothing happened, ensure it's cleared so we don't operate on garbage data

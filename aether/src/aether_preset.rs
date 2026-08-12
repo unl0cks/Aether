@@ -25,16 +25,42 @@ pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedT
     // own limit was raised and now reuses 99.7%. Peak resident GPU memory in that session was
     // 5.45 GB on a 10 GB card, so there is room to let this pool keep what it is being handed.
     max_cached_bytes: 512 * 1024 * 1024,
-    max_cached_entries: 512,
+    // Raising the idle window flipped the binding limit from age to budget exactly as intended --
+    // age evictions fell from 44,525 to 169 and peak live textures from 12,085 to 1,970 -- but it
+    // also revealed how many distinct sizes this pool really handles. With entries finally
+    // surviving long enough to be counted, the session held 577 buckets on Vulkan and 774 on DX12
+    // against a 512 entry cap, so the pool could not keep even one texture per size it was being
+    // asked for, and it discarded 12,107 entries for budget while holding 0.08 GB of its 512 MiB.
+    //
+    // Entries, not bytes, were doing the evicting. This is the same mistake the general pool made
+    // when its cap was 128 across all buckets; the fix there was to let the byte budget be the
+    // limit that binds, and it now reuses 99.8%. Three entries per observed size, with the 512 MiB
+    // budget still the real ceiling.
+    max_cached_entries: 2048,
     // Raising the byte budget moved the bottleneck rather than removing it. Budget evictions fell
     // from 99,073 to 7,380 and reuse rose from 62.2% to 74.7%, but age evictions rose from 28,372
     // to 52,573 and the pool ended the session holding 9 entries across 6 buckets. A one-frame
     // window only keeps a size that is used on consecutive frames, and AQW's animations revisit a
     // size every few frames as a loop comes back around, so the window was throwing away work that
-    // was about to be asked for again. Four frames is still short enough that a size which stops
-    // being used is gone within a tenth of a second.
-    max_idle_frames: 4,
-    max_cached_globals: 128,
+    // was about to be asked for again.
+    //
+    // Four frames was still far too short, and the cost was not a slow frame but a lost device. On
+    // an RX 6800 XT this pool reallocated 44,673 textures in 160 seconds -- 96% of every texture
+    // the session created -- while sitting at 0.02 GB of its 512 MiB budget and evicting 44,525
+    // entries for age against 0 for budget. That allocate-and-free churn is what shredded the
+    // allocator's free space: 911 MB free at the end, in contiguous runs no larger than 24 MB.
+    //
+    // Frames are the wrong unit. A crowded room lowers the frame rate and raises the number of
+    // distinct sizes at the same time, so a frame count shrinks in wall time precisely when the
+    // pool is under the most pressure; at the 9 fps measured in a full Yulgar, four frames is under
+    // half a second. 120 frames is two seconds at 60 fps and ten at 12, which lets a size survive
+    // the animation loops that come back for it. The 512 MiB and 512 entry caps still bound the
+    // pool -- they are simply allowed to be the limit that binds, as they already are for the
+    // general pool, which reuses 99.9% against this one's 87.5%.
+    max_idle_frames: 120,
+    // Scaled with the entry cap for the same reason: a globals cache smaller than the number of
+    // live size buckets thrashes on exactly the sizes a frame keeps coming back to.
+    max_cached_globals: 512,
 };
 
 /// Apply conservative AQW defaults while preserving explicit CLI overrides.
@@ -234,13 +260,21 @@ mod tests {
         let opt = parse_and_apply(&["aether"]);
         assert!(opt.aether_bounded_offscreen_pool);
 
-        // A one-frame window was pinned here on the reasoning that it is what makes the pool
-        // "immediately reusable". Measurement retired that too: once the byte budget stopped being
-        // the binding limit, age became the dominant eviction by 52,573 to 7,380, and the pool held
-        // 9 entries. The window still has to be short, because its job is to drop sizes that have
-        // stopped being asked for, but one frame was short enough to drop sizes still in use.
-        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames >= 1);
-        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames <= 8);
+        // The window was capped at 8 frames on the reasoning that it only has to outlast an
+        // animation loop. A 6800 XT then lost its device to allocator fragmentation, and the pool
+        // was the cause: it reallocated 44,673 textures in 160 seconds, 96% of every texture the
+        // session created, while holding 148 of its 512 permitted entries and 0.02 GB of its
+        // 512 MiB budget. Evictions were 44,525 for age against 0 for budget.
+        //
+        // Frames are the wrong unit for the job. A crowded room both lowers the frame rate and
+        // raises the number of distinct sizes in flight, so a fixed frame count shrinks in wall
+        // time exactly when the pool is under the most pressure. At the 9 fps he measured, four
+        // frames is under half a second.
+        //
+        // So the window is now long enough that the byte and entry budgets are what bind, which is
+        // where a bounded pool should be bounded. The general pool has always worked this way and
+        // reuses 99.9% against the offscreen pool's 87.5%.
+        assert!(AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames >= 60);
 
         // The byte budget used to be pinned at 128 MiB as well, on the theory that a short idle
         // window made a small budget harmless. Measurement disagreed: at 128 MiB the pool reused

@@ -63,6 +63,9 @@ pub struct WgpuMetricsSnapshot {
     pub draw_commands: u64,
     pub blend_chunks: u64,
     pub bind_groups: u64,
+    /// How many times a frame's commands were handed over part-way through. Zero means every frame
+    /// reached the driver in one piece, which is the state the device was lost in.
+    pub submission_splits: u64,
 }
 
 struct PoolCounters {
@@ -317,6 +320,7 @@ pub fn record_complex_blend(mode: usize) {
 }
 
 static RENDER_PASSES: AtomicU64 = AtomicU64::new(0);
+static SUBMISSION_SPLITS: AtomicU64 = AtomicU64::new(0);
 static DRAW_COMMANDS: AtomicU64 = AtomicU64::new(0);
 static BLEND_CHUNKS: AtomicU64 = AtomicU64::new(0);
 static BIND_GROUPS: AtomicU64 = AtomicU64::new(0);
@@ -329,6 +333,11 @@ pub fn record_encoded_chunk(draw_commands: u64, is_blend: bool) {
     if is_blend {
         saturating_atomic_add(&BLEND_CHUNKS, 1);
     }
+}
+
+/// A frame's commands were handed to the driver part-way through rather than all at once.
+pub fn record_submission_split() {
+    saturating_atomic_add(&SUBMISSION_SPLITS, 1);
 }
 
 /// Record a bind group built during encoding rather than served from a cache.
@@ -347,6 +356,7 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         cache_entries: CACHE_ENTRIES.swap(0, Ordering::Relaxed),
         queue_nanos: QUEUE_NANOS.swap(0, Ordering::Relaxed),
         render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
+        submission_splits: SUBMISSION_SPLITS.swap(0, Ordering::Relaxed),
         complex_blends: std::array::from_fn(|i| COMPLEX_BLENDS[i].swap(0, Ordering::Relaxed)),
         draw_commands: DRAW_COMMANDS.swap(0, Ordering::Relaxed),
         blend_chunks: BLEND_CHUNKS.swap(0, Ordering::Relaxed),
@@ -361,6 +371,35 @@ pub fn estimate_texture_bytes(
     sample_count: u32,
 ) -> Option<u64> {
     crate::texture_pool_policy::estimate_texture_bytes(size, format, mip_level_count, sample_count)
+}
+
+#[cfg(test)]
+mod recent_texture_tests {
+    use super::*;
+
+    /// A device lost with 15 GB free is not explained by any total, so the crash report has to be
+    /// able to name the request that failed. The newest entry is the one that matters, which means
+    /// the ring must not report it first or bury it once it wraps.
+    #[test]
+    fn the_ring_reports_recent_creations_oldest_first_and_survives_wrapping() {
+        let _ = recent_textures();
+        for index in 0..(RECENT_TEXTURE_SLOTS as u32 + 3) {
+            record_texture_created(TextureOrigin::Pool, 100 + index, 200 + index, 4, 64);
+        }
+
+        let recent = recent_textures();
+        assert_eq!(recent.len(), RECENT_TEXTURE_SLOTS);
+
+        let newest = recent.last().unwrap();
+        let last_index = RECENT_TEXTURE_SLOTS as u32 + 2;
+        assert_eq!(newest.width, 100 + last_index);
+        assert_eq!(newest.height, 200 + last_index);
+        assert_eq!(newest.samples, 4);
+        assert_eq!(newest.origin, "pool");
+
+        // Oldest surviving is three in, since three were overwritten.
+        assert_eq!(recent[0].width, 103);
+    }
 }
 
 #[cfg(test)]
@@ -798,6 +837,53 @@ fn texture_key(origin: TextureOrigin, width: u32, height: u32, samples: u32) -> 
         | (height.min(0x1FFF_FFFF) as u64)
 }
 
+/// The most recent texture creations, newest last.
+///
+/// When the device is lost to "Out of memory" the log carries no indication of what failed: wgpu
+/// reports the loss and nothing else. Totals cannot answer it either, since the card had 15 GB free
+/// at the time. What is missing is the request itself, so the last few are kept and printed with the
+/// census. The one at the end is the closest thing to the allocation that killed the device.
+const RECENT_TEXTURE_SLOTS: usize = 16;
+static RECENT_TEXTURES: [AtomicU64; RECENT_TEXTURE_SLOTS] =
+    [const { AtomicU64::new(0) }; RECENT_TEXTURE_SLOTS];
+static RECENT_TEXTURE_CURSOR: AtomicU64 = AtomicU64::new(0);
+
+/// One recent creation, decoded.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RecentTexture {
+    pub origin: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub samples: u32,
+}
+
+/// The recent creations, oldest first. Slots never written are skipped.
+pub fn recent_textures() -> Vec<RecentTexture> {
+    let cursor = RECENT_TEXTURE_CURSOR.load(Ordering::Relaxed);
+    let mut out = Vec::with_capacity(RECENT_TEXTURE_SLOTS);
+    for step in 0..RECENT_TEXTURE_SLOTS as u64 {
+        // Start one past the newest so the oldest surviving entry comes first.
+        let index = ((cursor + step) % RECENT_TEXTURE_SLOTS as u64) as usize;
+        let key = RECENT_TEXTURES[index].load(Ordering::Relaxed);
+        if key == 0 {
+            continue;
+        }
+        out.push(RecentTexture {
+            // The encoding is 1-based on purpose, so that an untouched slot reads as zero.
+            origin: match key >> 62 {
+                1 => TextureOrigin::Pool,
+                2 => TextureOrigin::Bitmap,
+                _ => TextureOrigin::GradientAtlas,
+            }
+            .name(),
+            width: ((key >> 29) & 0x1FFF_FFFF) as u32,
+            height: (key & 0x1FFF_FFFF) as u32,
+            samples: ((key >> 58) & 0xF) as u32,
+        });
+    }
+    out
+}
+
 pub fn record_texture_created(
     origin: TextureOrigin,
     width: u32,
@@ -806,6 +892,10 @@ pub fn record_texture_created(
     bytes: u64,
 ) {
     let key = texture_key(origin, width, height, samples);
+    // Wrapping ring, written before the census bookkeeping below so an allocation that is about to
+    // fail is still recorded.
+    let slot = RECENT_TEXTURE_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % RECENT_TEXTURE_SLOTS;
+    RECENT_TEXTURES[slot].store(key, Ordering::Relaxed);
     let start = (key % TEXTURE_BUCKETS as u64) as usize;
     for probe in 0..TEXTURE_BUCKETS {
         let slot = &TEXTURE_CENSUS[(start + probe) % TEXTURE_BUCKETS];
@@ -970,6 +1060,23 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
             count,
             slot.bytes.load(Ordering::Relaxed) as f64 / 1e6,
         ));
+    }
+
+    // The requests themselves, newest last. Every device loss so far has arrived with no indication
+    // of what was being allocated, on a card with most of its memory free, so the totals above have
+    // never been able to explain one. The final entry is the closest thing to the failing request.
+    let recent = recent_textures();
+    if !recent.is_empty() {
+        out.push(format!(
+            "last {} texture requests before the fault (newest last):",
+            recent.len()
+        ));
+        for texture in recent {
+            out.push(format!(
+                "  {:>6} {:>5}x{:<5} x{}",
+                texture.origin, texture.width, texture.height, texture.samples,
+            ));
+        }
     }
     out
 }

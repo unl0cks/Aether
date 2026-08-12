@@ -185,7 +185,14 @@ impl GlowFilter {
         // to follow whichever one ends up in the bind group.
         let blur_region = blurred
             .as_ref()
-            .map(|blurred| FilterRegion::for_whole_texture(blurred.color_texture()))
+            // The blurred layer's own extent, not its texture's: it came from the offscreen pool,
+            // which rounds sizes out to a grid, so the texture is often larger than the image in it.
+            .map(|blurred| {
+                FilterRegion::for_target(
+                    blurred.color_texture(),
+                    (blurred.width(), blurred.height()),
+                )
+            })
             .unwrap_or_else(|| source.region());
 
         let target = CommandTarget::new(
@@ -264,6 +271,18 @@ impl GlowFilter {
             ..Default::default()
         });
         render_pass.set_pipeline(pipeline);
+        // The quad's `position` runs 0..1 of the render target, so confine the target to the
+        // region actually being filtered. The offscreen pool rounds sizes out to a grid, which
+        // makes a pooled texture routinely larger than the region drawn into it, and without this
+        // the filtered image is stretched across the padding instead of staying in its corner.
+        render_pass.set_viewport(
+            0.0,
+            0.0,
+            target.width() as f32,
+            target.height() as f32,
+            0.0,
+            1.0,
+        );
 
         render_pass.set_bind_group(0, &filter_group, &[]);
 

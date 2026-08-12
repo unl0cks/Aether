@@ -2285,20 +2285,41 @@ impl Player {
     }
 
     pub fn render(&mut self) {
+        #[cfg(feature = "aether_metrics")]
+        let render_started = Instant::now();
+
         #[cfg(feature = "aether_performance")]
-        self.sweep_idle_gpu_uploads_if_due();
+        {
+            #[cfg(feature = "aether_metrics")]
+            let phase_started = Instant::now();
+            self.sweep_idle_gpu_uploads_if_due();
+            #[cfg(feature = "aether_metrics")]
+            crate::aether_metrics::record_render_phase(
+                crate::aether_metrics::RenderPhase::SweepIdleUploads,
+                phase_started.elapsed(),
+            );
+        }
 
         let invalidated = self.enter_arena(|_, gc_root, _| gc_root.stage.invalidated());
 
         if invalidated {
+            #[cfg(feature = "aether_metrics")]
+            let phase_started = Instant::now();
             self.update(|context| {
                 let stage = context.stage;
                 stage.broadcast_render(context);
             });
+            #[cfg(feature = "aether_metrics")]
+            crate::aether_metrics::record_render_phase(
+                crate::aether_metrics::RenderPhase::BroadcastRender,
+                phase_started.elapsed(),
+            );
         }
 
         let mut background_color = Color::WHITE;
 
+        #[cfg(feature = "aether_metrics")]
+        let phase_started = Instant::now();
         let (cache_draws, commands) = self.enter_arena_mut(|gc_context, gc_root, this| {
             let stage = gc_root.stage;
 
@@ -2367,11 +2388,29 @@ impl Player {
 
             (cache_draws, commands)
         });
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_render_phase(
+            crate::aether_metrics::RenderPhase::BuildCommands,
+            phase_started.elapsed(),
+        );
 
+        #[cfg(feature = "aether_metrics")]
+        let phase_started = Instant::now();
         self.renderer
             .submit_frame(background_color, commands, cache_draws);
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_render_phase(
+            crate::aether_metrics::RenderPhase::SubmitFrame,
+            phase_started.elapsed(),
+        );
 
         self.needs_render = false;
+
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_render_phase(
+            crate::aether_metrics::RenderPhase::Total,
+            render_started.elapsed(),
+        );
     }
 
     /// The current frame of the main timeline, if available.

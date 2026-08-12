@@ -32,6 +32,11 @@ pub mod utils;
 // Deliberately not behind `aether_metrics`. Public builds are made without it, which is the
 // reason every AMD device-loss report so far arrived with no resource data in it.
 pub mod aether_gpu_timeline;
+// Ungated for the same reason: a device loss on a public build is exactly when the shape of the
+// allocator's free space is worth knowing, and totals alone have already failed to explain one.
+pub mod aether_allocator_report;
+// Ungated: this changes how frames are submitted on every build, not just diagnostic ones.
+pub mod submission_splitter;
 #[cfg(feature = "aether_metrics")]
 pub mod aether_metrics;
 

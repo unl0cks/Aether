@@ -587,8 +587,183 @@ static BITMAP_CACHE_TEXTURE_ALLOCATED_BYTES_ESTIMATE: AtomicU64 = AtomicU64::new
 static BITMAP_CACHE_TEXTURE_REUSES: AtomicU64 = AtomicU64::new(0);
 static BITMAP_CACHE_TEXTURE_RESIZE_ALLOCATIONS: AtomicU64 = AtomicU64::new(0);
 
+/// How long inbound socket data sat between the OS handing it over and the player reading it.
+///
+/// The read side is a proper async loop, so bytes leave the kernel as soon as they arrive. But they
+/// are pushed onto a channel that is only drained inside `Player::tick`, and nothing wakes the event
+/// loop when a packet lands. A server reply can therefore sit in memory, already received, until the
+/// next scheduled tick. This measures that gap, which is added latency the client controls and is
+/// entirely separate from the round trip to the server.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SocketQueueSnapshot {
+    pub packets: u64,
+    pub total_wait_ns: u64,
+    pub max_wait_ns: u64,
+    /// Drains that found no stamp waiting. See [`SocketQueueWait::dequeued`].
+    pub unpaired_drains: u64,
+    pub dropped_stamps: u64,
+}
+
+/// The most unread arrival stamps to keep. Comfortably above any real backlog, since the drain
+/// empties the channel every tick.
+const MAX_PENDING_SOCKET_STAMPS: usize = 1_024;
+
+/// Pairs arrival stamps with drains in order.
+///
+/// Kept separate from the global below so the pairing can be tested against exact timestamps
+/// rather than against sleeps.
+#[derive(Debug, Default)]
+struct SocketQueueWait {
+    stamps: std::collections::VecDeque<u64>,
+    snapshot: SocketQueueSnapshot,
+}
+
+impl SocketQueueWait {
+    fn queued(&mut self, now_ns: u64) {
+        if self.stamps.len() >= MAX_PENDING_SOCKET_STAMPS {
+            self.stamps.pop_front();
+            self.snapshot.dropped_stamps = self.snapshot.dropped_stamps.saturating_add(1);
+        }
+        self.stamps.push_back(now_ns);
+    }
+
+    /// The player has taken one packet off the channel.
+    ///
+    /// A drain with no stamp waiting means the two sides have lost their pairing, which is counted
+    /// rather than recorded as a zero-length wait: a bogus zero would drag the average toward "no
+    /// delay", which is the very thing being measured.
+    fn dequeued(&mut self, now_ns: u64) {
+        let Some(queued_at_ns) = self.stamps.pop_front() else {
+            self.snapshot.unpaired_drains = self.snapshot.unpaired_drains.saturating_add(1);
+            return;
+        };
+        let waited_ns = now_ns.saturating_sub(queued_at_ns);
+        self.snapshot.packets = self.snapshot.packets.saturating_add(1);
+        self.snapshot.total_wait_ns = self.snapshot.total_wait_ns.saturating_add(waited_ns);
+        self.snapshot.max_wait_ns = self.snapshot.max_wait_ns.max(waited_ns);
+    }
+
+    /// Takes the counters. The unread stamps stay: those packets have not been drained yet, and
+    /// their wait belongs to whichever interval finally reads them.
+    fn take(&mut self) -> SocketQueueSnapshot {
+        std::mem::take(&mut self.snapshot)
+    }
+}
+
+static SOCKET_QUEUE_WAIT: std::sync::Mutex<Option<SocketQueueWait>> = std::sync::Mutex::new(None);
+
+fn with_socket_queue_wait<T>(body: impl FnOnce(&mut SocketQueueWait) -> T) -> T {
+    let mut guard = SOCKET_QUEUE_WAIT
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    body(guard.get_or_insert_with(SocketQueueWait::default))
+}
+
+/// The clock these stamps are measured against.
+///
+/// `Instant` cannot be stored in a `const`-constructed static, and the two sides run on different
+/// threads, so both read the same lazily started origin.
+fn socket_clock_ns() -> u64 {
+    static ORIGIN: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    let origin = ORIGIN.get_or_init(Instant::now);
+    u64::try_from(origin.elapsed().as_nanos()).unwrap_or(u64::MAX)
+}
+
+/// Inbound data has been read off the socket and handed to the channel.
+#[inline]
+pub fn socket_packet_queued() {
+    let now_ns = socket_clock_ns();
+    with_socket_queue_wait(|wait| wait.queued(now_ns));
+}
+
+/// The player has taken inbound data off the channel.
+#[inline]
+pub fn socket_packet_dequeued() {
+    let now_ns = socket_clock_ns();
+    with_socket_queue_wait(|wait| wait.dequeued(now_ns));
+}
+
+pub fn take_socket_queue_snapshot() -> SocketQueueSnapshot {
+    with_socket_queue_wait(SocketQueueWait::take)
+}
+
+/// The stages of `Player::render`, which is where roughly 95% of a click's wait to reach the screen
+/// was measured to go.
+///
+/// `Total` is the whole call, and the rest are the pieces inside it. Keeping the whole alongside the
+/// parts is deliberate: the useful number is the one nobody claimed, and that can only be computed
+/// if the total was measured rather than added up from the phases we happened to think of.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RenderPhase {
+    Total,
+    /// Dispatching AVM2's `Event.RENDER` to whatever registered for it. The game's own code.
+    BroadcastRender,
+    /// Walking the display list to build the command list. Pure CPU, and no GPU work happens yet.
+    BuildCommands,
+    /// Handing the commands to the renderer, including the offscreen bitmap-cache passes.
+    SubmitFrame,
+    /// Evicting GPU uploads nothing has touched lately.
+    SweepIdleUploads,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RenderPhaseSnapshot {
+    pub total: TimingSnapshot,
+    pub broadcast_render: TimingSnapshot,
+    pub build_commands: TimingSnapshot,
+    pub submit_frame: TimingSnapshot,
+    pub sweep_idle_uploads: TimingSnapshot,
+}
+
+impl RenderPhaseSnapshot {
+    /// Time inside `Player::render` that no phase accounted for.
+    ///
+    /// This is the number that says whether the split is finished. A large remainder means the
+    /// expensive work is somewhere none of the phases above are looking, which is exactly the
+    /// situation that made this instrumentation necessary in the first place.
+    pub fn unattributed_ns(&self) -> u64 {
+        let claimed = self
+            .broadcast_render
+            .total_ns
+            .saturating_add(self.build_commands.total_ns)
+            .saturating_add(self.submit_frame.total_ns)
+            .saturating_add(self.sweep_idle_uploads.total_ns);
+        // Each phase reads the clock separately, so the parts can land a hair over the whole.
+        self.total.total_ns.saturating_sub(claimed)
+    }
+}
+
+static RENDER_TOTAL: TimingCounter = TimingCounter::new();
+static RENDER_BROADCAST: TimingCounter = TimingCounter::new();
+static RENDER_BUILD_COMMANDS: TimingCounter = TimingCounter::new();
+static RENDER_SUBMIT_FRAME: TimingCounter = TimingCounter::new();
+static RENDER_SWEEP_IDLE_UPLOADS: TimingCounter = TimingCounter::new();
+
+impl RenderPhase {
+    fn counter(self) -> &'static TimingCounter {
+        match self {
+            Self::Total => &RENDER_TOTAL,
+            Self::BroadcastRender => &RENDER_BROADCAST,
+            Self::BuildCommands => &RENDER_BUILD_COMMANDS,
+            Self::SubmitFrame => &RENDER_SUBMIT_FRAME,
+            Self::SweepIdleUploads => &RENDER_SWEEP_IDLE_UPLOADS,
+        }
+    }
+}
+
+#[inline]
+pub fn record_render_phase(phase: RenderPhase, duration: Duration) {
+    record_render_phase_ns(phase, u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
+}
+
+#[inline]
+pub fn record_render_phase_ns(phase: RenderPhase, elapsed_ns: u64) {
+    phase.counter().record(elapsed_ns);
+}
+
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RenderSnapshot {
+    pub phases: RenderPhaseSnapshot,
     pub display_objects_entered: u64,
     pub display_objects_mask_skipped: u64,
     pub container_children_visited: u64,
@@ -689,6 +864,13 @@ pub fn bitmap_cache_texture_allocated(width: u32, height: u32, resized: bool) {
 /// The frontend should call this once after each rendered movie frame.
 pub fn take_render_snapshot() -> RenderSnapshot {
     let snapshot = RenderSnapshot {
+        phases: RenderPhaseSnapshot {
+            total: RENDER_TOTAL.take(),
+            broadcast_render: RENDER_BROADCAST.take(),
+            build_commands: RENDER_BUILD_COMMANDS.take(),
+            submit_frame: RENDER_SUBMIT_FRAME.take(),
+            sweep_idle_uploads: RENDER_SWEEP_IDLE_UPLOADS.take(),
+        },
         display_objects_entered: DISPLAY_OBJECTS_ENTERED.swap(0, Ordering::Relaxed),
         display_objects_mask_skipped: DISPLAY_OBJECTS_MASK_SKIPPED.swap(0, Ordering::Relaxed),
         container_children_visited: CONTAINER_CHILDREN_VISITED.swap(0, Ordering::Relaxed),
@@ -1015,6 +1197,131 @@ mod tests {
         assert_eq!(snapshot.mouse_picks.total_ns, 100_000);
         assert_eq!(snapshot.mouse_picks.invocations, 1);
         assert_eq!(take_input_snapshot(), InputSnapshot::default());
+    }
+
+    #[test]
+    fn a_packet_reports_how_long_it_waited_between_arriving_and_being_read() {
+        let mut wait = SocketQueueWait::default();
+        wait.queued(1_000);
+        wait.queued(2_000);
+        wait.dequeued(9_000);
+        wait.dequeued(10_000);
+
+        let snapshot = wait.take();
+        assert_eq!(snapshot.packets, 2);
+        assert_eq!(snapshot.total_wait_ns, 8_000 + 8_000);
+        assert_eq!(snapshot.max_wait_ns, 8_000);
+        assert_eq!(snapshot.unpaired_drains, 0);
+        assert_eq!(snapshot.dropped_stamps, 0);
+
+        assert_eq!(wait.take(), SocketQueueSnapshot::default());
+    }
+
+    /// Packets are stamped as they arrive and matched in order, so a drain with nothing stamped
+    /// means the two sides have lost their pairing. Recording it as a zero-length wait would
+    /// quietly pull the average toward "no delay", which is the exact answer being tested for.
+    #[test]
+    fn a_drain_with_nothing_stamped_is_counted_rather_than_recorded_as_instant() {
+        let mut wait = SocketQueueWait::default();
+        wait.dequeued(5_000);
+
+        let snapshot = wait.take();
+        assert_eq!(snapshot.packets, 0);
+        assert_eq!(snapshot.total_wait_ns, 0);
+        assert_eq!(snapshot.unpaired_drains, 1);
+    }
+
+    /// If stamps ever outrun drains the queue must not grow without bound. Dropping the oldest
+    /// keeps the measurement about packets arriving now rather than about one from a minute ago.
+    #[test]
+    fn a_backlog_of_stamps_drops_the_oldest_and_says_so() {
+        let mut wait = SocketQueueWait::default();
+        for stamp in 0..(MAX_PENDING_SOCKET_STAMPS as u64 + 2) {
+            wait.queued(stamp);
+        }
+        wait.dequeued(1_000);
+
+        let snapshot = wait.take();
+        assert_eq!(snapshot.dropped_stamps, 2);
+        // The surviving front is stamp 2, not stamp 0.
+        assert_eq!(snapshot.max_wait_ns, 998);
+    }
+
+    #[test]
+    fn render_phase_snapshot_accumulates_and_resets() {
+        let _guard = lock_metrics_test();
+        let _ = take_render_snapshot();
+
+        record_render_phase_ns(RenderPhase::Total, 15_000);
+        record_render_phase_ns(RenderPhase::BroadcastRender, 1_000);
+        record_render_phase_ns(RenderPhase::BuildCommands, 9_000);
+        record_render_phase_ns(RenderPhase::BuildCommands, 1_000);
+        record_render_phase_ns(RenderPhase::SubmitFrame, 3_000);
+        record_render_phase_ns(RenderPhase::SweepIdleUploads, 500);
+
+        let phases = take_render_snapshot().phases;
+        assert_eq!(phases.total.total_ns, 15_000);
+        assert_eq!(phases.total.invocations, 1);
+        assert_eq!(phases.broadcast_render.total_ns, 1_000);
+        assert_eq!(phases.build_commands.total_ns, 10_000);
+        assert_eq!(phases.build_commands.invocations, 2);
+        assert_eq!(phases.submit_frame.total_ns, 3_000);
+        assert_eq!(phases.sweep_idle_uploads.total_ns, 500);
+
+        assert_eq!(
+            take_render_snapshot().phases,
+            RenderPhaseSnapshot::default()
+        );
+    }
+
+    /// The point of splitting the render is to find the time nobody claimed. Reporting that
+    /// remainder is what says whether the split is finished, so it is computed rather than eyeballed
+    /// from four numbers in a log.
+    #[test]
+    fn the_render_time_no_phase_claimed_is_the_reported_remainder() {
+        let phases = RenderPhaseSnapshot {
+            total: TimingSnapshot {
+                total_ns: 15_000,
+                invocations: 1,
+            },
+            broadcast_render: TimingSnapshot {
+                total_ns: 1_000,
+                invocations: 1,
+            },
+            build_commands: TimingSnapshot {
+                total_ns: 9_000,
+                invocations: 1,
+            },
+            submit_frame: TimingSnapshot {
+                total_ns: 3_000,
+                invocations: 1,
+            },
+            sweep_idle_uploads: TimingSnapshot {
+                total_ns: 500,
+                invocations: 1,
+            },
+        };
+
+        assert_eq!(phases.unattributed_ns(), 1_500);
+    }
+
+    /// Each phase is timed separately, so rounding or a clock that stepped can put the parts a hair
+    /// over the whole. That is a wobble in the last microsecond, not evidence of negative time.
+    #[test]
+    fn parts_adding_to_more_than_the_whole_report_no_remainder_rather_than_wrapping() {
+        let phases = RenderPhaseSnapshot {
+            total: TimingSnapshot {
+                total_ns: 1_000,
+                invocations: 1,
+            },
+            build_commands: TimingSnapshot {
+                total_ns: 1_200,
+                invocations: 1,
+            },
+            ..Default::default()
+        };
+
+        assert_eq!(phases.unattributed_ns(), 0);
     }
 
     #[test]

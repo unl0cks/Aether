@@ -723,6 +723,78 @@ impl<'a> WgpuCommandHandler<'a> {
 /// wrong place or at the wrong scale, this is the switch to try first.
 const SHRINK_COMPLEX_BLEND_TARGETS: bool = true;
 
+/// Whether runs of compatible blends may share a render pass.
+///
+/// On by default. Set `AETHER_BLEND_BATCH=0` to composite one blend per pass as before, which is
+/// the control for measuring what batching actually bought and the switch to reach for if blended
+/// content ever looks wrong.
+pub(crate) fn blend_batching_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("AETHER_BLEND_BATCH").as_deref(),
+            Ok("0") | Ok("off") | Ok("false")
+        )
+    })
+}
+
+/// Whether two blend sub-targets cover any of the same pixels.
+///
+/// This decides whether a run of blends can share one composite pass. Each complex blend reads the
+/// parent back through a snapshot and then writes over it, so a later blend that overlaps an earlier
+/// one has to see what the earlier one wrote. Disjoint blends do not, which is what makes them
+/// batchable -- and getting this wrong composites against a stale backdrop, silently.
+///
+/// `None` means the child covers the whole surface, so it overlaps everything including another
+/// `None`.
+pub(crate) fn blend_regions_overlap(
+    a: Option<(u32, u32, u32, u32)>,
+    b: Option<(u32, u32, u32, u32)>,
+) -> bool {
+    let (Some((ax, ay, aw, ah)), Some((bx, by, bw, bh))) = (a, b) else {
+        return true;
+    };
+    // Touching edges do not overlap: a region owns [x, x + width).
+    ax < bx.saturating_add(bw)
+        && bx < ax.saturating_add(aw)
+        && ay < by.saturating_add(bh)
+        && by < ay.saturating_add(ah)
+}
+
+/// What a complex blend costs, measured on a crowded AQW map.
+///
+/// Frame time here is render *passes*, not draws: 92.5 us per pass on a 6800 XT, near enough flat
+/// whether the frame is fast or slow. Fitting a second's worth of perf lines over a four minute
+/// session gives
+///
+/// ```text
+///     passes ~= 3.06 * complex_blends + 69        (r = +0.948, n = 260)
+/// ```
+///
+/// so a slow frame is 490 passes over 121 blends and 45.3 ms. The three passes are the sub-target
+/// draw, the composite, and the parent's draw stream splitting in two around them. The blend buffer
+/// copy is a `copy_texture_to_texture` and does not add a pass.
+///
+/// Two modes are effectively all of it: multiply 49.4% and overlay 48.5% of every blend recorded.
+/// That matters because it means consecutive blends usually share a mode, which is what makes them
+/// batchable: a run of same-mode blends whose regions do not overlap can take one blend-buffer
+/// snapshot and one composite pass between them, since none of them reads what the others wrote.
+/// Non-overlapping children could also share one sub-target texture.
+///
+/// The payoff, holding 121 blends and 92.5 us per pass:
+///
+/// ```text
+///     passes/blend   passes   frame     fps
+///        3.06 (now)     440   40.7 ms   ~25
+///        2.00           312   28.8 ms   ~35
+///        1.50           251   23.2 ms   ~43
+/// ```
+///
+/// Halving it roughly doubles the frame rate in exactly the situation players complain about, and
+/// cuts offscreen texture demand by the same factor, which is the other half of the AMD device
+/// loss. The overlap test is the part to get right: composite a blend against a stale snapshot and
+/// it is silently wrong, so verify with the exporter harness in `_evidence/filtercheck`.
+///
 /// Grid that blend and mask sub-target regions snap out to.
 ///
 /// The pool keys buckets on exact dimensions, so content that drifts a pixel or two per frame while
@@ -1204,6 +1276,74 @@ fn bitmap_region_geometry_and_uv_scale(
         height as f32 / texture_size.1 as f32
     };
     ((width as f32, height as f32), [uv_x, uv_y])
+}
+
+#[cfg(test)]
+mod blend_batch_tests {
+    use super::blend_regions_overlap;
+
+    #[test]
+    fn separated_regions_do_not_overlap() {
+        assert!(!blend_regions_overlap(
+            Some((0, 0, 100, 100)),
+            Some((200, 200, 50, 50))
+        ));
+    }
+
+    /// A region owns [x, x + width), so meeting edges are not an overlap. Treating them as one
+    /// would break up runs of avatars standing side by side, which is the common case.
+    #[test]
+    fn regions_that_only_touch_do_not_overlap() {
+        assert!(!blend_regions_overlap(
+            Some((0, 0, 100, 100)),
+            Some((100, 0, 100, 100))
+        ));
+        assert!(!blend_regions_overlap(
+            Some((0, 0, 100, 100)),
+            Some((0, 100, 100, 100))
+        ));
+    }
+
+    #[test]
+    fn a_single_shared_pixel_is_an_overlap() {
+        assert!(blend_regions_overlap(
+            Some((0, 0, 100, 100)),
+            Some((99, 99, 50, 50))
+        ));
+    }
+
+    #[test]
+    fn containment_counts_either_way_round() {
+        assert!(blend_regions_overlap(
+            Some((0, 0, 200, 200)),
+            Some((50, 50, 10, 10))
+        ));
+        assert!(blend_regions_overlap(
+            Some((50, 50, 10, 10)),
+            Some((0, 0, 200, 200))
+        ));
+    }
+
+    /// A full-surface child covers every pixel, so it can never share a pass with anything.
+    #[test]
+    fn a_full_surface_child_overlaps_everything() {
+        assert!(blend_regions_overlap(None, None));
+        assert!(blend_regions_overlap(None, Some((10, 10, 5, 5))));
+        assert!(blend_regions_overlap(Some((10, 10, 5, 5)), None));
+    }
+
+    /// Overlap has to be symmetric or a batch's validity would depend on iteration order.
+    #[test]
+    fn overlap_is_symmetric() {
+        let cases = [
+            (Some((0, 0, 10, 10)), Some((5, 5, 10, 10))),
+            (Some((0, 0, 10, 10)), Some((20, 0, 10, 10))),
+            (Some((0, 0, 10, 10)), None),
+        ];
+        for (a, b) in cases {
+            assert_eq!(blend_regions_overlap(a, b), blend_regions_overlap(b, a));
+        }
+    }
 }
 
 #[cfg(test)]

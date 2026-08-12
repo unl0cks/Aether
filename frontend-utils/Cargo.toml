@@ -14,7 +14,9 @@ workspace = true
 default = ["native-tls"]
 cpal = ["dep:cpal", "dep:bytemuck", "ruffle_core/audio"]
 fs = []
-navigator = ["fs", "dep:async-io", "dep:tokio"]
+navigator = ["fs", "dep:async-io", "dep:tokio", "dep:socket2"]
+# Stamps inbound socket data on arrival so the player can report how long it waited to be read.
+aether_metrics = ["ruffle_core/aether_metrics"]
 
 # TLS backend for reqwest. `native-tls` is enabled by default; it uses the
 # system TLS component (OpenSSL/SChannel/SecureTransport) and keeps the binary
@@ -37,6 +39,8 @@ ruffle_core = { path = "../core", default-features = false }
 ruffle_render = { path = "../render", default-features = false }
 async-channel = { workspace = true }
 async-io = { version = "2.6.0", optional = true }
+# Already in the tree via tokio. Used for SO_KEEPALIVE, which tokio's TcpStream does not expose.
+socket2 = { version = "0.6.4", optional = true }
 futures-lite = "2.6.1"
 # Note: no TLS backend is enabled in this list on purpose; it is provided by
 # this crate's `native-tls` (default) / `rustls-tls` features instead.

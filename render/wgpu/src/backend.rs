@@ -269,11 +269,34 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
             viewport_scale_factor: 1.0,
             texture_pool: TexturePool::new(
                 general_texture_pool_policy(offscreen_texture_pool_policy),
+                // Its callers already snap blend and mask regions to a 128px grid, it reuses 99.8%
+                // across a couple of dozen buckets, and it holds the surface that reaches the
+                // window. Nothing to gain and a blit to get wrong.
+                false,
                 #[cfg(feature = "aether_metrics")]
                 crate::aether_metrics::TexturePoolKind::General,
             ),
             offscreen_texture_pool: TexturePool::new(
                 offscreen_texture_pool_policy,
+                // Where the 1,450 size buckets lived. Its textures are mostly filter
+                // intermediates -- `blur` takes a flip and a flop per pass, which is why the
+                // allocations before the last fault came in identical pairs -- so collapsing them
+                // required teaching the filters that a pooled target can be larger than the region
+                // drawn into it: a viewport confines `position`, and `FilterRegion` stops the UVs
+                // at the content.
+                //
+                // Still off, because that is necessary and not sufficient. Rendering the AQW loader
+                // through the offscreen exporter with this on moves 603,515 pixels on the first
+                // frame against a byte-identical baseline -- and the same SWF renders identically
+                // twice in a row, so that is a regression and not noise. The filter fixes above are
+                // pixel-identical to the code before them, so whatever still assumes a pooled
+                // target is exactly its texture lives outside the filters: the remaining suspects
+                // are `CommandTarget`'s whole-frame bind group and the blend and mask compositing
+                // in `surface::commands`, both of which sample a target back by its texture.
+                //
+                // `_evidence/filtercheck` has the harness. Render before and after, compare, and
+                // this is a measurement rather than a hope.
+                false,
                 #[cfg(feature = "aether_metrics")]
                 crate::aether_metrics::TexturePoolKind::Offscreen,
             ),
@@ -472,9 +495,11 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         result.push(format!("Adapter Device Type: {:?}", info.device_type));
         result.push(format!("Adapter Driver Name: {:?}", info.driver));
         result.push(format!("Adapter Driver Info: {:?}", info.driver_info));
+        // The policy actually in force, override included. Reporting the default here would put a
+        // label in the crash report that contradicts how the device was really created.
         result.push(format!(
             "Device Memory Policy: {:?}",
-            memory_hints_for_adapter_info(&info)
+            effective_memory_hints(&info)
         ));
 
         let enabled_features = self.descriptors.device.features();
@@ -550,6 +575,10 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         commands: CommandList,
         cache_entries: Vec<BitmapCacheEntry>,
     ) {
+        // Each frame starts its own submission budget. Carrying a part-full count across frames
+        // would split an ordinary frame early just because the previous one ended mid-count.
+        crate::submission_splitter::reset();
+
         let frame_output = match self.target.get_next_texture() {
             Ok(frame) => frame,
             Err(e) => {
@@ -630,13 +659,16 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                 );
                 let mut first_filter = true;
                 for filter in entry.filters {
+                    // The target's own extent, not its texture's. The offscreen pool rounds
+                    // requested sizes out to a grid so that near-identical content shares a bucket,
+                    // so a pooled texture is routinely larger than the region drawn into it. Taking
+                    // the texture's dimensions here would hand the next filter the padding as
+                    // though it were content, which for a blur means smearing cleared pixels back
+                    // over the edge of the image.
                     let source_size = if first_filter {
                         logical_size
                     } else {
-                        (
-                            target.color_texture().width(),
-                            target.color_texture().height(),
-                        )
+                        (target.width(), target.height())
                     };
                     target = self.descriptors.filters.apply(
                         &self.descriptors,
@@ -1297,28 +1329,67 @@ async fn request_device(
             label: None,
             required_features: features,
             required_limits: limits,
-            memory_hints: memory_hints_for_adapter(adapter),
+            memory_hints: effective_memory_hints(&adapter.get_info()),
             trace: wgpu::Trace::Off,
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
         })
         .await
 }
 
-#[inline]
-fn memory_hints_for_adapter(adapter: &wgpu::Adapter) -> wgpu::MemoryHints {
-    memory_hints_for_adapter_info(&adapter.get_info())
+/// Parse an explicit device memory policy.
+///
+/// The AMD device loss has survived two fixes aimed at how much is allocated, and the remaining
+/// suspicion is about the shape of the blocks it is allocated from. `MemoryUsage` was chosen for
+/// AMD Vulkan on the reasoning that small blocks avoid speculative allocation, and that reasoning
+/// has never actually been tested against the failure. This exists so both can be measured on one
+/// machine in one sitting rather than guessed at across another rebuild.
+fn parse_memory_policy(value: &str) -> Option<wgpu::MemoryHints> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "performance" => Some(wgpu::MemoryHints::Performance),
+        "usage" | "memoryusage" | "memory-usage" => Some(wgpu::MemoryHints::MemoryUsage),
+        _ => None,
+    }
+}
+
+/// The memory policy in force: the override if one was given, otherwise the per-adapter default.
+///
+/// Read from the environment rather than exposed as a setting. It is a diagnostic for one specific
+/// investigation and has no business anywhere a player would find it.
+fn effective_memory_hints(adapter_info: &wgpu::AdapterInfo) -> wgpu::MemoryHints {
+    static OVERRIDE: std::sync::OnceLock<Option<wgpu::MemoryHints>> = std::sync::OnceLock::new();
+    let override_hint = OVERRIDE.get_or_init(|| {
+        let raw = std::env::var("AETHER_GPU_MEMORY_POLICY").ok()?;
+        let parsed = parse_memory_policy(&raw);
+        if parsed.is_none() {
+            tracing::warn!("Ignoring unrecognised AETHER_GPU_MEMORY_POLICY {raw:?}");
+        }
+        parsed
+    });
+
+    match override_hint {
+        Some(hint) => hint.clone(),
+        None => memory_hints_for_adapter_info(adapter_info),
+    }
 }
 
 #[inline]
-fn memory_hints_for_adapter_info(adapter_info: &wgpu::AdapterInfo) -> wgpu::MemoryHints {
-    // wgpu 27's Vulkan performance policy grows suballocation blocks from 128 MiB to
-    // 512 MiB. The memory-usage policy uses 8 MiB to 64 MiB blocks, avoiding large
-    // speculative allocations on AMD's Windows Vulkan driver.
-    if is_amd_vulkan(adapter_info) {
-        wgpu::MemoryHints::MemoryUsage
-    } else {
-        wgpu::MemoryHints::Performance
-    }
+fn memory_hints_for_adapter_info(_adapter_info: &wgpu::AdapterInfo) -> wgpu::MemoryHints {
+    // AMD Vulkan used to be special-cased to `MemoryUsage`, on the reasoning that its 8-64 MiB
+    // blocks avoid large speculative allocations on AMD's Windows driver where `Performance` grows
+    // blocks from 128 MiB to 512 MiB. That reasoning was never tested against the device loss it
+    // was meant to help, and measuring it on the 6800 XT that kept crashing showed it was the cause
+    // rather than the cure:
+    //
+    //             policy   survived   peak texture memory   peak live textures
+    //        MemoryUsage       9.3s                795 MB                1,585
+    //        MemoryUsage      14.4s                588 MB                2,262
+    //        Performance     262.8s              3,025 MB               28,132
+    //
+    // Same machine, same map, minutes apart. Small blocks meant the allocator had to ask the driver
+    // for a new one constantly, and it was that request which failed -- the last sixteen textures
+    // before one such fault were all 128x128 to 384x384, so it was not the size of any single
+    // request that could not be met. Large blocks ask far less often and the client survives.
+    wgpu::MemoryHints::Performance
 }
 
 const AMD_VULKAN_MAX_FRAMES_IN_FLIGHT: usize = 2;
@@ -1410,24 +1481,45 @@ mod bitmap_cache_capacity_tests {
     }
 
     #[test]
-    fn amd_vulkan_uses_memory_conserving_allocations() {
-        let amd_vulkan = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Vulkan);
+    fn a_memory_policy_can_be_named_explicitly_and_junk_is_refused() {
         assert!(matches!(
-            memory_hints_for_adapter_info(&amd_vulkan),
-            wgpu::MemoryHints::MemoryUsage
+            parse_memory_policy("performance"),
+            Some(wgpu::MemoryHints::Performance)
         ));
+        assert!(matches!(
+            parse_memory_policy("  PerFormance  "),
+            Some(wgpu::MemoryHints::Performance)
+        ));
+        assert!(matches!(
+            parse_memory_policy("usage"),
+            Some(wgpu::MemoryHints::MemoryUsage)
+        ));
+        // An unreadable value must fall back to the per-adapter default rather than pick one,
+        // otherwise a typo silently changes what is being measured.
+        assert!(parse_memory_policy("fastest").is_none());
+        assert!(parse_memory_policy("").is_none());
+    }
 
-        let nvidia_vulkan = adapter_info("NVIDIA GeForce RTX 3080", 0x10de, wgpu::Backend::Vulkan);
-        assert!(matches!(
-            memory_hints_for_adapter_info(&nvidia_vulkan),
-            wgpu::MemoryHints::Performance
-        ));
-
-        let amd_dx12 = adapter_info("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Dx12);
-        assert!(matches!(
-            memory_hints_for_adapter_info(&amd_dx12),
-            wgpu::MemoryHints::Performance
-        ));
+    /// AMD Vulkan was singled out for the memory-conserving policy and it was the one configuration
+    /// that kept losing its device. On the reporter's 6800 XT it survived 9 and 14 seconds under
+    /// `MemoryUsage` against 263 seconds under `Performance`, so the special case is gone and no
+    /// adapter gets small blocks back without a measurement saying it should.
+    #[test]
+    fn every_adapter_gets_large_suballocation_blocks() {
+        for (name, vendor, backend) in [
+            ("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Vulkan),
+            ("AMD Radeon RX 6800 XT", 0x1002, wgpu::Backend::Dx12),
+            ("NVIDIA GeForce RTX 3080", 0x10de, wgpu::Backend::Vulkan),
+            ("Intel Arc A770", 0x8086, wgpu::Backend::Vulkan),
+        ] {
+            assert!(
+                matches!(
+                    memory_hints_for_adapter_info(&adapter_info(name, vendor, backend)),
+                    wgpu::MemoryHints::Performance
+                ),
+                "{name} on {backend:?} should use large blocks"
+            );
+        }
     }
 
     #[test]

@@ -55,6 +55,48 @@ impl FilterRegion {
         }
     }
 
+    /// The region a render target actually drew into, which is not always the whole texture.
+    ///
+    /// The offscreen pool rounds requested sizes out to a grid so near-identical content shares a
+    /// bucket, so a filter's output sits in the top-left corner of a texture that may be larger.
+    /// Reading it back with [`Self::for_whole_texture`] would treat the padding as content and
+    /// sample a glow or bevel across it.
+    pub fn for_target(texture: &wgpu::Texture, size: (u32, u32)) -> Self {
+        Self {
+            texture_size: (texture.width(), texture.height()),
+            point: (0, 0),
+            size,
+        }
+    }
+
+    /// A quad covering this region, for a pass whose output is the same shape as its input.
+    ///
+    /// `position` spans the whole render target, because the caller confines the target to the
+    /// region with a viewport. `uv` stops at the content, because the texture behind it may be
+    /// larger than the content is.
+    pub fn vertices(&self) -> [FilterVertex; 4] {
+        let corners = self.corners();
+        let uv = |corner: (f32, f32)| self.uv(corner, (0.0, 0.0));
+        [
+            FilterVertex {
+                position: [0.0, 0.0],
+                uv: uv(corners[0]),
+            },
+            FilterVertex {
+                position: [1.0, 0.0],
+                uv: uv(corners[1]),
+            },
+            FilterVertex {
+                position: [1.0, 1.0],
+                uv: uv(corners[2]),
+            },
+            FilterVertex {
+                position: [0.0, 1.0],
+                uv: uv(corners[3]),
+            },
+        ]
+    }
+
     /// UV of a point `offset` pixels from this region's corner, normalised against its texture.
     fn uv(&self, corner: (f32, f32), offset: (f32, f32)) -> [f32; 2] {
         [
@@ -169,30 +211,7 @@ impl<'a> FilterSource<'a> {
     }
 
     pub fn vertices(&self) -> [FilterVertex; 4] {
-        let source_width = self.texture.width() as f32;
-        let source_height = self.texture.height() as f32;
-        let left = self.point.0;
-        let top = self.point.1;
-        let right = left + self.size.0;
-        let bottom = top + self.size.1;
-        [
-            FilterVertex {
-                position: [0.0, 0.0],
-                uv: [left as f32 / source_width, top as f32 / source_height],
-            },
-            FilterVertex {
-                position: [1.0, 0.0],
-                uv: [right as f32 / source_width, top as f32 / source_height],
-            },
-            FilterVertex {
-                position: [1.0, 1.0],
-                uv: [right as f32 / source_width, bottom as f32 / source_height],
-            },
-            FilterVertex {
-                position: [0.0, 1.0],
-                uv: [left as f32 / source_width, bottom as f32 / source_height],
-            },
-        ]
+        self.region().vertices()
     }
 
     /// Vertices for a filter sampling this source plus `blur`, a separate blurred layer.
@@ -419,6 +438,46 @@ pub const VERTEX_BUFFERS_DESCRIPTION_FILTERS_WITH_DOUBLE_BLUR: [wgpu::VertexBuff
             3 => Float32x2,
         ],
     }];
+
+#[cfg(test)]
+mod region_tests {
+    use super::FilterRegion;
+
+    /// A filter's output occupies the corner of a texture the pool may have rounded up, so the UVs
+    /// that read it back have to stop at the content. Taking the whole texture would drag the
+    /// cleared padding into the glow.
+    #[test]
+    fn a_target_region_stops_at_the_content_not_the_texture_edge() {
+        let region = FilterRegion {
+            texture_size: (64, 32),
+            point: (0, 0),
+            size: (37, 25),
+        };
+
+        let corners = region.corners();
+        assert_eq!(corners[2], (37.0, 25.0), "extent comes from the region");
+
+        // Bottom-right UV normalises the content extent against the texture, not against itself.
+        let uv = region.uv((37.0, 25.0), (0.0, 0.0));
+        assert!((uv[0] - 37.0 / 64.0).abs() < 1e-6, "{uv:?}");
+        assert!((uv[1] - 25.0 / 32.0).abs() < 1e-6, "{uv:?}");
+    }
+
+    /// When the texture is exactly the region -- every pool texture before quantisation, and every
+    /// unpooled one after -- the UVs must still run right to the edge.
+    #[test]
+    fn an_exact_texture_still_maps_corner_to_corner() {
+        let region = FilterRegion {
+            texture_size: (40, 32),
+            point: (0, 0),
+            size: (40, 32),
+        };
+
+        let uv = region.uv((40.0, 32.0), (0.0, 0.0));
+        assert!((uv[0] - 1.0).abs() < 1e-6, "{uv:?}");
+        assert!((uv[1] - 1.0).abs() < 1e-6, "{uv:?}");
+    }
+}
 
 #[cfg(test)]
 mod blur_layer_uv_tests {

@@ -1,7 +1,7 @@
 use crate::backend::RenderTargetMode;
 use crate::buffer_pool::TexturePool;
 use crate::descriptors::Descriptors;
-use crate::filters::{FilterSource, FilterVertex, VERTEX_BUFFERS_DESCRIPTION_FILTERS};
+use crate::filters::{FilterRegion,FilterSource, FilterVertex, VERTEX_BUFFERS_DESCRIPTION_FILTERS};
 use crate::surface::target::CommandTarget;
 use crate::utils::SampleCountMap;
 use bytemuck::{Pod, Zeroable};
@@ -30,6 +30,7 @@ pub struct BlurFilter {
     bind_group_layout: wgpu::BindGroupLayout,
     pipeline_layout: wgpu::PipelineLayout,
     vertex_buffer: wgpu::Buffer,
+    intermediate_vertex_buffer: wgpu::Buffer,
     uniform_buffer: wgpu::Buffer,
     vertices_size: wgpu::BufferSize,
     uniform_size: wgpu::BufferSize,
@@ -80,6 +81,15 @@ impl BlurFilter {
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+        // Passes after the first read one of the intermediates rather than the original source, and
+        // an intermediate comes from the offscreen pool, whose textures are rounded out to a grid.
+        // Its UVs therefore stop short of the texture edge and cannot share the source's quad.
+        let intermediate_vertex_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: None,
+            size: vertices_size,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let uniform_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: None,
@@ -98,6 +108,7 @@ impl BlurFilter {
             pipelines: Default::default(),
             pipeline_layout,
             vertex_buffer,
+            intermediate_vertex_buffer,
             uniform_buffer,
             bind_group_layout,
             vertices_size: wgpu::BufferSize::new(vertices_size).expect("Definitely not zero."),
@@ -196,6 +207,24 @@ impl BlurFilter {
             )
             .copy_from_slice(bytemuck::cast_slice(&[source.vertices()]));
 
+        // Both intermediates are requested at the same size and come from the same pool, so one
+        // quad serves either of them whichever way the flip and flop have been swapped.
+        debug_assert_eq!(
+            (flip.color_texture().width(), flip.color_texture().height()),
+            (flop.color_texture().width(), flop.color_texture().height()),
+        );
+        let intermediate_region =
+            FilterRegion::for_target(flip.color_texture(), (flip.width(), flip.height()));
+        staging_belt
+            .write_buffer(
+                draw_encoder,
+                &self.intermediate_vertex_buffer,
+                0,
+                self.vertices_size,
+                &descriptors.device,
+            )
+            .copy_from_slice(bytemuck::cast_slice(&[intermediate_region.vertices()]));
+
         let mut first = true;
         for _ in 0..(filter.num_passes() as usize) {
             for i in 0..2 {
@@ -223,7 +252,7 @@ impl BlurFilter {
                 } else {
                     (
                         flip.color_view(),
-                        descriptors.quad.filter_vertices.slice(..),
+                        self.intermediate_vertex_buffer.slice(..),
                         flip.width() as f32,
                         flip.height() as f32,
                     )
@@ -337,6 +366,18 @@ impl BlurFilter {
             ..Default::default()
         });
         render_pass.set_pipeline(pipeline);
+        // The quad's `position` runs 0..1 of the render target, so confine the target to the
+        // region actually being filtered. The offscreen pool rounds sizes out to a grid, which
+        // makes a pooled texture routinely larger than the region drawn into it, and without this
+        // the filtered image is stretched across the padding instead of staying in its corner.
+        render_pass.set_viewport(
+            0.0,
+            0.0,
+            destination.width() as f32,
+            destination.height() as f32,
+            0.0,
+            1.0,
+        );
 
         render_pass.set_bind_group(0, &filter_group, &[]);
 

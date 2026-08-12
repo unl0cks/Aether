@@ -203,6 +203,10 @@ impl<'gc> Sockets<'gc> {
         let mut actions = vec![];
 
         while let Ok(action) = context.sockets.receiver.try_recv() {
+            #[cfg(feature = "aether_metrics")]
+            if matches!(action, SocketAction::Data(..)) {
+                crate::aether_metrics::socket_packet_dequeued();
+            }
             actions.push(action)
         }
 

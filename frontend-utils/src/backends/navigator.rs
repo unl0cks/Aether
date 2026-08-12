@@ -36,8 +36,41 @@ fn diagnostic_url(url: &Url) -> String {
     sanitized.to_string()
 }
 
+/// When to start probing an idle game connection, and how often to retry.
+///
+/// This does not make anything faster. It decides how quickly a connection that has silently gone
+/// away is noticed, which for a player looks like the difference between the game telling them they
+/// were disconnected and the game simply stopping.
+#[derive(Clone, Copy, Debug)]
+struct TcpKeepalivePolicy {
+    /// Quiet time before the first probe.
+    idle: Duration,
+    /// Gap between probes once they start.
+    interval: Duration,
+}
+
+impl Default for TcpKeepalivePolicy {
+    fn default() -> Self {
+        Self {
+            // Well inside the idle timeout of consumer NAT tables, so the mapping is refreshed
+            // rather than quietly dropped while a player stands still in town.
+            idle: Duration::from_secs(30),
+            interval: Duration::from_secs(10),
+        }
+    }
+}
+
 fn configure_low_latency_socket(stream: &TcpStream) -> io::Result<()> {
-    stream.set_nodelay(true)
+    stream.set_nodelay(true)?;
+
+    // Separate from TCP_NODELAY on purpose: nodelay is about latency, keepalive is about noticing a
+    // dead peer. A failure here is reported by the caller but is not fatal, since the connection
+    // itself is fine; it would just take longer to discover if it broke.
+    let policy = TcpKeepalivePolicy::default();
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(policy.idle)
+        .with_interval(policy.interval);
+    socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive)
 }
 
 pub trait NavigatorInterface: Clone + Send + 'static {
@@ -443,6 +476,10 @@ impl<F: FutureSpawner<Error> + 'static, I: NavigatorInterface> NavigatorBackend
                             let buffer = buffer.into_iter().take(read).collect::<Vec<_>>();
 
                             let action = SocketAction::Data(handle, buffer);
+                            // Stamped here, the moment the bytes leave the kernel, rather than
+                            // after the send: what is being measured is the wait on the channel.
+                            #[cfg(feature = "aether_metrics")]
+                            ruffle_core::aether_metrics::socket_packet_queued();
                             if !send_action(&sender, action).await {
                                 return;
                             }
@@ -540,6 +577,27 @@ mod tests {
     use crate::content::ContentDescriptor;
 
     use super::*;
+
+    /// Home routers commonly drop an idle TCP mapping after five minutes, and some consumer NAT
+    /// tables are far more aggressive than that. Probing has to start well inside that window or
+    /// the first thing to notice the connection is gone is the player.
+    #[test]
+    fn keepalive_probing_starts_well_inside_a_typical_nat_idle_timeout() {
+        let policy = TcpKeepalivePolicy::default();
+
+        assert!(
+            policy.idle < Duration::from_secs(120),
+            "probing must begin long before a NAT table would drop the mapping"
+        );
+        assert!(
+            policy.interval < policy.idle,
+            "retry probes have to be closer together than the wait for the first one"
+        );
+        assert!(
+            !policy.interval.is_zero(),
+            "a zero interval would busy-probe the server"
+        );
+    }
 
     impl NavigatorInterface for () {
         fn navigate_to_website(&self, _url: Url) {}

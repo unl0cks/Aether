@@ -1,7 +1,7 @@
 use ruffle_core::aether_diagnostics::{CacheOffenderSummary, EnterFrameHandlerReport};
 use ruffle_core::aether_metrics::{
-    Avm2BroadcastSnapshot, Avm2NestedGotoSnapshot, InputSnapshot, RenderSnapshot, TickSnapshot,
-    TimingSnapshot,
+    Avm2BroadcastSnapshot, Avm2NestedGotoSnapshot, InputSnapshot, RenderPhaseSnapshot,
+    RenderSnapshot, SocketQueueSnapshot, TickSnapshot, TimingSnapshot,
 };
 use ruffle_render_wgpu::aether_metrics::{PoolSnapshot, WgpuMetricsSnapshot};
 use serde::Serialize;
@@ -322,6 +322,89 @@ struct TickPhaseReport {
     other: TimingReport,
 }
 
+/// How long inbound socket data sat between arriving and being read.
+///
+/// This is latency the client adds on top of the round trip to the server, so it is reported apart
+/// from the render phases: it is the one part of a slow reply that is not the network's fault.
+#[derive(Debug, Default, Serialize)]
+struct SocketQueueReport {
+    packets: u64,
+    mean_wait_us: u64,
+    max_wait_us: u64,
+    unpaired_drains: u64,
+    dropped_stamps: u64,
+}
+
+impl From<SocketQueueSnapshot> for SocketQueueReport {
+    fn from(snapshot: SocketQueueSnapshot) -> Self {
+        Self {
+            packets: snapshot.packets,
+            mean_wait_us: snapshot
+                .total_wait_ns
+                .checked_div(snapshot.packets)
+                .unwrap_or(0)
+                / 1_000,
+            max_wait_us: snapshot.max_wait_ns / 1_000,
+            unpaired_drains: snapshot.unpaired_drains,
+            dropped_stamps: snapshot.dropped_stamps,
+        }
+    }
+}
+
+/// Where `Player::render` spent its time, which is where roughly 95% of a click's wait to reach the
+/// screen was measured to go.
+#[derive(Debug, Default)]
+struct RenderPhaseTotals {
+    total: TimingTotals,
+    broadcast_render: TimingTotals,
+    build_commands: TimingTotals,
+    submit_frame: TimingTotals,
+    sweep_idle_uploads: TimingTotals,
+    /// Summed per frame rather than derived from the totals above.
+    ///
+    /// Each phase reads the clock separately, so one frame's parts can land a hair over its own
+    /// total. Subtracting once at the end would let that overshoot cancel out a different frame's
+    /// genuine unattributed time, which is the number this split exists to find.
+    unattributed_ns: u64,
+}
+
+impl RenderPhaseTotals {
+    fn add(&mut self, sample: RenderPhaseSnapshot) {
+        self.total.add(sample.total);
+        self.broadcast_render.add(sample.broadcast_render);
+        self.build_commands.add(sample.build_commands);
+        self.submit_frame.add(sample.submit_frame);
+        self.sweep_idle_uploads.add(sample.sweep_idle_uploads);
+        self.unattributed_ns = self.unattributed_ns.saturating_add(sample.unattributed_ns());
+    }
+
+    fn take_report(&mut self) -> RenderPhaseReport {
+        let totals = std::mem::take(self);
+        let invocations = totals.total.invocations;
+        RenderPhaseReport {
+            total: totals.total.into_report(),
+            broadcast_render: totals.broadcast_render.into_report(),
+            build_commands: totals.build_commands.into_report(),
+            submit_frame: totals.submit_frame.into_report(),
+            sweep_idle_uploads: totals.sweep_idle_uploads.into_report(),
+            other: TimingReport {
+                total_us: totals.unattributed_ns / 1_000,
+                invocations,
+            },
+        }
+    }
+}
+
+#[derive(Debug, Default, Serialize)]
+struct RenderPhaseReport {
+    total: TimingReport,
+    broadcast_render: TimingReport,
+    build_commands: TimingReport,
+    submit_frame: TimingReport,
+    sweep_idle_uploads: TimingReport,
+    other: TimingReport,
+}
+
 #[derive(Debug, Default, Serialize)]
 struct WgpuPoolTotals {
     requests: u64,
@@ -406,6 +489,9 @@ struct WgpuTexturePoolTotals {
     draw_commands: u64,
     blend_chunks: u64,
     bind_groups: u64,
+    /// How many times a frame was handed to the driver part-way through. Zero means the splitter
+    /// never engaged, which is worth being able to tell apart from it engaging and not helping.
+    submission_splits: u64,
 }
 
 impl WgpuTexturePoolTotals {
@@ -425,6 +511,9 @@ impl WgpuTexturePoolTotals {
         self.cache_entries = self.cache_entries.saturating_add(sample.cache_entries);
         self.queue_nanos = self.queue_nanos.saturating_add(sample.queue_nanos);
         self.render_passes = self.render_passes.saturating_add(sample.render_passes);
+        self.submission_splits = self
+            .submission_splits
+            .saturating_add(sample.submission_splits);
         for (total, sample) in self.complex_blends.iter_mut().zip(sample.complex_blends) {
             *total = total.saturating_add(sample);
         }
@@ -706,6 +795,8 @@ struct MetricsLine {
     avm2_nested_goto: Avm2NestedGotoReport,
     enter_frame_handlers: EnterFrameHandlerReport,
     tick_phases: TickPhaseReport,
+    render_phases: RenderPhaseReport,
+    socket_queue: SocketQueueReport,
     wgpu_texture_pools: WgpuTexturePoolTotals,
     wgpu_resources: Option<WgpuResourceCensus>,
     /// Total failed AQW class lookups this interval, including repeats the log suppresses.
@@ -729,6 +820,7 @@ pub struct AetherMetrics {
     avm2_broadcast: Avm2BroadcastTotals,
     avm2_nested_goto: Avm2NestedGotoTotals,
     tick_phases: TickPhaseTotals,
+    render_phases: RenderPhaseTotals,
     wgpu_texture_pools: WgpuTexturePoolTotals,
     pending_census: Option<WgpuResourceCensus>,
 }
@@ -761,6 +853,7 @@ impl AetherMetrics {
             avm2_broadcast: Avm2BroadcastTotals::default(),
             avm2_nested_goto: Avm2NestedGotoTotals::default(),
             tick_phases: TickPhaseTotals::default(),
+            render_phases: RenderPhaseTotals::default(),
             wgpu_texture_pools: WgpuTexturePoolTotals::default(),
             pending_census: None,
         }
@@ -815,6 +908,7 @@ impl AetherMetrics {
         self.render_frames = self.render_frames.saturating_add(1);
         self.cadence
             .record_render(player_rendered, surface_presented);
+        self.render_phases.add(counters.phases);
         self.counters.add(counters);
         self.wgpu_texture_pools.add(wgpu);
         self.flush_if_due();
@@ -882,6 +976,10 @@ impl AetherMetrics {
                 MAX_ENTER_FRAME_HANDLERS_PER_REPORT,
             ),
             tick_phases: self.tick_phases.take_report(),
+            render_phases: self.render_phases.take_report(),
+            // Taken at report time rather than per tick: the counters accumulate globally, so
+            // draining them here keeps the socket path free of a per-packet report hop.
+            socket_queue: ruffle_core::aether_metrics::take_socket_queue_snapshot().into(),
             wgpu_texture_pools: self.wgpu_texture_pools.take(),
             wgpu_resources: self.pending_census.take(),
             aqw_definition_lookup_misses:
@@ -1092,6 +1190,18 @@ fn percentile(sorted: &[f64], percentile: f64) -> f64 {
 
 #[cfg(test)]
 mod tests {
+    /// Serialises the tests that build an `AetherMetrics` and flush it.
+    ///
+    /// Flushing drains process-global counters, so two of these running at once race for the same
+    /// packets and whichever flushes first takes them.
+    static FLUSHING_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn lock_flushing_test() -> std::sync::MutexGuard<'static, ()> {
+        FLUSHING_TEST
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
     use super::*;
     use ruffle_core::aether_diagnostics::{
         EnterFrameHandlerDescriptor, EnterFrameHandlerReport, EnterFrameHandlerSummary,
@@ -1222,6 +1332,7 @@ mod tests {
 
     #[test]
     fn metrics_json_line_exposes_avm2_nested_goto_report() {
+        let _guard = lock_flushing_test();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -1277,6 +1388,56 @@ mod tests {
         );
         assert_eq!(value["avm2_nested_goto"]["total"]["total_us"], 12);
         assert_eq!(value["avm2_nested_goto"]["frame_scripts"]["total_us"], 5);
+    }
+
+    #[test]
+    fn the_socket_queue_report_averages_over_packets_rather_than_dividing_by_zero() {
+        let idle = SocketQueueReport::from(SocketQueueSnapshot::default());
+        assert_eq!(idle.packets, 0);
+        assert_eq!(idle.mean_wait_us, 0);
+
+        let busy = SocketQueueReport::from(SocketQueueSnapshot {
+            packets: 4,
+            total_wait_ns: 32_000_000,
+            max_wait_ns: 15_000_000,
+            unpaired_drains: 1,
+            dropped_stamps: 0,
+        });
+        assert_eq!(busy.mean_wait_us, 8_000);
+        assert_eq!(busy.max_wait_us, 15_000);
+        assert_eq!(busy.unpaired_drains, 1);
+    }
+
+    /// The number this exists to produce: how long a server reply sat already-received in memory
+    /// before the player looked at it.
+    #[test]
+    fn metrics_json_line_exposes_how_long_socket_data_waited_to_be_read() {
+        let _guard = lock_flushing_test();
+        // Process-wide counters. No other test touches them.
+        let _ = ruffle_core::aether_metrics::take_socket_queue_snapshot();
+        ruffle_core::aether_metrics::socket_packet_queued();
+        ruffle_core::aether_metrics::socket_packet_queued();
+        ruffle_core::aether_metrics::socket_packet_dequeued();
+        ruffle_core::aether_metrics::socket_packet_dequeued();
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "aether-socket-queue-metrics-{}-{unique}.jsonl",
+            std::process::id()
+        ));
+        let mut metrics = AetherMetrics::new(true, path.clone());
+        metrics.record_tick(Duration::from_millis(1), TickSnapshot::default());
+        metrics.flush_summary();
+        drop(metrics);
+
+        let contents = std::fs::read_to_string(&path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(contents.trim()).unwrap();
+        let _ = std::fs::remove_file(path);
+        assert_eq!(value["socket_queue"]["packets"], 2);
+        assert_eq!(value["socket_queue"]["unpaired_drains"], 0);
     }
 
     #[test]
@@ -1388,6 +1549,56 @@ mod tests {
         assert_eq!(value["avm2_enter_broadcast"]["total_us"], 1);
         assert_eq!(report.other.total_us, 3);
         assert_eq!(report.other.invocations, 1);
+    }
+
+    fn render_phases(
+        total_ns: u64,
+        broadcast_ns: u64,
+        build_ns: u64,
+        submit_ns: u64,
+    ) -> RenderPhaseSnapshot {
+        let timing = |total_ns| TimingSnapshot {
+            total_ns,
+            invocations: 1,
+        };
+        RenderPhaseSnapshot {
+            total: timing(total_ns),
+            broadcast_render: timing(broadcast_ns),
+            build_commands: timing(build_ns),
+            submit_frame: timing(submit_ns),
+            sweep_idle_uploads: TimingSnapshot::default(),
+        }
+    }
+
+    #[test]
+    fn render_phase_totals_report_measured_and_other_microseconds() {
+        let mut totals = RenderPhaseTotals::default();
+        totals.add(render_phases(15_000, 1_000, 9_000, 4_000));
+
+        let report = totals.take_report();
+
+        assert_eq!(report.broadcast_render.total_us, 1);
+        assert_eq!(report.build_commands.total_us, 9);
+        assert_eq!(report.submit_frame.total_us, 4);
+        let value = serde_json::to_value(&report).unwrap();
+        assert_eq!(value["total"]["total_us"], 15);
+        assert_eq!(value["other"]["total_us"], 1);
+        assert_eq!(value["other"]["invocations"], 1);
+    }
+
+    /// The remainder is clamped per frame, not once over the summed totals.
+    ///
+    /// Each phase reads the clock separately, so a frame's parts can land a hair over its own
+    /// total. Summing first would let that overshoot cancel out a different frame's genuine
+    /// unattributed time, which is the one number this whole split exists to find.
+    #[test]
+    fn a_frame_whose_parts_overshoot_cannot_hide_another_frames_unclaimed_time() {
+        let mut totals = RenderPhaseTotals::default();
+        // One frame overshoots by 5 us, the next genuinely leaves 5 us unclaimed.
+        totals.add(render_phases(10_000, 0, 15_000, 0));
+        totals.add(render_phases(10_000, 0, 5_000, 0));
+
+        assert_eq!(totals.take_report().other.total_us, 5);
     }
 
     #[test]
@@ -1515,6 +1726,7 @@ mod tests {
                 discarded_available_entries: 3,
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let value = serde_json::to_value(totals.take()).unwrap();
@@ -1549,6 +1761,31 @@ mod tests {
         assert_eq!(totals.globals_available_after_maintenance, 2);
     }
 
+    /// The renderer's own counters, which this line reports but these cases do not exercise.
+    fn perf_line(
+        interval_us: u64,
+        authored_frames_executed: u64,
+        render_frames: usize,
+        tick: &Distribution,
+        player_render: &Distribution,
+        gui_present: &Distribution,
+    ) -> String {
+        perf_summary_line(
+            interval_us,
+            authored_frames_executed,
+            render_frames,
+            tick,
+            player_render,
+            gui_present,
+            0,
+            0,
+            0,
+            0,
+            0,
+            &WgpuTexturePoolTotals::default(),
+        )
+    }
+
     fn distribution_of(mean_ms: f64, max_ms: f64) -> Distribution {
         Distribution {
             samples: 60,
@@ -1568,7 +1805,7 @@ mod tests {
         let light = distribution_of(8.1, 22.4);
         let idle = distribution_of(1.2, 3.0);
 
-        let cpu_bound = perf_summary_line(1_000_000, 16, 16, &heavy, &light, &idle);
+        let cpu_bound = perf_line(1_000_000, 16, 16, &heavy, &light, &idle);
         assert!(
             cpu_bound.contains("swf 16.0/s, render 16.0 fps"),
             "{cpu_bound}"
@@ -1576,7 +1813,7 @@ mod tests {
         assert!(cpu_bound.contains("tick 48.3/91.0 ms"), "{cpu_bound}");
         assert!(cpu_bound.contains("render 8.1/22.4 ms"), "{cpu_bound}");
 
-        let gpu_bound = perf_summary_line(1_000_000, 16, 16, &light, &heavy, &idle);
+        let gpu_bound = perf_line(1_000_000, 16, 16, &light, &heavy, &idle);
         assert!(gpu_bound.contains("tick 8.1/22.4 ms"), "{gpu_bound}");
         assert!(gpu_bound.contains("render 48.3/91.0 ms"), "{gpu_bound}");
     }
@@ -1584,7 +1821,7 @@ mod tests {
     #[test]
     fn a_zero_length_interval_reports_a_number_rather_than_infinity() {
         let idle = distribution_of(0.0, 0.0);
-        let line = perf_summary_line(0, 5, 5, &idle, &idle, &idle);
+        let line = perf_line(0, 5, 5, &idle, &idle, &idle);
         assert!(
             !line.contains("inf") && !line.contains("NaN"),
             "a flush that lands in the same microsecond must not print infinities: {line}"

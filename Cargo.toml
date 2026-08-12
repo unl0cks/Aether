@@ -149,6 +149,13 @@ panic = "abort"
 # a crash report worth reading. Line tables only -- no variables -- so the cost is binary size and
 # link time, not runtime.
 debug = "line-tables-only"
+# Source paths are baked in at compile time by `file!()` and by the `log` crate's `log.file` field,
+# so every crash report a player sends back quotes the build machine's home directory -- including
+# whatever the person who built it happened to name their Windows account. A tester reported seeing
+# a stranger's username throughout his own logs, which is exactly what this is.
+#
+# The profile-level `trim-paths` that would fix this here is still unstable as of Cargo 1.96, so the
+# remapping is applied by the build script instead. See `scripts/build-release.sh`.
 
 [profile.dist]
 inherits = "release"
