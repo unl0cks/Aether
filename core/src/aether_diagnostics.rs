@@ -21,12 +21,12 @@ use ruffle_render::filters::Filter;
 use serde::Serialize;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::io::{self, BufWriter, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_CACHE_OFFENDERS: usize = 4_096;
@@ -857,6 +857,268 @@ pub fn take_cache_offender_summaries(limit: usize) -> Vec<CacheOffenderSummary> 
     });
 
     summaries
+}
+
+/// Which symbol issued a blend, independent of how many objects on stage happen to be drawing it.
+///
+/// A crowded AQW map draws one armour layer once per player, and the useful question is "what does
+/// that layer cost across the whole stage", not "what did player nine cost". A character id is only
+/// unique within its movie, so the movie is part of the identity too.
+///
+/// Every field is a plain integer or a static string. This key is built for each of the ~170 blends
+/// an AQW frame emits, so it must not allocate or walk the display tree; the readable name for the
+/// symbol is resolved once, when the site is first seen.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct BlendSiteKey {
+    pub blend_mode: &'static str,
+    /// Identity of the movie the symbol came from, as a pointer, never dereferenced.
+    pub movie: usize,
+    pub character_id: u16,
+}
+
+/// One blend as it was emitted, before it is folded into its site.
+#[derive(Clone, Copy, Debug)]
+pub struct BlendObservation {
+    /// Identifies the display object, so a site can report how many of them drew it.
+    pub instance_key: u64,
+    /// Area of the blend's bounds on the render target, in pixels. This is what the backend has
+    /// to allocate a sub-target for and composite, so it is the closest thing to a cost.
+    pub pixel_area: u64,
+    /// Draw commands inside the blend, which is roughly how much art the sub-target holds.
+    pub sub_commands: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct BlendSiteSummary {
+    pub blend_mode: &'static str,
+    pub actor_classification: &'static str,
+    pub class_name: String,
+    pub example_display_path: String,
+    pub movie_url: String,
+    pub character_id: u16,
+    pub blends: u64,
+    pub instances: usize,
+    pub sub_commands: u64,
+    pub total_pixel_area: u64,
+    pub max_pixel_area: u64,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct BlendAttributionReport {
+    pub blends: u64,
+    pub unique_sites: usize,
+    pub total_pixel_area: u64,
+    pub by_mode: BTreeMap<&'static str, u64>,
+    pub by_actor: BTreeMap<&'static str, u64>,
+    pub top: Vec<BlendSiteSummary>,
+    /// Blends belonging to sites that did not make the table, so the top rows can be read as a
+    /// share of the frame rather than as the whole of it.
+    pub tail_blends: u64,
+}
+
+const MAX_BLEND_SITES: usize = 2_048;
+/// Instances are counted to tell "one object blending constantly" apart from "many objects
+/// blending once", which needs a headcount, not an exact roster.
+const MAX_BLEND_SITE_INSTANCES: usize = 512;
+
+static BLEND_ATTRIBUTION_ENABLED: AtomicBool = AtomicBool::new(false);
+
+/// The readable half of a site, resolved once when the site is first seen.
+#[derive(Clone, Debug, Default)]
+pub struct BlendSiteIdentity {
+    pub actor_classification: &'static str,
+    pub class_name: String,
+    pub display_path: String,
+    pub movie_url: String,
+}
+
+#[derive(Debug, Default)]
+struct BlendSiteRecord {
+    identity: BlendSiteIdentity,
+    blends: u64,
+    sub_commands: u64,
+    total_pixel_area: u64,
+    max_pixel_area: u64,
+    instances: HashSet<u64>,
+}
+
+impl BlendSiteRecord {
+    fn observe(&mut self, observation: BlendObservation) {
+        self.blends = self.blends.saturating_add(1);
+        self.sub_commands = self.sub_commands.saturating_add(observation.sub_commands);
+        self.total_pixel_area = self.total_pixel_area.saturating_add(observation.pixel_area);
+        self.max_pixel_area = self.max_pixel_area.max(observation.pixel_area);
+        if self.instances.len() < MAX_BLEND_SITE_INSTANCES {
+            self.instances.insert(observation.instance_key);
+        }
+    }
+
+    fn summary(&self, key: &BlendSiteKey) -> BlendSiteSummary {
+        BlendSiteSummary {
+            blend_mode: key.blend_mode,
+            actor_classification: self.identity.actor_classification,
+            class_name: self.identity.class_name.clone(),
+            example_display_path: self.identity.display_path.clone(),
+            movie_url: self.identity.movie_url.clone(),
+            character_id: key.character_id,
+            blends: self.blends,
+            instances: self.instances.len(),
+            sub_commands: self.sub_commands,
+            total_pixel_area: self.total_pixel_area,
+            max_pixel_area: self.max_pixel_area,
+        }
+    }
+}
+
+#[derive(Default)]
+struct BlendAttributionState {
+    sites: HashMap<BlendSiteKey, BlendSiteRecord>,
+}
+
+impl BlendAttributionState {
+    /// `identity` is a closure so that naming the symbol, which walks the display tree and
+    /// allocates, happens once per site rather than once per blend.
+    fn record(
+        &mut self,
+        key: BlendSiteKey,
+        observation: BlendObservation,
+        identity: impl FnOnce() -> BlendSiteIdentity,
+    ) {
+        let full = self.sites.len() >= MAX_BLEND_SITES;
+        match self.sites.entry(key) {
+            Entry::Occupied(mut entry) => entry.get_mut().observe(observation),
+            Entry::Vacant(entry) if !full => {
+                entry
+                    .insert(BlendSiteRecord {
+                        identity: identity(),
+                        ..BlendSiteRecord::default()
+                    })
+                    .observe(observation);
+            }
+            Entry::Vacant(_) => {}
+        }
+    }
+
+    fn take_report(&mut self, limit: usize) -> BlendAttributionReport {
+        let mut report = BlendAttributionReport::default();
+        let mut ranked: Vec<(&BlendSiteKey, &BlendSiteRecord)> = Vec::with_capacity(self.sites.len());
+
+        for (key, record) in &self.sites {
+            if record.blends == 0 {
+                continue;
+            }
+            report.blends = report.blends.saturating_add(record.blends);
+            report.total_pixel_area = report
+                .total_pixel_area
+                .saturating_add(record.total_pixel_area);
+            *report.by_mode.entry(key.blend_mode).or_default() += record.blends;
+            *report
+                .by_actor
+                .entry(record.identity.actor_classification)
+                .or_default() += record.blends;
+            ranked.push((key, record));
+        }
+
+        report.unique_sites = ranked.len();
+        // Area, not count: a swarm of sparks issues more blends than one full-stage tint while
+        // costing a fraction of the fill, and the table exists to point at the expensive one.
+        ranked.sort_by(|(left_key, left), (right_key, right)| {
+            right
+                .total_pixel_area
+                .cmp(&left.total_pixel_area)
+                .then_with(|| right.blends.cmp(&left.blends))
+                .then_with(|| left.identity.class_name.cmp(&right.identity.class_name))
+                .then_with(|| left_key.character_id.cmp(&right_key.character_id))
+        });
+
+        report.top = ranked
+            .iter()
+            .take(limit)
+            .map(|(key, record)| record.summary(key))
+            .collect();
+        report.tail_blends = ranked
+            .iter()
+            .skip(limit)
+            .map(|(_, record)| record.blends)
+            .sum();
+
+        self.sites.clear();
+        report
+    }
+}
+
+fn blend_attribution_state() -> &'static Mutex<BlendAttributionState> {
+    static STATE: OnceLock<Mutex<BlendAttributionState>> = OnceLock::new();
+    STATE.get_or_init(|| Mutex::new(BlendAttributionState::default()))
+}
+
+pub fn set_blend_attribution_enabled(enabled: bool) {
+    BLEND_ATTRIBUTION_ENABLED.store(enabled, Ordering::Relaxed);
+    if !enabled {
+        let mut state = match blend_attribution_state().lock() {
+            Ok(state) => state,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        state.sites.clear();
+    }
+}
+
+#[inline]
+pub fn blend_attribution_enabled() -> bool {
+    BLEND_ATTRIBUTION_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Records one emitted blend. The descriptor is built lazily because walking a display object's
+/// ancestry to name it costs more than the blend itself when attribution is off.
+pub fn record_blend(
+    blend_mode: &'static str,
+    object: DisplayObject<'_>,
+    pixel_area: u64,
+    sub_commands: u64,
+) {
+    if !blend_attribution_enabled() {
+        return;
+    }
+
+    let key = BlendSiteKey {
+        blend_mode,
+        movie: Arc::as_ptr(&object.movie()) as usize,
+        character_id: object.id(),
+    };
+    let observation = BlendObservation {
+        instance_key: object.as_ptr() as u64,
+        pixel_area,
+        sub_commands,
+    };
+
+    let mut state = match blend_attribution_state().lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.record(key, observation, || {
+        let descriptor = DisplayObjectDescriptor::from_display_object(object);
+        BlendSiteIdentity {
+            actor_classification: descriptor.actor_classification,
+            class_name: descriptor
+                .class_name
+                .or(descriptor.instance_name)
+                .unwrap_or_else(|| descriptor.object_type.to_string()),
+            display_path: descriptor.display_path,
+            movie_url: descriptor.movie_url,
+        }
+    });
+}
+
+pub fn take_blend_attribution_report(limit: usize) -> BlendAttributionReport {
+    if !blend_attribution_enabled() {
+        return BlendAttributionReport::default();
+    }
+
+    let mut state = match blend_attribution_state().lock() {
+        Ok(state) => state,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    state.take_report(limit)
 }
 
 #[derive(Serialize)]
@@ -2560,6 +2822,157 @@ fn unix_time_ms() -> u128 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis())
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod blend_attribution_tests {
+    use super::*;
+
+    /// The symbol identity the renderer sees. `class_name` is not part of it; it rides along on the
+    /// identity resolved when the site is first recorded, which is what `named` supplies.
+    fn site(character_id: u16) -> BlendSiteKey {
+        BlendSiteKey {
+            blend_mode: "multiply",
+            movie: 0xA9_1234,
+            character_id,
+        }
+    }
+
+    fn named(class_name: &str) -> impl FnOnce() -> BlendSiteIdentity + use<'_> {
+        move || BlendSiteIdentity {
+            actor_classification: "remote_player",
+            class_name: class_name.to_string(),
+            display_path: "stage#0/root1/avatar#3/armor".to_string(),
+            movie_url: "https://game.aq.com/game/gamefiles/spider.swf".to_string(),
+        }
+    }
+
+    fn observation(pixel_area: u64, sub_commands: u64) -> BlendObservation {
+        BlendObservation {
+            instance_key: 1,
+            pixel_area,
+            sub_commands,
+        }
+    }
+
+    /// The question this instrumentation exists to answer is "which symbol issues the blends", and
+    /// a crowded map draws the same armour layer once per player. Fifteen players sharing one
+    /// symbol have to read as one site worth fifteen blends, not as fifteen sites worth one.
+    #[test]
+    fn blends_from_one_symbol_aggregate_across_the_instances_that_draw_it() {
+        let mut state = BlendAttributionState::default();
+
+        for instance in 0..15u64 {
+            state.record(
+                site(42),
+                BlendObservation {
+                    instance_key: instance,
+                    ..observation(10_000, 3)
+                },
+                named("liteAssets.draw::armorLayer"),
+            );
+        }
+
+        let report = state.take_report(8);
+
+        assert_eq!(report.blends, 15);
+        assert_eq!(report.unique_sites, 1, "one symbol is one site");
+        assert_eq!(report.top.len(), 1);
+        assert_eq!(report.top[0].blends, 15);
+        assert_eq!(report.top[0].instances, 15, "but fifteen objects drew it");
+        assert_eq!(report.top[0].total_pixel_area, 150_000);
+        assert_eq!(report.top[0].sub_commands, 45);
+    }
+
+    /// Ranking by blend count alone would put a swarm of tiny sparks above the one full-screen
+    /// layer that actually costs the frame, so the table is ordered by the area it composites.
+    #[test]
+    fn sites_are_ranked_by_composited_area_rather_than_by_count() {
+        let mut state = BlendAttributionState::default();
+
+        for _ in 0..50 {
+            state.record(site(1), observation(100, 1), named("spark"));
+        }
+        state.record(site(2), observation(480_000, 1), named("fullscreen_tint"));
+
+        let report = state.take_report(8);
+
+        assert_eq!(report.top[0].class_name, "fullscreen_tint");
+        assert_eq!(report.top[1].class_name, "spark");
+        assert_eq!(report.blends, 51);
+    }
+
+    /// The report is read as "what did the last second cost", so counts must not carry over.
+    #[test]
+    fn taking_the_report_clears_the_period_it_covered() {
+        let mut state = BlendAttributionState::default();
+        state.record(site(1), observation(10, 1), named("armor"));
+
+        assert_eq!(state.take_report(8).blends, 1);
+        assert_eq!(
+            state.take_report(8).blends,
+            0,
+            "a second read of the same period must report nothing"
+        );
+    }
+
+    /// Mode and actor totals are the first thing read off the report, before any single site.
+    #[test]
+    fn report_totals_split_blends_by_mode_and_by_actor() {
+        let mut state = BlendAttributionState::default();
+
+        state.record(site(1), observation(10, 1), named("armor"));
+        state.record(
+            BlendSiteKey {
+                blend_mode: "overlay",
+                ..site(2)
+            },
+            observation(10, 1),
+            named("armor_highlight"),
+        );
+        state.record(
+            BlendSiteKey {
+                blend_mode: "overlay",
+                ..site(3)
+            },
+            observation(10, 1),
+            || BlendSiteIdentity {
+                actor_classification: "map",
+                ..named("map_shade")()
+            },
+        );
+
+        let report = state.take_report(8);
+
+        assert_eq!(report.by_mode.get("multiply"), Some(&1));
+        assert_eq!(report.by_mode.get("overlay"), Some(&2));
+        assert_eq!(report.by_actor.get("remote_player"), Some(&2));
+        assert_eq!(report.by_actor.get("map"), Some(&1));
+    }
+
+    /// A map that grew without bound would be the diagnostic leaking on the very frames it is
+    /// meant to describe, so new sites stop being admitted once the table is full.
+    #[test]
+    fn the_site_table_stops_admitting_new_symbols_once_it_is_full() {
+        let mut state = BlendAttributionState::default();
+
+        for id in 0..(MAX_BLEND_SITES + 32) {
+            state.record(site(id as u16), observation(10, 1), named("armor"));
+        }
+
+        assert_eq!(state.sites.len(), MAX_BLEND_SITES);
+        let report = state.take_report(8);
+        assert_eq!(
+            report.blends, MAX_BLEND_SITES as u64,
+            "blends past the cap are dropped rather than silently merged into another site"
+        );
+    }
+
+    /// Everything above is off unless the flag is set, so the release path pays nothing.
+    #[test]
+    fn attribution_is_disabled_until_it_is_switched_on() {
+        assert!(!blend_attribution_enabled());
+    }
 }
 
 #[cfg(test)]

@@ -1,4 +1,6 @@
-use ruffle_core::aether_diagnostics::{CacheOffenderSummary, EnterFrameHandlerReport};
+use ruffle_core::aether_diagnostics::{
+    BlendAttributionReport, CacheOffenderSummary, EnterFrameHandlerReport,
+};
 use ruffle_core::aether_metrics::{
     Avm2BroadcastSnapshot, Avm2NestedGotoSnapshot, InputSnapshot, RenderPhaseSnapshot,
     RenderSnapshot, SocketQueueSnapshot, TickSnapshot, TimingSnapshot,
@@ -15,6 +17,7 @@ const MAX_SAMPLES: usize = 2_048;
 const REPORT_INTERVAL: Duration = Duration::from_secs(1);
 const MAX_CACHE_OFFENDERS_PER_REPORT: usize = 20;
 const MAX_ENTER_FRAME_HANDLERS_PER_REPORT: usize = 20;
+const MAX_BLEND_SITES_PER_REPORT: usize = 24;
 
 #[derive(Debug, Default, Serialize)]
 struct CounterTotals {
@@ -802,6 +805,7 @@ struct MetricsLine {
     /// Total failed AQW class lookups this interval, including repeats the log suppresses.
     aqw_definition_lookup_misses: u64,
     cache_offenders: Vec<CacheOffenderSummary>,
+    blend_sites: BlendAttributionReport,
 }
 
 /// Low-overhead one-second summaries for Aether's baseline and optimization comparisons.
@@ -834,6 +838,7 @@ impl AetherMetrics {
         };
         let enabled = enabled && writer.is_some();
         ruffle_core::aether_diagnostics::set_cache_offender_enabled(enabled);
+        ruffle_core::aether_diagnostics::set_blend_attribution_enabled(enabled);
         ruffle_core::aether_diagnostics::set_enter_frame_handler_attribution_enabled(enabled);
         ruffle_core::aether_metrics::set_avm2_nested_goto_metrics_enabled(enabled);
 
@@ -987,6 +992,9 @@ impl AetherMetrics {
             cache_offenders: ruffle_core::aether_diagnostics::take_cache_offender_summaries(
                 MAX_CACHE_OFFENDERS_PER_REPORT,
             ),
+            blend_sites: ruffle_core::aether_diagnostics::take_blend_attribution_report(
+                MAX_BLEND_SITES_PER_REPORT,
+            ),
         };
 
         // The JSONL carries far more than this, but the first question about any frame-rate
@@ -1120,6 +1128,7 @@ impl Drop for AetherMetrics {
             self.flush_summary();
         }
         ruffle_core::aether_diagnostics::set_cache_offender_enabled(false);
+        ruffle_core::aether_diagnostics::set_blend_attribution_enabled(false);
         ruffle_core::aether_diagnostics::set_enter_frame_handler_attribution_enabled(false);
         ruffle_core::aether_metrics::set_avm2_nested_goto_metrics_enabled(false);
     }

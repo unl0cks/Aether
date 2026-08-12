@@ -1842,7 +1842,7 @@ fn group_number_runs_into(
             .is_some_and(is_number_glue);
         let joined_after = text[index..].chars().next().is_some_and(is_number_glue);
 
-        if joined_before || joined_after {
+        if joined_before || joined_after || introduced_by_identifier_keyword(text, start) {
             continue;
         }
 
@@ -1929,6 +1929,38 @@ pub fn group_number_runs_in_html(
 /// a currency mark or a bullet sitting against a number still leaves a quantity behind it.
 fn is_number_glue(character: char) -> bool {
     character.is_alphabetic() || character == '-' || character == '.' || character == '_'
+}
+
+/// Words that mean the number after them names something rather than counts something.
+///
+/// A room number welded to its map, `citadelruins-99922`, is already safe because the hyphen is
+/// glue. Players type the same room as `join room 9922` at least as often, and that is a bare digit
+/// run between two spaces, indistinguishable from a quantity by anything next to it. The word in
+/// front is what tells them apart.
+const IDENTIFIER_KEYWORDS: [&str; 4] = ["room", "rooms", "join", "goto"];
+
+/// Whether the word immediately before a digit run marks the run as a name.
+///
+/// Only a run separated from the previous word by whitespace is considered. Anything touching the
+/// run directly is already settled by [`is_number_glue`], and asking twice would let a keyword
+/// several characters away excuse a number it has nothing to do with.
+fn introduced_by_identifier_keyword(text: &str, start: usize) -> bool {
+    let preceding = &text[..start];
+    let trimmed = preceding.trim_end();
+    if trimmed.len() == preceding.len() {
+        return false;
+    }
+
+    let word = trimmed
+        .rsplit(char::is_whitespace)
+        .next()
+        .unwrap_or_default()
+        // AQW's own commands arrive as `/join` and `/room`, and the slash is not part of the word.
+        .trim_start_matches(|character: char| !character.is_alphabetic());
+
+    IDENTIFIER_KEYWORDS
+        .iter()
+        .any(|keyword| word.eq_ignore_ascii_case(keyword))
 }
 
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
@@ -2034,6 +2066,42 @@ mod digit_grouping_tests {
         assert_eq!(
             group_number_runs("Refined Metal 0/1000000", NumberSeparator::Comma, 4).as_deref(),
             Some("Refined Metal 0/1,000,000")
+        );
+    }
+
+    /// A room number written the way players actually type it, with a space rather than a hyphen.
+    /// `citadelruins-99922` was already safe because the hyphen welds it to the map name, but
+    /// `join room 9922` is a bare digit run between two spaces and read as a quantity, so it went
+    /// out as `join room 9,922`. What makes it a room is the word in front of it.
+    #[test]
+    fn a_number_introduced_as_a_room_is_not_a_quantity() {
+        assert_eq!(
+            group_number_runs("join room 9922", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("/join yulgar-1000", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(
+            group_number_runs("anyone in Room 12345?", NumberSeparator::Comma, 4),
+            None
+        );
+        assert_eq!(group_number_runs("goto 9922", NumberSeparator::Comma, 4), None);
+    }
+
+    /// The keyword only excuses the number that follows it. A line that mentions a room and then
+    /// quotes a real quantity still gets the quantity grouped.
+    #[test]
+    fn the_room_keyword_only_covers_the_number_it_introduces() {
+        assert_eq!(
+            group_number_runs("room 9922 has 1250000 gold", NumberSeparator::Comma, 4).as_deref(),
+            Some("room 9922 has 1,250,000 gold")
+        );
+        // "bedroom" ends in the letters of the keyword without being it.
+        assert_eq!(
+            group_number_runs("bedroom 1250000", NumberSeparator::Comma, 4).as_deref(),
+            Some("bedroom 1,250,000")
         );
     }
 

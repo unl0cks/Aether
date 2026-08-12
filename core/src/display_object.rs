@@ -1565,6 +1565,29 @@ fn filterless_direct_render_safety_check_needed(
     direct_render_window_active && !inherited_subtree_safe
 }
 
+/// Stable names for the blend attribution report, which is read as text rather than parsed back
+/// into the enum.
+#[cfg(feature = "aether_diagnostics")]
+fn extended_blend_mode_name(mode: ExtendedBlendMode) -> &'static str {
+    match mode {
+        ExtendedBlendMode::Normal => "normal",
+        ExtendedBlendMode::Layer => "layer",
+        ExtendedBlendMode::Multiply => "multiply",
+        ExtendedBlendMode::Screen => "screen",
+        ExtendedBlendMode::Lighten => "lighten",
+        ExtendedBlendMode::Darken => "darken",
+        ExtendedBlendMode::Difference => "difference",
+        ExtendedBlendMode::Add => "add",
+        ExtendedBlendMode::Subtract => "subtract",
+        ExtendedBlendMode::Invert => "invert",
+        ExtendedBlendMode::Alpha => "alpha",
+        ExtendedBlendMode::Erase => "erase",
+        ExtendedBlendMode::Overlay => "overlay",
+        ExtendedBlendMode::HardLight => "hardlight",
+        ExtendedBlendMode::Shader => "shader",
+    }
+}
+
 pub fn render_base<'gc>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
@@ -1985,6 +2008,21 @@ pub fn render_base<'gc>(
                 true,
                 &stage_matrix,
             );
+            #[cfg(feature = "aether_diagnostics")]
+            if crate::aether_diagnostics::blend_attribution_enabled() {
+                // Bounds are in twips on the render target, and the backend allocates and
+                // composites a sub-target covering them, so pixel area is what a blend costs.
+                let pixel_area = (blend_bounds.width().to_pixels().max(0.0)
+                    * blend_bounds.height().to_pixels().max(0.0))
+                    as u64;
+                crate::aether_diagnostics::record_blend(
+                    extended_blend_mode_name(blend_mode),
+                    this,
+                    pixel_area,
+                    sub_commands.commands.len() as u64,
+                );
+            }
+
             context
                 .commands
                 .blend(sub_commands, render_blend_mode, Some(blend_bounds));

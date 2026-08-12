@@ -209,10 +209,46 @@ if (-not $SkipCargo) {
     $cargo = Get-Command cargo -ErrorAction SilentlyContinue
     if (-not $cargo) { throw 'cargo was not found. Install the Rust toolchain, or pass -SkipCargo.' }
 
-    $cargoArgs = @('build', '--release', '-p', 'aether_player')
-    if ($CargoFeatures) { $cargoArgs += @('--features', $CargoFeatures) }
-    Invoke-NativeCommand -FilePath $cargo.Source -Arguments $cargoArgs `
-        -FailureMessage 'cargo build failed.' -WorkingDirectory $root
+    # Rust bakes absolute source paths into the binary, through file!() and through the log crate's
+    # log.file field. Without remapping, every log line and crash report a player sends back quotes
+    # the home directory, and therefore the Windows account name, of whoever built the release. A
+    # tester reported reading a stranger's username throughout his own logs; that was this.
+    #
+    # This has to live here rather than only in scripts/build-release.sh, because the published
+    # installer and portable zip are built by this script, and a remapping the release path can
+    # forget is one that will be forgotten.
+    #
+    # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS: RUSTFLAGS splits on spaces, and the account
+    # name that prompted this fix has spaces in it, so the plain form would mangle the very path it
+    # is meant to remove. The encoded form separates on U+001F and has no such problem.
+    $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $remap = @(
+        "--remap-path-prefix=$($cargoHome -replace '\\', '/')=/cargo"
+        "--remap-path-prefix=$($root -replace '\\', '/')=/aether"
+    )
+    $previousRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
+    $env:CARGO_ENCODED_RUSTFLAGS = $remap -join "`u{001f}"
+
+    try {
+        $cargoArgs = @('build', '--release', '-p', 'aether_player')
+        if ($CargoFeatures) { $cargoArgs += @('--features', $CargoFeatures) }
+        Invoke-NativeCommand -FilePath $cargo.Source -Arguments $cargoArgs `
+            -FailureMessage 'cargo build failed.' -WorkingDirectory $root
+    }
+    finally {
+        $env:CARGO_ENCODED_RUSTFLAGS = $previousRustFlags
+    }
+
+    # Changing RUSTFLAGS changes the fingerprint, so this rebuilds rather than reusing a plain
+    # cargo build. Verify rather than assume: the whole point is that a silent regression here is
+    # invisible until a player posts a log.
+    $accountName = Split-Path -Leaf $env:USERPROFILE
+    $leaked = Select-String -Path $releaseExe -Pattern ([regex]::Escape($accountName)) `
+        -Encoding utf8 -AllMatches -List -ErrorAction SilentlyContinue
+    if ($leaked) {
+        throw "aether.exe still contains the build account name '$accountName'. Path remapping did not take effect; publishing this would leak it into every player's logs."
+    }
+    Write-Host "  build paths remapped, no account name in the binary" -ForegroundColor DarkGray
 }
 else {
     Write-Step 'Skipping cargo build (-SkipCargo)'
