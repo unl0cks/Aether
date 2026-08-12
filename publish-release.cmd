@@ -24,7 +24,15 @@ if errorlevel 1 (
     exit /b 1
 )
 
-set "NOTES=%~1"
+rem The first argument is the notes file ONLY if it is not a switch. Without this test,
+rem `publish-release.cmd -Force` looked for release notes named "-Force" and reported them
+rem missing, which says nothing about what actually went wrong.
+set "NOTES="
+set "FIRST=%~1"
+if not "%FIRST%"=="" if not "%FIRST:~0,1%"=="-" if not "%FIRST:~0,1%"=="/" (
+    set "NOTES=%FIRST%"
+    shift
+)
 if "%NOTES%"=="" set "NOTES=%~dp0release-notes.md"
 if not exist "%NOTES%" (
     echo Release notes not found: %NOTES%
@@ -33,8 +41,7 @@ if not exist "%NOTES%" (
     exit /b 1
 )
 
-rem Shift past the notes path so any remaining switches pass through.
-shift
+rem Everything left over is passed through as switches.
 set "EXTRA="
 :collect
 if "%~1"=="" goto run

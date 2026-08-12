@@ -18,7 +18,7 @@ Thanks to Necro for spotting it.
 
 ## Version numbers
 
-Every release so far has called itself something like `0.5.10-local` in logs and crash reports. That was a build setting nobody had set, so published builds carried a developer's suffix. Released builds now say `0.5.11-release`.
+Every release so far has called itself something like `0.5.10-local` in logs and crash reports. That was a build setting nobody had set, so published builds carried a developer's suffix. Released builds now say `0.5.12-release`.
 
 ## Frame rate groundwork
 
@@ -33,6 +33,6 @@ Both of those are fixable and both are next.
 
 ## Downloads
 
-`Aether-Setup-0.5.11-win-x64.exe` for the installer, `Aether-Portable-0.5.11-win-x64.zip` if you would rather not install anything.
+`Aether-Setup-0.5.12-win-x64.exe` for the installer, `Aether-Portable-0.5.12-win-x64.zip` if you would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.11-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
+There may also be `Aether-Launcher-0.5.12-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
