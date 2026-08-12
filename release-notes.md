@@ -52,11 +52,16 @@ can be built outside the game, so what remains is in what a character wraps arou
 Frame rate is steadier in a crowded room than it was, but still not steady. Dragging the window
 still costs frames while you are dragging.
 
+To find the rest of the glow, this build can report what a filtered object is wrapped in. Started
+with `AETHER_GLOW_ANCESTRY=1`, it writes one line per filtered object naming every container between
+it and the stage, with each one's scale, blend mode, mask and cache state, followed by the room
+reserved for the filter. A glow that is cut off will say it grew by nothing.
+
 ## Downloads
 
-`Aether-Setup-0.5.19-win-x64.exe` for the installer, `Aether-Portable-0.5.19-win-x64.zip` if you
+`Aether-Setup-0.5.20-win-x64.exe` for the installer, `Aether-Portable-0.5.20-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.19-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.5.20-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

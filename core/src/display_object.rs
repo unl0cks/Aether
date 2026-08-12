@@ -1714,6 +1714,8 @@ pub fn render_base<'gc>(
             crate::aether_metrics::bitmap_cache_full_evaluation();
 
             let mut cache_info: Option<DrawCacheInfo> = None;
+            #[cfg(feature = "aether_diagnostics")]
+            let mut filter_room_report: Option<(Vec<String>, u32, u32, u32, u32)> = None;
             let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
                 &base_transform.matrix,
                 false, // we want to do the filter growth for this object ourselves, to know the offsets
@@ -1754,6 +1756,19 @@ pub fn render_base<'gc>(
                     let draw_offset = Point::new(filter_rect.x_min, filter_rect.y_min);
                     let texture_width = filter_rect.width().max(0) as u32;
                     let texture_height = filter_rect.height().max(0) as u32;
+                    // This is where a filter is given room, so it is where to look when one is
+                    // drawn without any. Reported after the cache borrow is released, because
+                    // describing the ancestry reads the same objects.
+                    #[cfg(feature = "aether_diagnostics")]
+                    if !filters.is_empty() {
+                        filter_room_report = Some((
+                            crate::aether_diagnostics::filter_names(&filters),
+                            width,
+                            height,
+                            texture_width,
+                            texture_height,
+                        ));
+                    }
                     #[cfg(feature = "aether_performance")]
                     let adaptive_avatar_cache_only =
                         this.base().aether_adaptive_avatar_cache_active()
@@ -1889,6 +1904,19 @@ pub fn render_base<'gc>(
                     cache_info = None;
                 }
             }
+
+            #[cfg(feature = "aether_diagnostics")]
+            if let Some((names, width, height, texture_width, texture_height)) = filter_room_report {
+                crate::aether_diagnostics::record_filter_ancestry(
+                    this,
+                    &names,
+                    width,
+                    height,
+                    texture_width,
+                    texture_height,
+                );
+            }
+
             cache_info
         }
     } else {

@@ -4069,3 +4069,118 @@ mod tests {
         );
     }
 }
+
+/// Report what a filtered object is wrapped in, once per object.
+///
+/// A filter that draws outside its object needs room reserved for it, and the room is computed from
+/// the object's bounds and everything between it and the stage. AQW's weapon glow renders correctly
+/// in every case that can be built outside the game -- the real item, at any size, turned, and held
+/// as a bitmap -- and still renders as a rectangle in it. So the difference is in the containers,
+/// and the containers are the one thing a case built by hand cannot guess at.
+///
+/// Switched on with `AETHER_GLOW_ANCESTRY=1`, off otherwise, and each object reports only once.
+pub fn filter_ancestry_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        std::env::var_os("AETHER_GLOW_ANCESTRY").is_some_and(|value| value != "0")
+    })
+}
+
+const MAX_REPORTED_FILTER_ANCESTRIES: usize = 64;
+
+/// One link in the chain between a filtered object and the stage.
+fn describe_ancestor(object: DisplayObject<'_>) -> String {
+    let descriptor = DisplayObjectDescriptor::from_display_object(object);
+    let matrix = object.base().matrix();
+    let filters = filter_names(&object.filters());
+    let mut notes: Vec<String> = Vec::new();
+    if object.is_bitmap_cached_preference() {
+        notes.push("cacheAsBitmap".into());
+    }
+    if object.masker().is_some() {
+        notes.push("masked".into());
+    }
+    if object.maskee().is_some() {
+        notes.push("is-a-mask".into());
+    }
+    if object.clip_depth() > 0 {
+        notes.push(format!("clipDepth={}", object.clip_depth()));
+    }
+    if let Some(rect) = object.scroll_rect() {
+        notes.push(format!(
+            "scrollRect={}x{}",
+            rect.width().to_pixels().round(),
+            rect.height().to_pixels().round()
+        ));
+    }
+    if !object.visible() {
+        notes.push("hidden".into());
+    }
+    if !filters.is_empty() {
+        notes.push(format!("filters={}", filters.join("+")));
+    }
+    notes.push(format!("blend={:?}", object.blend_mode()));
+
+    format!(
+        "{} name={:?} class={:?} matrix=[{:.3} {:.3} {:.3} {:.3}] {}",
+        descriptor.object_type,
+        descriptor.instance_name.as_deref().unwrap_or("-"),
+        descriptor.class_name.as_deref().unwrap_or("-"),
+        matrix.a,
+        matrix.b,
+        matrix.c,
+        matrix.d,
+        notes.join(" "),
+    )
+}
+
+/// Log the chain from a filtered object up to the stage, with the room reserved for its filter.
+pub fn record_filter_ancestry(
+    object: DisplayObject<'_>,
+    filters: &[String],
+    source_width: u32,
+    source_height: u32,
+    texture_width: u32,
+    texture_height: u32,
+) {
+    if !filter_ancestry_enabled() {
+        return;
+    }
+
+    static REPORTED: OnceLock<Mutex<HashSet<usize>>> = OnceLock::new();
+    let reported = REPORTED.get_or_init(|| Mutex::new(HashSet::new()));
+    let mut reported = match reported.lock() {
+        Ok(reported) => reported,
+        Err(poisoned) => poisoned.into_inner(),
+    };
+    if reported.len() >= MAX_REPORTED_FILTER_ANCESTRIES
+        || !reported.insert(object.as_ptr() as usize)
+    {
+        return;
+    }
+    drop(reported);
+
+    // The growth is the whole question: if the texture is no larger than the source, the filter has
+    // been given no room and will be cut off at the object's own outline.
+    let grew_by = (
+        texture_width as i64 - source_width as i64,
+        texture_height as i64 - source_height as i64,
+    );
+
+    let mut chain = Vec::with_capacity(8);
+    let mut walker = Some(object);
+    for _ in 0..64 {
+        let Some(current) = walker else { break };
+        chain.push(describe_ancestor(current));
+        walker = current.parent();
+    }
+
+    tracing::warn!(
+        filters = ?filters,
+        source = format!("{source_width}x{source_height}"),
+        texture = format!("{texture_width}x{texture_height}"),
+        grew_by = format!("{}x{}", grew_by.0, grew_by.1),
+        "AQW filtered object ancestry (innermost first):\n  {}",
+        chain.join("\n  "),
+    );
+}
