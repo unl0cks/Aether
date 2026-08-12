@@ -4,6 +4,69 @@ use windows_sys::Win32::Storage::FileSystem::{FILE_TYPE_DISK, FILE_TYPE_PIPE, Ge
 use windows_sys::Win32::System::Console::{
     ATTACH_PARENT_PROCESS, AttachConsole, FreeConsole, GetStdHandle, STD_OUTPUT_HANDLE,
 };
+use windows_sys::Win32::System::Threading::{
+    BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetPriorityClass, IDLE_PRIORITY_CLASS,
+    NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling,
+    SetPriorityClass, SetProcessInformation,
+};
+
+/// Whether an inherited priority class is one to climb out of.
+///
+/// A process starts at whatever priority its parent had, and only the two classes below normal are
+/// worth correcting. Anything at normal or above is either what Windows gives a normal launch or
+/// something the player chose, and Aether has no business raising itself past the shell that
+/// started it.
+fn is_below_normal_priority(priority_class: u32) -> bool {
+    priority_class == IDLE_PRIORITY_CLASS || priority_class == BELOW_NORMAL_PRIORITY_CLASS
+}
+
+/// Undo the scheduling a background launcher hands down to the process it starts.
+///
+/// Reported by a player whose Fifine control deck launches Aether: from the deck it was slow, from
+/// the same `aether.exe` by hand it was fine. Same binary, same machine, same graphics card, so
+/// nothing about the rendering explains it. What differs is who started the process.
+///
+/// Two things are inherited from a parent, and a deck, tray helper or macro host is a background
+/// process that has both. Priority class is inherited outright, so a helper running below normal
+/// hands that down. Power throttling is the one that bites hardest on Windows 11: a process the
+/// scheduler considers background is put in `EcoQoS`, which parks it on efficiency cores and holds
+/// the clocks down. For something drawing frames that reads exactly like a slow computer.
+///
+/// Neither is raised above what a normal launch would give. Throttling is switched off outright,
+/// because Aether is never a background task while it is running, and priority is only lifted as
+/// far as normal, and only from below it.
+pub(super) fn restore_foreground_scheduling() {
+    // SAFETY: GetCurrentProcess returns a pseudo-handle that needs no closing and is always valid.
+    let process = unsafe { GetCurrentProcess() };
+
+    let throttling = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        // Name the mechanism as one being decided, then decide it off. Leaving it out of the mask
+        // means "no opinion", which is not the same as "do not throttle".
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    // SAFETY: the struct matches ProcessPowerThrottling, and the size is its own. A failure here
+    // is ignorable: the call is unsupported before Windows 10 2004, where there is no EcoQoS to
+    // opt out of.
+    unsafe {
+        SetProcessInformation(
+            process,
+            ProcessPowerThrottling,
+            (&raw const throttling).cast(),
+            size_of_val(&throttling) as u32,
+        );
+    }
+
+    // SAFETY: a process pseudo-handle is valid for both calls. GetPriorityClass returns 0 on
+    // failure, which is not one of the classes tested for.
+    unsafe {
+        if is_below_normal_priority(GetPriorityClass(process)) {
+            SetPriorityClass(process, NORMAL_PRIORITY_CLASS);
+        }
+    }
+}
 
 /// RAII guard for the attached parent console.
 /// Frees the console on drop if it was successfully attached.
@@ -54,5 +117,28 @@ impl Drop for Console {
             // SAFETY: We only call FreeConsole if it was previously successfully attached.
             unsafe { FreeConsole() };
         }
+    }
+}
+
+#[cfg(test)]
+mod scheduling_tests {
+    use super::*;
+
+    /// Only the two classes below normal are corrected. Raising anything else would mean a client
+    /// that promotes itself past the shell that started it.
+    #[test]
+    fn only_the_classes_below_normal_are_corrected() {
+        assert!(is_below_normal_priority(IDLE_PRIORITY_CLASS));
+        assert!(is_below_normal_priority(BELOW_NORMAL_PRIORITY_CLASS));
+
+        assert!(!is_below_normal_priority(NORMAL_PRIORITY_CLASS));
+        assert!(!is_below_normal_priority(
+            windows_sys::Win32::System::Threading::ABOVE_NORMAL_PRIORITY_CLASS
+        ));
+        assert!(!is_below_normal_priority(
+            windows_sys::Win32::System::Threading::HIGH_PRIORITY_CLASS
+        ));
+        // GetPriorityClass reports 0 when it fails, which must not read as "too low".
+        assert!(!is_below_normal_priority(0));
     }
 }

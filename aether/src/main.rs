@@ -214,6 +214,9 @@ fn main() -> Result<(), Error> {
 
     #[cfg(windows)]
     let _console = windows::Console::attach();
+    // Before anything is measured or rendered, because both inherit from whoever started us.
+    #[cfg(windows)]
+    windows::restore_foreground_scheduling();
 
     let mut opt = Opt::parse();
     // Before the preset, not after: it is what collapses each --x / --no-x pair into one bool and

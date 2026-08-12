@@ -226,17 +226,6 @@ fn classify_aether_movement_method_for_parts(
 }
 
 #[cfg(feature = "aether_diagnostics")]
-fn ascii_contains_ignore_case(haystack: &str, needle: &str) -> bool {
-    if needle.is_empty() {
-        return true;
-    }
-    haystack
-        .as_bytes()
-        .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
-}
-
-#[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovementMethod> {
     let method_name = method.method_name();
     let bound_class = if classify_bare_aether_movement_method(method_name.as_ref()).is_some() {
@@ -252,7 +241,7 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
         classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)?;
     let owner_movie = method.owner_movie();
     let owner_url = owner_movie.url();
-    if ascii_contains_ignore_case(owner_url, "spider.swf") {
+    if crate::aether_movie::is_aqw_game_movie(owner_url) {
         return Some(movement_method);
     }
 
@@ -265,7 +254,7 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
         tracing::warn!(
             method = %method_name,
             owner_url = %owner_url,
-            "AQW movement method rejected: owning movie is not spider.swf"
+            "AQW movement method rejected: owning movie is not the AQW game movie"
         );
     }
     None
@@ -946,19 +935,22 @@ mod aether_movement_tests {
         }
     }
 
+    /// The movement trace and the stop guard both hang off this gate, and it used to be a
+    /// substring test for `spider.swf` that the live game movie no longer satisfies.
     #[test]
-    fn movement_hook_matches_spider_url_without_lowercase_allocation() {
-        assert!(ascii_contains_ignore_case(
-            "https://game.aq.com/game/gamefiles/Loader_Spider.swf",
-            "spider.swf"
+    fn the_movement_hook_follows_whichever_build_the_loader_picked() {
+        use crate::aether_movie::is_aqw_game_movie;
+
+        assert!(is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game3098r24.swf?ver=R0047"
         ));
-        assert!(ascii_contains_ignore_case(
-            "file:///SPIDER.SWF",
-            "spider.swf"
+        assert!(is_aqw_game_movie("file:///SPIDER.SWF"));
+        // `AvatarMC` lives in the game, never in the loader that carries it.
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Loader3.swf?ver=a"
         ));
-        assert!(!ascii_contains_ignore_case(
-            "https://game.aq.com/game/gamefiles/other.swf",
-            "spider.swf"
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/other.swf"
         ));
     }
 }

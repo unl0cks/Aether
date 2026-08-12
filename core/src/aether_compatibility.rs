@@ -8,6 +8,7 @@ use crate::context::UpdateContext;
 use crate::display_object::{
     Avm2LifecycleTraversal, DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer,
 };
+use crate::aether_movie::{is_aqw_game_movie, is_aqw_loader_movie, is_hosted_aqw_game_movie};
 use crate::locale::get_current_date_time;
 use crate::string::AvmString;
 use crate::timer::TimerCallback;
@@ -26,10 +27,14 @@ pub fn timeline_child_rebind_enabled() -> bool {
 }
 
 fn contains_ascii_case_insensitive(haystack: &str, needle: &str) -> bool {
+    find_ascii_case_insensitive(haystack, needle).is_some()
+}
+
+fn find_ascii_case_insensitive(haystack: &str, needle: &str) -> Option<usize> {
     haystack
         .as_bytes()
         .windows(needle.len())
-        .any(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
+        .position(|window| window.eq_ignore_ascii_case(needle.as_bytes()))
 }
 
 #[inline]
@@ -40,10 +45,7 @@ fn is_aqw_aura_mask_segment_parts(
     is_direct_child: bool,
 ) -> bool {
     is_direct_child
-        && contains_ascii_case_insensitive(
-            parent_movie_url,
-            "game.aq.com/game/gamefiles/spider.swf",
-        )
+        && is_hosted_aqw_game_movie(parent_movie_url)
         && parent_class_local_name == "ActMaskReverse"
         && matches!(child_name, Some("e0" | "e1" | "e2" | "e3"))
 }
@@ -151,7 +153,7 @@ pub(crate) fn is_aqw_aura_refresh_target(
     bound_class_local_name: Option<&str>,
     bound_class_is_public: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "spider.swf")
+    is_aqw_game_movie(movie_url)
         && matches!(method_name, "World/updateAuraData" | "updateAuraData")
         && bound_class_local_name == Some("World")
         && bound_class_is_public
@@ -164,7 +166,7 @@ pub(crate) fn is_aqw_aura_insertion_target(
     bound_class_is_public: bool,
     bound_class_has_public_namespace: bool,
 ) -> bool {
-    if !contains_ascii_case_insensitive(movie_url, "spider.swf") {
+    if !is_aqw_game_movie(movie_url) {
         return false;
     }
 
@@ -202,7 +204,7 @@ pub(crate) fn is_aqw_aura_countdown_target(
     bound_class_is_public: bool,
     bound_class_has_public_namespace: bool,
 ) -> bool {
-    if !contains_ascii_case_insensitive(movie_url, "spider.swf") {
+    if !is_aqw_game_movie(movie_url) {
         return false;
     }
 
@@ -614,7 +616,7 @@ pub(crate) fn is_aqw_equipment_initialization_target(
     bound_class_local_name: Option<&str>,
     bound_class_is_public: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "game.aq.com/game/gamefiles/spider.swf")
+    is_hosted_aqw_game_movie(movie_url)
         && method_name == "Avatar/initAvatar"
         && bound_class_local_name == Some("Avatar")
         && bound_class_is_public
@@ -699,7 +701,7 @@ fn is_timeline_child_rebind_target(
     class_local_name: &str,
     has_nonempty_class_namespace: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "spider.swf")
+    is_aqw_game_movie(movie_url)
         && class_local_name == "mcOption"
         && !has_nonempty_class_namespace
 }
@@ -841,7 +843,7 @@ fn is_aqw_parent_timeline_label_fallback(
     receiver_has_label: bool,
     ancestor_has_label: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "spider.swf")
+    is_aqw_loader_movie(movie_url)
         && matches!(label, "Init" | "Login" | "Game" | "Account" | "Select")
         && !receiver_has_label
         && ancestor_has_label
@@ -855,7 +857,7 @@ fn is_aqw_avatar_timeline_label_fallback(
     ancestor_class_local_name: Option<&str>,
     ancestor_has_label: bool,
 ) -> bool {
-    contains_ascii_case_insensitive(movie_url, "spider.swf")
+    is_aqw_game_movie(movie_url)
         && label == "Idle"
         && !receiver_has_label
         && ancestor_name == Some("mcChar")
@@ -1146,6 +1148,61 @@ fn object_type_name(object: DisplayObject<'_>) -> &'static str {
 mod tests {
     use super::*;
 
+    /// `Loader3.swf` loads whichever build `api/data/gameversion` names, so the game movie is
+    /// called something new every release. Every repair here is gated on recognising it.
+    #[test]
+    fn a_versioned_game_build_is_recognised_as_the_game() {
+        assert!(is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game3098r24.swf?ver=R0047"
+        ));
+        assert!(is_hosted_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game3098r24.swf?ver=R0047"
+        ));
+        // A later release, and the same file with the case AQW's own loader would not have used.
+        assert!(is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game4100r1.swf"
+        ));
+        assert!(is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/GAME3098R24.SWF"
+        ));
+    }
+
+    /// The staging build Aether loaded until 0.5.14. Anyone still pointed at it keeps the repairs.
+    #[test]
+    fn the_frozen_staging_build_is_still_recognised() {
+        assert!(is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=0.6"
+        ));
+        assert!(is_hosted_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/spider.swf?ver=0.6"
+        ));
+    }
+
+    /// The near miss. A spellcraft map begins with the same four letters and is not the game, and
+    /// the loaders sit in the same directory as the build they load.
+    #[test]
+    fn maps_loaders_and_other_hosts_are_not_the_game() {
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/maps/tradeskills/spellcraft/game-spellcraftr2.swf"
+        ));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Loader3.swf?ver=a"
+        ));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Loader_Spider.swf"
+        ));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/assets/assets_2026.swf"
+        ));
+        // Named like the game, served by somebody else.
+        assert!(!is_hosted_aqw_game_movie(
+            "https://example.invalid/gamefiles/Game3098r24.swf"
+        ));
+        // The shape without the name, and the name without the file.
+        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/.swf"));
+        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/Game"));
+    }
+
     #[test]
     fn timeline_child_rebind_switch_round_trips() {
         set_timeline_child_rebind_enabled(false);
@@ -1190,6 +1247,14 @@ mod tests {
 
     #[test]
     fn aqw_parent_timeline_fallback_is_limited_to_missing_loader_root_labels() {
+        // The live loader, which is the one Aether runs from 0.5.14. This repair is about the
+        // loader rather than the game, so switching loaders is what would silently retire it.
+        assert!(is_aqw_parent_timeline_label_fallback(
+            "https://game.aq.com/game/gamefiles/Loader3.swf?ver=a",
+            "Login",
+            false,
+            true,
+        ));
         assert!(is_aqw_parent_timeline_label_fallback(
             "https://game.aq.com/game/gamefiles/Loader_Spider.swf?ver=1",
             "Login",
@@ -1842,7 +1907,7 @@ fn group_number_runs_into(
             .is_some_and(is_number_glue);
         let joined_after = text[index..].chars().next().is_some_and(is_number_glue);
 
-        if joined_before || joined_after || introduced_by_identifier_keyword(text, start) {
+        if joined_before || joined_after {
             continue;
         }
 
@@ -1931,36 +1996,55 @@ fn is_number_glue(character: char) -> bool {
     character.is_alphabetic() || character == '-' || character == '.' || character == '_'
 }
 
-/// Words that mean the number after them names something rather than counts something.
+/// The fields AQW writes a quantity into, by the instance name it gave each one.
 ///
-/// A room number welded to its map, `citadelruins-99922`, is already safe because the hyphen is
-/// glue. Players type the same room as `join room 9922` at least as often, and that is a bare digit
-/// run between two spaces, indistinguishable from a quantity by anything next to it. The word in
-/// front is what tells them apart.
-const IDENTIFIER_KEYWORDS: [&str; 4] = ["room", "rooms", "join", "goto"];
-
-/// Whether the word immediately before a digit run marks the run as a name.
+/// Named individually because no property of a field distinguishes a quantity from a sentence. The
+/// quest reward panel and a line of chat are both read-only, both multiline, both word-wrapped and
+/// both HTML; they are the same kind of field holding different kinds of writing. Grouping was
+/// first restricted to single-line fields for exactly that reason and it took the quest numbers
+/// with it, because a reward list wraps like any other paragraph.
 ///
-/// Only a run separated from the previous word by whitespace is considered. Anything touching the
-/// run directly is already settled by [`is_number_glue`], and asking twice would let a keyword
-/// several characters away excuse a number it has nothing to do with.
-fn introduced_by_identifier_keyword(text: &str, start: usize) -> bool {
-    let preceding = &text[..start];
-    let trimmed = preceding.trim_end();
-    if trimmed.len() == preceding.len() {
-        return false;
-    }
+/// So the rule is a list rather than a test. Everything on it is written by the game, holds one
+/// number, and is only ever read by a player. Nothing a player typed can reach any of them, which
+/// is the whole safety argument: a separator in an editable field would send `1,250,000` where the
+/// game expected `1250000` and a parse of that yields `1`, and a separator in chat rewrites what
+/// somebody said.
+///
+/// A name AQW later changes drops off this list silently and its number stops being grouped. That
+/// is the failure this should have: a number that reads slightly worse, rather than a message that
+/// says something its sender did not.
+const NUMBER_READOUT_FIELDS: [&[u8]; 12] = [
+    // The gold total on the interface, in the house shop, and in the temporary inventory.
+    b"strGold",
+    // Health, mana and soul points, on both portraits and on every party bar.
+    b"strIntHP",
+    b"strIntMP",
+    b"strIntSP",
+    // The class rank line, which carries the reputation figures.
+    b"strRep",
+    // The quest panel: rewards, then the items the quest asks for.
+    b"strRew",
+    b"strReq",
+    // Item quantities, on reward frames, drop frames and the action bar.
+    b"strQ",
+    b"tQty",
+    b"txtQty",
+    // Quest objective counts, and the coin figure on the reward scene.
+    b"txtObjective",
+    b"tbCoinExp",
+];
 
-    let word = trimmed
-        .rsplit(char::is_whitespace)
-        .next()
-        .unwrap_or_default()
-        // AQW's own commands arrive as `/join` and `/room`, and the slash is not part of the word.
-        .trim_start_matches(|character: char| !character.is_alphabetic());
-
-    IDENTIFIER_KEYWORDS
+/// Whether a field is one AQW writes a quantity into.
+///
+/// The floating numbers over an avatar are the one case a name alone cannot settle. Damage, crits,
+/// damage over time, experience and gold gains, level ups and rank ups all share one library field
+/// called `ti`, and so does the speech bubble over a player's head. What separates them is the clip
+/// between: every popup puts its field inside a child named `t`, and the bubble does not.
+pub fn is_aqw_number_readout(field: &crate::string::WStr, parent: Option<&crate::string::WStr>) -> bool {
+    NUMBER_READOUT_FIELDS
         .iter()
-        .any(|keyword| word.eq_ignore_ascii_case(keyword))
+        .any(|readout| field == *readout)
+        || (field == b"ti" && parent.is_some_and(|parent| parent == b"t"))
 }
 
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
@@ -1991,16 +2075,11 @@ pub fn group_digits(text: &str, separator: NumberSeparator, min_digits: usize) -
 
 /// Rewrite a display text assignment with grouped numbers, or `None` to leave it alone.
 ///
-/// This runs on every display field AQW writes, not on a list of known field names. The list came
-/// first and it never finished: health, then quest progress, then the gold total, the experience
-/// and reputation bars, quest rewards, item stacks, each one a separate name to discover, and each
-/// screenshot found more. Deciding by what the text looks like instead of where it is going covers
-/// all of them at once, including the panels nobody has looked at yet.
-///
-/// The safety comes from the shape of the value rather than from the field: only a digit run
-/// standing alone as a quantity is touched, and only in a display field. Editable fields are
-/// excluded by the caller, so anything the game reads back, parses, or sends to the server is
-/// never rewritten.
+/// Two things have to agree before a digit run is touched, and they guard different mistakes. The
+/// caller decides whether the field is one AQW writes a quantity into, which is what keeps this
+/// away from anything a player wrote; see [`is_aqw_number_readout`]. This decides whether the run
+/// is a quantity rather than part of a token, which is what keeps `v1000000` and `1.50000` intact
+/// inside a field that does hold numbers.
 pub fn aqw_grouped_text(text: &str) -> Option<String> {
     group_number_runs(text, number_separator(), separator_min_digits() as usize)
 }
@@ -2012,7 +2091,7 @@ pub fn aqw_grouped_html(html: &str) -> Option<String> {
 
 #[cfg(test)]
 mod digit_grouping_tests {
-    use super::{NumberSeparator, group_digits, group_number_runs};
+    use super::{NumberSeparator, group_digits, group_number_runs, is_aqw_number_readout};
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
@@ -2069,40 +2148,52 @@ mod digit_grouping_tests {
         );
     }
 
-    /// A room number written the way players actually type it, with a space rather than a hyphen.
-    /// `citadelruins-99922` was already safe because the hyphen welds it to the map name, but
-    /// `join room 9922` is a bare digit run between two spaces and read as a quantity, so it went
-    /// out as `join room 9,922`. What makes it a room is the word in front of it.
-    #[test]
-    fn a_number_introduced_as_a_room_is_not_a_quantity() {
-        assert_eq!(
-            group_number_runs("join room 9922", NumberSeparator::Comma, 4),
-            None
-        );
-        assert_eq!(
-            group_number_runs("/join yulgar-1000", NumberSeparator::Comma, 4),
-            None
-        );
-        assert_eq!(
-            group_number_runs("anyone in Room 12345?", NumberSeparator::Comma, 4),
-            None
-        );
-        assert_eq!(group_number_runs("goto 9922", NumberSeparator::Comma, 4), None);
+    fn readout(field: &[u8], parent: Option<&[u8]>) -> bool {
+        is_aqw_number_readout(
+            crate::string::WStr::from_units(field),
+            parent.map(crate::string::WStr::from_units),
+        )
     }
 
-    /// The keyword only excuses the number that follows it. A line that mentions a room and then
-    /// quotes a real quantity still gets the quantity grouped.
+    /// The fields the feature was asked for. Boss health is the one it was requested over: it runs
+    /// to eight digits and changes several times a second, so there is nothing to anchor where the
+    /// millions place sits.
     #[test]
-    fn the_room_keyword_only_covers_the_number_it_introduces() {
-        assert_eq!(
-            group_number_runs("room 9922 has 1250000 gold", NumberSeparator::Comma, 4).as_deref(),
-            Some("room 9922 has 1,250,000 gold")
-        );
-        // "bedroom" ends in the letters of the keyword without being it.
-        assert_eq!(
-            group_number_runs("bedroom 1250000", NumberSeparator::Comma, 4).as_deref(),
-            Some("bedroom 1,250,000")
-        );
+    fn the_fields_aqw_writes_a_number_into_are_grouped() {
+        assert!(readout(b"strIntHP", Some(b"HP")));
+        assert!(readout(b"strGold", Some(b"mcGold")));
+        assert!(readout(b"strRep", Some(b"mcRepBar")));
+        assert!(readout(b"strQ", Some(b"cnt")));
+    }
+
+    /// The quest panel, which the single-line rule had stopped. `strRew` holds the gold and
+    /// experience a quest pays; `strReq` holds the `4/4` counts of what it asks for. Both wrap,
+    /// both are multiline, both are read-only HTML, which is exactly what a line of chat is.
+    #[test]
+    fn the_quest_panel_is_grouped_despite_reading_like_prose() {
+        assert!(readout(b"strRew", Some(b"rewards")));
+        assert!(readout(b"strReq", Some(b"display")));
+    }
+
+    /// Damage, crits, damage over time, experience and gold gains, level ups and rank ups are one
+    /// library field named `ti`, told apart from the speech bubble by the `t` clip around it.
+    #[test]
+    fn a_floating_number_over_an_avatar_is_grouped_but_a_speech_bubble_is_not() {
+        assert!(readout(b"ti", Some(b"t")));
+        assert!(!readout(b"ti", Some(b"bubble")));
+        assert!(!readout(b"ti", None));
+    }
+
+    /// The case that started this. A chat line is built at runtime and carries none of these names,
+    /// so nothing a player typed can reach the grouper however it is written.
+    #[test]
+    fn chat_is_not_a_readout_under_any_name_it_arrives_with() {
+        assert!(!readout(b"line", Some(b"mcChat")));
+        assert!(!readout(b"instance42", Some(b"instance41")));
+        assert!(!readout(b"te", Some(b"mci")));
+        // A name that merely starts or ends like one on the list is not one on the list.
+        assert!(!readout(b"strGoldRush", Some(b"mcGold")));
+        assert!(!readout(b"mystrGold", Some(b"mcGold")));
     }
 
     #[test]

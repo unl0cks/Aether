@@ -24,7 +24,7 @@ use ruffle_wstr::WStr;
 
 #[cfg(feature = "aether_compatibility")]
 fn report_aqw_definition_lookup_miss(domain_address: usize, caller_url: &str, name: &str) {
-    if !caller_url.to_ascii_lowercase().contains("spider.swf") {
+    if !crate::aether_movie::is_aqw_game_movie(caller_url) {
         return;
     }
 

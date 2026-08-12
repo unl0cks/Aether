@@ -8,7 +8,13 @@ use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use ruffle_render_wgpu::texture_pool_policy::BoundedTexturePoolLimits;
 use url::Url;
 
-pub const AQW_LOADER_URL: &str = "https://game.aq.com/game/gamefiles/Loader_Spider.swf";
+/// AQW's loader, the one the live client embeds.
+///
+/// Aether used `Loader_Spider.swf` until 0.5.14, and that is Artix's staging loader. The two are
+/// the same file apart from one line: `Loader3.swf` asks `api/data/gameversion` which build is
+/// current and loads what it answers, while `Loader_Spider.swf` hardcodes `spider.swf`, a frozen
+/// build that reports itself as 4.26 against the 4.361 everyone else was running.
+pub const AQW_LOADER_URL: &str = "https://game.aq.com/game/gamefiles/Loader3.swf";
 pub const AQW_BASE_URL: &str = "https://game.aq.com/game/gamefiles/";
 pub const AQW_PAGE_URL: &str = "https://game.aq.com/";
 /// Retention limits for both texture pools, as specified in the bounded-offscreen-pool design.
@@ -163,7 +169,9 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
         opt.tcp_connections = Some(SocketMode::Allow);
     }
 
-    // Loader_Spider reads this FlashVar while resolving the rest of AQW's client assets.
+    // Kept for the asset SWFs. The loader itself does not read it: it takes the directory it was
+    // served from and resolves everything against that, which is why pointing Aether at a
+    // different loader is enough to change which game build arrives.
     opt.push_parameter("base", AQW_BASE_URL);
 
     if !opt.show_menu {

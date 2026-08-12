@@ -79,18 +79,7 @@ pub fn is_aqw_avatar_cache_candidate(
         return false;
     }
 
-    let path = movie_url
-        .split_once(['?', '#'])
-        .map_or(movie_url, |(path, _)| path);
-    let file_name = path
-        .rsplit_once(['/', '\\'])
-        .map_or(path, |(_, file_name)| file_name)
-        .as_bytes();
-
-    file_name.eq_ignore_ascii_case(b"spider.swf")
-        || file_name
-            .get(file_name.len().saturating_sub(b"_spider.swf".len())..)
-            .is_some_and(|suffix| suffix.eq_ignore_ascii_case(b"_spider.swf"))
+    crate::aether_movie::is_aqw_game_movie(movie_url)
 }
 
 #[cfg(test)]
@@ -125,7 +114,19 @@ mod tests {
             true,
         ));
         assert!(is_aqw_avatar_cache_candidate(
-            "https://game.aq.com/game/gamefiles/Loader_SpIdEr.SwF?cache=1",
+            "https://game.aq.com/game/gamefiles/SpIdEr.SwF?cache=1",
+            b"AvatarMC",
+            true,
+        ));
+        // The build the live loader picks, which is what AQW actually serves from 0.5.14 on.
+        assert!(is_aqw_avatar_cache_candidate(
+            "https://game.aq.com/game/gamefiles/Game3098r24.swf?ver=R0047",
+            b"AvatarMC",
+            true,
+        ));
+        // The loader defines no `AvatarMC`; it is the game's ancestor, not the game.
+        assert!(!is_aqw_avatar_cache_candidate(
+            "https://game.aq.com/game/gamefiles/Loader3.swf?ver=a",
             b"AvatarMC",
             true,
         ));

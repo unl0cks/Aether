@@ -51,6 +51,7 @@ mod vminterface;
 
 #[cfg(feature = "aether_compatibility")]
 pub mod aether_compatibility;
+pub mod aether_movie;
 #[cfg(feature = "aether_diagnostics")]
 pub mod aether_diagnostics;
 #[cfg(feature = "aether_metrics")]

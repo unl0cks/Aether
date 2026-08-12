@@ -15,12 +15,6 @@ use ruffle_macros::istr;
 use swf::{Color, Point};
 
 /// Group the numbers in a value on its way into a display field, or `None` to leave it alone.
-///
-/// Editable fields are excluded and that exclusion is the whole safety argument. An input field is
-/// one the game reads back: a login box, a chat entry, the quantity on a sell or trade dialog.
-/// Putting separators in one would send `1,250,000` where the game expected `1250000`, and a
-/// parse of that yields `1`. A display field is written by the game and only ever read by a
-/// player, so rewriting one can misdraw a number but cannot change what the game does with it.
 #[cfg(feature = "aether_compatibility")]
 fn aether_grouped_display_text(
     this: EditText<'_>,
@@ -36,28 +30,32 @@ fn aether_grouped_display_text(
 
 /// Whether a field is a quantity the game is displaying, rather than prose.
 ///
-/// Two exclusions, and between them they are the whole safety argument.
+/// Grouping is granted by name, to the fields AQW writes a number into, and to nothing else. The
+/// shape of a field cannot decide this. A quest reward panel and a line of chat are both read-only,
+/// multiline, word-wrapped HTML, so the earlier single-line rule that kept chat safe stopped the
+/// quest numbers with it. See [`is_aqw_number_readout`] for the list and why it is a list.
 ///
-/// An editable field is one the game reads back: a login box, a chat entry, the quantity on a sell
-/// or trade dialog. Putting separators in one would send `1,250,000` where the game expected
-/// `1250000`, and a parse of that yields `1`.
+/// Editability is still tested, ahead of the name, and it is not redundant. Nothing on the list is
+/// an input field today, but a separator in one would be the damaging kind of wrong: the game reads
+/// an input field back, so `1,250,000` reaches it where `1250000` was meant and parses as `1`. The
+/// list is a claim about AQW, which can change; this is a property of the field itself, which
+/// cannot, so it is the one that gets the last word.
 ///
-/// A field that holds running text, whether by being multiline or by wrapping, is a log or a
-/// passage of prose rather than a readout. Chat is the case that matters: players type room numbers
-/// as `battleon 99222`, and a bare digit run between two spaces is indistinguishable from a
-/// quantity by anything around it. The map name in front is arbitrary, so no list of words can
-/// recognise it, and the number is echoed into the log a moment after being typed, so the same text
-/// appears ungrouped while typing and grouped once sent. Nothing about the digits tells the two
-/// apart; the kind of field they landed in does.
-///
-/// Both shapes are tested because either can hold a chat log. Wrapping is checked as well as
-/// multiline so the rule does not rest on which of the two AQW happens to have set.
-///
-/// That leaves grouping where it earns its keep. Gold, experience, boss health, damage numbers and
-/// quest counters are each one value in its own field, sized to that value, updated by the game.
+/// [`is_aqw_number_readout`]: crate::aether_compatibility::is_aqw_number_readout
 #[cfg(feature = "aether_compatibility")]
 fn aether_field_is_a_readout(this: EditText<'_>) -> bool {
-    !this.is_editable() && !this.is_multiline() && !this.is_word_wrap()
+    use crate::display_object::TDisplayObject;
+
+    if this.is_editable() {
+        return false;
+    }
+
+    let Some(name) = this.name() else {
+        return false;
+    };
+    let parent = this.parent().and_then(|parent| parent.name());
+
+    crate::aether_compatibility::is_aqw_number_readout(&name, parent.as_deref())
 }
 
 /// Whether a value is even a candidate, decided without converting it.
