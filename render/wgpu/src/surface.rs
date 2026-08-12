@@ -458,8 +458,14 @@ impl Surface {
                     // own UV remap; a full-surface child keeps the cached whole-frame group.
                     let region_bind_groups = batch
                         .iter()
-                        .map(|(_, region)| {
-                            region.map(|region| target.region_frame_bind_group(descriptors, region))
+                        .map(|(texture, region)| {
+                            region.map(|region| {
+                                target.region_frame_bind_group(
+                                    descriptors,
+                                    region,
+                                    texture.texture().size(),
+                                )
+                            })
                         })
                         .collect::<Vec<_>>();
 

@@ -402,11 +402,20 @@ impl CommandTarget {
     /// `bitmap_uv_scale` as `(scale, offset)`, which every other draw type leaves at the identity
     /// `(1, 1, 0, 0)`.
     ///
+    /// The child's own texture size is asked for rather than assumed to be the region. A pooled
+    /// texture is routinely larger than what was drawn into it: the pool rounds requested sizes out
+    /// to a grid so that near-identical content shares a bucket, and `CommandTarget` therefore keeps
+    /// its logical size separately from its texture's. Mapping the region onto the whole of that
+    /// texture squashes the child into a corner of itself and samples cleared padding for the rest,
+    /// which is a shrunken image with a rectangle of wrong pixels around it. `FilterRegion` already
+    /// normalises against the texture for exactly this reason; this did not.
+    ///
     /// Not cached: unlike the whole-frame group there is a different region per blend.
     pub fn region_frame_bind_group(
         &self,
         descriptors: &Descriptors,
         region: (u32, u32, u32, u32),
+        child_texture: wgpu::Extent3d,
     ) -> wgpu::BindGroup {
         #[cfg(feature = "aether_metrics")]
         crate::aether_metrics::record_bind_group_created();
@@ -420,6 +429,12 @@ impl CommandTarget {
             self.size.width.max(1) as f32,
             self.size.height.max(1) as f32,
         );
+        // What the child's [0, 1] actually spans. Equal to the region whenever the pool handed back
+        // an exact texture, and larger whenever it did not.
+        let (cw, ch) = (
+            child_texture.width.max(1) as f32,
+            child_texture.height.max(1) as f32,
+        );
 
         let transform = Transforms {
             world_matrix: [
@@ -430,7 +445,10 @@ impl CommandTarget {
             ],
             mult_color: [1.0, 1.0, 1.0, 1.0],
             add_color: [0.0, 0.0, 0.0, 0.0],
-            bitmap_uv_scale: [tw / rw, th / rh, -local_x / rw, -local_y / rh],
+            // Divided by the child's texture rather than by the region, so the region's left edge
+            // lands on 0 and its right edge on `rw / cw` -- where the drawn content actually ends --
+            // instead of on 1, which is where the padding ends.
+            bitmap_uv_scale: [tw / cw, th / ch, -local_x / cw, -local_y / ch],
         };
         let buffer = create_buffer_with_data(
             &descriptors.device,

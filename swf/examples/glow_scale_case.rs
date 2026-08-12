@@ -46,6 +46,9 @@ fn main() {
     let overlay = rest.iter().any(|arg| arg == "overlay");
     // No filter, so the square stays a shape draw instead of being cached into a bitmap.
     let noglow = rest.iter().any(|arg| arg == "noglow");
+    // The blend goes on the child inside the cached sprite rather than on the sprite itself, which
+    // is how AQW is built: the weapon blends inside the character, and the character is the bitmap.
+    let innerblend = rest.iter().any(|arg| arg == "innerblend");
 
     let square = Rectangle {
         x_min: Twips::ZERO,
@@ -120,9 +123,9 @@ fn main() {
                 name: None,
                 clip_depth: None,
                 class_name: None,
-                filters: Some(glow.clone()),
+                filters: (!noglow).then(|| glow.clone()),
                 background_color: None,
-                blend_mode: None,
+                blend_mode: innerblend.then_some(BlendMode::Overlay.into()),
                 clip_actions: None,
                 has_image: false,
                 is_bitmap_cached: None,
@@ -145,7 +148,7 @@ fn main() {
         class_name: None,
         filters: (!nested && !noglow).then(|| glow.clone()),
         background_color: None,
-        blend_mode: if overlay {
+        blend_mode: if overlay && !innerblend {
             Some(BlendMode::Overlay.into())
         } else {
             screen.then_some(BlendMode::Screen.into())

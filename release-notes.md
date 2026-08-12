@@ -14,12 +14,18 @@ Two kinds keep their offscreen image. The ones that read what is underneath them
 
 None of this changes what anything looks like. Each case was checked by rendering the same frame with and without the change and comparing the files byte for byte, not by eye.
 
+## A blend no longer assumes its source fills its own image
+
+When a blend composites part of the screen, it samples the image it drew into. That image comes from a pool which hands back something at least as big as was asked for, and often bigger, so the drawn part may occupy only a corner of it. The sampling assumed the two were the same size, which would squash the source into a fraction of itself and read empty padding for the rest.
+
+The sizes happen to line up today, so nothing looks different, and the same frame renders byte for byte identically. It is fixed because it is the kind of thing that is only correct by accident, and the accident is one grid size away from ending.
+
 ## Still to come
 
-Dragging the window still costs frames while you are dragging, and the weapon glow is still wrong. Both are known and neither is forgotten; the glow in particular turned out not to be what everyone assumed, which is written up below.
+Dragging the window still costs frames while you are dragging, and the weapon glow is still wrong.
 
 ## Downloads
 
-`Aether-Setup-0.5.15-win-x64.exe` for the installer, `Aether-Portable-0.5.15-win-x64.zip` if you would rather not install anything.
+`Aether-Setup-0.5.16-win-x64.exe` for the installer, `Aether-Portable-0.5.16-win-x64.zip` if you would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.15-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
+There may also be `Aether-Launcher-0.5.16-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
