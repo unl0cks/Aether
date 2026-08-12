@@ -6,13 +6,19 @@ Rust compiles the source folder paths into the binary, which meant every log fil
 
 The stripping for this was written for 0.5.10 but only applied to command line builds, not to the installer, so 0.5.10 shipped with it anyway. It is in the installer build now, and the build refuses to finish if the name survives into the binary, so it cannot quietly come back.
 
-## Room numbers in chat
+## Numbers in chat
 
-Typing `join room 9922` turned into `join room 9,922`. The digit grouping that makes gold and boss health readable was treating a room number as a quantity. It already left `citadelruins-9922` alone, because the hyphen makes it obviously part of a name, but a number with spaces around it looked like a count.
+Typing `battleon 99222` in chat sent it as `battleon 99,222`. The digit grouping that makes gold and boss health readable was treating a room number as a quantity.
 
-Now the word in front decides. A number introduced by room, rooms, join or goto is a name and is left exactly as typed. It only covers the number it introduces, so `room 9922 has 1250000 gold` still separates the gold.
+It no longer touches chat at all. Grouping now applies only to fields that hold a single value written by the game, which is what gold, experience, boss health, damage numbers and quest counters are. Chat is a log, and a log is left exactly as typed.
+
+That also explains why the number looked fine while you were typing it and gained a comma once you pressed send: the box you type in was already excluded, and the log it landed in was not.
 
 Thanks to Necro for spotting it.
+
+## Version numbers
+
+Every release so far has called itself something like `0.5.10-local` in logs and crash reports. That was a build setting nobody had set, so published builds carried a developer's suffix. Released builds now say `0.5.11-release`.
 
 ## Frame rate groundwork
 
@@ -28,3 +34,5 @@ Both of those are fixable and both are next.
 ## Downloads
 
 `Aether-Setup-0.5.11-win-x64.exe` for the installer, `Aether-Portable-0.5.11-win-x64.zip` if you would rather not install anything.
+
+There may also be `Aether-Launcher-0.5.11-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
