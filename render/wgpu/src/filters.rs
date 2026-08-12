@@ -296,6 +296,7 @@ impl Filters {
                 &filter,
                 &self.blur,
                 (0.0, 0.0),
+                &[],
             )),
             Filter::DropShadowFilter(filter) => Some(DropShadowFilter::apply(
                 descriptors,
@@ -327,6 +328,7 @@ impl Filters {
                     &fallback,
                     &self.blur,
                     blur_offset,
+                    &filter.colors,
                 ))
             }
             Filter::DisplacementMapFilter(filter) => descriptors.filters.displacement_map.apply(

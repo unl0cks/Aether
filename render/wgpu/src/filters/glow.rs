@@ -12,6 +12,9 @@ use std::sync::OnceLock;
 use swf::GlowFilter as GlowFilterArgs;
 use wgpu::util::StagingBelt;
 
+/// How many gradient stops a glow may carry. SWF allows fifteen.
+pub const STOP_CAPACITY: usize = 16;
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
 struct GlowUniform {
@@ -20,6 +23,14 @@ struct GlowUniform {
     inner: u32,            // a wasteful bool, but we need to be aligned anyway
     knockout: u32,         // a wasteful bool, but we need to be aligned anyway
     composite_source: u32, // undocumented flash feature, another bool
+    /// Zero for a plain glow, which is one colour and needs no ramp.
+    stop_count: u32,
+    /// WGSL aligns an array of `vec4` to sixteen bytes, so the stops start at offset 64 there.
+    /// Rust would pack them at 36 without this, and the two layouts have to agree exactly.
+    padding: [u32; 7],
+    stop_colors: [[f32; 4]; STOP_CAPACITY],
+    /// Packed four to a vector: a uniform array of scalars is padded to sixteen bytes an element.
+    stop_ratios: [[f32; 4]; STOP_CAPACITY / 4],
 }
 
 pub struct GlowFilter {
@@ -161,6 +172,10 @@ impl GlowFilter {
         filter: &GlowFilterArgs,
         blur_filter: &BlurFilter,
         blur_offset: (f32, f32),
+        // The ramp, when this is standing in for a gradient glow. A gradient glow changes colour
+        // with distance -- that is the whole reason it is a different filter -- and collapsing it
+        // to one stop keeps the shape and loses the colour.
+        gradient: &[swf::GradientRecord],
     ) -> CommandTarget {
         let sample_count = source.texture.sample_count();
         let format = source.texture.format();
@@ -216,17 +231,35 @@ impl GlowFilter {
                 self.uniform_size,
                 &descriptors.device,
             )
-            .copy_from_slice(bytemuck::cast_slice(&[GlowUniform {
-                color: [
-                    f32::from(filter.color.r) / 255.0,
-                    f32::from(filter.color.g) / 255.0,
-                    f32::from(filter.color.b) / 255.0,
-                    f32::from(filter.color.a) / 255.0,
-                ],
-                strength: filter.strength.to_f32(),
-                inner: if filter.is_inner() { 1 } else { 0 },
-                knockout: if filter.is_knockout() { 1 } else { 0 },
-                composite_source: if filter.composite_source() { 1 } else { 0 },
+            .copy_from_slice(bytemuck::cast_slice(&[{
+                let mut stop_colors = [[0.0f32; 4]; STOP_CAPACITY];
+                let mut stop_ratios = [[0.0f32; 4]; STOP_CAPACITY / 4];
+                let stop_count = gradient.len().min(STOP_CAPACITY);
+                for (index, record) in gradient.iter().take(stop_count).enumerate() {
+                    stop_colors[index] = [
+                        f32::from(record.color.r) / 255.0,
+                        f32::from(record.color.g) / 255.0,
+                        f32::from(record.color.b) / 255.0,
+                        f32::from(record.color.a) / 255.0,
+                    ];
+                    stop_ratios[index / 4][index % 4] = f32::from(record.ratio) / 255.0;
+                }
+                GlowUniform {
+                    color: [
+                        f32::from(filter.color.r) / 255.0,
+                        f32::from(filter.color.g) / 255.0,
+                        f32::from(filter.color.b) / 255.0,
+                        f32::from(filter.color.a) / 255.0,
+                    ],
+                    strength: filter.strength.to_f32(),
+                    inner: if filter.is_inner() { 1 } else { 0 },
+                    knockout: if filter.is_knockout() { 1 } else { 0 },
+                    composite_source: if filter.composite_source() { 1 } else { 0 },
+                    stop_count: stop_count as u32,
+                    padding: [0; 7],
+                    stop_colors,
+                    stop_ratios,
+                }
             }]));
         staging_belt
             .write_buffer(

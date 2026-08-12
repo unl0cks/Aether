@@ -1,28 +1,36 @@
-The glow no longer fades out on a small character, and a mode for cards short of memory.
+Weapon glows, finally.
 
-## Weapon glows keep their proportions at any size
+## A gradient glow is a ramp, and was being drawn as one flat colour
 
-The clipping is fixed. What was left was a glow that thinned out as a character got smaller, which
-is the same fault seen from the other side.
+A gradient glow changes colour with distance from the object -- that is the whole reason it is a
+different filter from a glow. Aether kept a single stop out of the ramp and drew the whole glow in
+it.
 
-A blur was measured in screen pixels rather than in the pixels of the thing wearing it. The same
-kernel that keeps a full-size weapon's glow bright spreads a quarter-size one's thin, so the glow
-did not shrink with the weapon -- it diluted.
+The Ultimate Flame Blade authors two stops: transparent **red** at the outside running to opaque
+**orange** at the blade. Measured across its own glow, from the outer edge inward, as the gap
+between the green and blue channels -- zero is pure red, wide is orange:
 
-Measured on the real Ultimate Flame Blade, drawn at half and quarter size, as a fraction of its
-full-size width:
+| into the glow | before | now |
+|---|---|---|
+| outer edge | 4 | **0, pure red** |
+| 12 px | 18 | 3 |
+| 24 px | 38 | **14, warming to orange** |
 
-| drawn at | before | now | should be |
-|---|---|---|---|
-| 0.5x | 0.534 | 0.511 | 0.50 |
-| 0.25x | 0.301 | 0.262 | 0.25 |
+So the outer bloom is red and ramps to orange at the blade, which is what the artwork says and what
+other clients show. The whole ramp is carried now, up to fifteen stops, and a plain glow is simply
+the case with no ramp at all -- it renders exactly as it did.
 
-Filters now scale by the whole transform down to the object, taken as the length of the transform's
-basis vectors rather than as two of its four numbers, so a weapon turned a quarter turn keeps the
-size its matrix actually carries.
+## Updates that could not be downloaded
 
-If a map background looks softer than it did, that is this change and worth reporting.
+Two players were offered an update and then told it could not be downloaded. GitHub serves a release
+asset from two different hosts: the link in the release page redirects to `objects.githubusercontent
+.com`, while the API serves the same bytes from `api.github.com`. The update check had already
+talked to the API successfully -- that is how they were offered the update at all -- and only the
+redirect target could not be reached.
 
+Both routes are tried now, each three times, and the message says what actually went wrong instead
+of only that something did. Connecting has its own short timeout so an unreachable host fails
+quickly, while the download itself is allowed ten minutes for a slow line.
 
 ## A gradient glow was given no room to draw
 
@@ -42,6 +50,19 @@ they are drawn at.
 
 Weapons cost slightly more to draw than they did, because a glow that is allowed to exist takes up
 room that was previously not allocated at all.
+
+## A glow did not shrink with the weapon wearing it
+
+A blur was measured in screen pixels rather than in the object's own, so the kernel that keeps a
+full-size weapon's glow bright spread a quarter-size one's thin. The glow did not shrink with the
+weapon -- it diluted.
+
+Measured on the real weapon at half and quarter size, as a fraction of its full-size width: 0.534 to
+0.511, and 0.301 to 0.262, against 0.50 and 0.25. Filters now scale by the whole transform down to
+the object, taken as the length of its basis vectors rather than as two of its four numbers, so a
+weapon turned a quarter turn keeps the size its matrix actually carries.
+
+If a map background looks softer than it did, that is this change and worth reporting.
 
 ## A division by zero in every blend that reads what is behind it
 
@@ -69,17 +90,12 @@ readings of one measurement, the comparison was made, and neither reading change
 
 ## Still to come
 
-The weapon glow is still wrong in the game. Both faults above are real and both are fixed, and
-neither was the whole of it: the weapon renders correctly here at every size, angle and nesting that
-can be built outside the game, so what remains is in what a character wraps around it.
-
 Frame rate is steadier in a crowded room than it was, but still not steady. Dragging the window
 still costs frames while you are dragging.
 
-To find the rest of the glow, this build can report what a filtered object is wrapped in. Started
-with `AETHER_GLOW_ANCESTRY=1`, it writes one line per filtered object naming every container between
-it and the stage, with each one's scale, blend mode, mask and cache state, followed by the room
-reserved for the filter. A glow that is cut off will say it grew by nothing.
+`AETHER_GLOW_ANCESTRY=1` still makes each filtered object report what it is wrapped in: every
+container between it and the stage, with each one's scale, blend mode, mask and cache state, then
+the room reserved for its filter. It is what found two of the four faults above, and it stays.
 
 ## Low VRAM mode
 
@@ -99,9 +115,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.5.21-win-x64.exe` for the installer, `Aether-Portable-0.5.21-win-x64.zip` if you
+`Aether-Setup-0.6.0-win-x64.exe` for the installer, `Aether-Portable-0.6.0-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.21-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.0-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

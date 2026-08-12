@@ -34,6 +34,14 @@ pub struct Release {
     pub archive_url: String,
     pub archive_name: String,
     pub checksums_url: String,
+    /// The same two assets as GitHub's API serves them, from `api.github.com`.
+    ///
+    /// `browser_download_url` redirects to `objects.githubusercontent.com`, which is a different
+    /// host to the one the update check just talked to. Two players hit exactly that: the check
+    /// succeeded, so they were offered the update, and then the download could not reach the
+    /// redirect target at all. These URLs are the same bytes by another route.
+    pub archive_api_url: Option<String>,
+    pub checksums_api_url: Option<String>,
 }
 
 /// Read the release out of the API's reply.
@@ -56,27 +64,34 @@ pub fn parse_latest_release(json: &str) -> Option<Release> {
     }
 
     let assets = value.get("assets")?.as_array()?;
-    let find = |predicate: &dyn Fn(&str) -> bool| -> Option<(String, String)> {
+    let find = |predicate: &dyn Fn(&str) -> bool| -> Option<(String, String, Option<String>)> {
         assets.iter().find_map(|asset| {
             let name = asset.get("name")?.as_str()?;
             predicate(name).then(|| {
                 Some((
                     name.to_owned(),
                     asset.get("browser_download_url")?.as_str()?.to_owned(),
+                    asset
+                        .get("url")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_owned),
                 ))
             })?
         })
     };
 
-    let (archive_name, archive_url) =
+    let (archive_name, archive_url, archive_api_url) =
         find(&|name| name.starts_with(CLIENT_ASSET_PREFIX) && name.ends_with(CLIENT_ASSET_SUFFIX))?;
-    let (_, checksums_url) = find(&|name| name.eq_ignore_ascii_case(CHECKSUM_ASSET))?;
+    let (_, checksums_url, checksums_api_url) =
+        find(&|name| name.eq_ignore_ascii_case(CHECKSUM_ASSET))?;
 
     Some(Release {
         version,
         archive_url,
         archive_name,
         checksums_url,
+        archive_api_url,
+        checksums_api_url,
     })
 }
 
@@ -256,6 +271,60 @@ pub async fn fetch_latest_release() -> Option<Release> {
     parse_latest_release(&response.text().await.ok()?)
 }
 
+
+/// How many times one route is tried before moving on to the next.
+const DOWNLOAD_ATTEMPTS: u32 = 3;
+
+/// Fetch a release asset, trying every route GitHub offers before giving up on a player.
+///
+/// There are two, and they are served by different hosts: `browser_download_url` redirects to
+/// `objects.githubusercontent.com`, while the API's own asset URL serves the same bytes from
+/// `api.github.com`. The update check has already talked to the API by the time this runs, so if
+/// only the redirect target is unreachable -- which is what two players hit, having been offered an
+/// update that then could not be downloaded -- the second route still works.
+///
+/// Failures are also retried, because a transient blip should not be the end of it.
+async fn fetch_asset(
+    client: &reqwest::Client,
+    what: &str,
+    direct: &str,
+    via_api: Option<&str>,
+) -> anyhow::Result<Vec<u8>> {
+    use anyhow::Context as _;
+
+    let mut routes: Vec<(&str, bool)> = vec![(direct, false)];
+    if let Some(api) = via_api {
+        if api != direct {
+            routes.push((api, true));
+        }
+    }
+
+    let mut last: Option<anyhow::Error> = None;
+    for (url, is_api) in routes {
+        for attempt in 1..=DOWNLOAD_ATTEMPTS {
+            let mut request = client.get(url);
+            if is_api {
+                // Without this the API hands back the asset's JSON description instead of the file.
+                request = request.header(reqwest::header::ACCEPT, "application/octet-stream");
+            }
+            match request.send().await.and_then(|r| r.error_for_status()) {
+                Ok(response) => match response.bytes().await {
+                    Ok(bytes) => return Ok(bytes.to_vec()),
+                    Err(error) => last = Some(anyhow::Error::new(error)),
+                },
+                Err(error) => last = Some(anyhow::Error::new(error)),
+            }
+            if attempt < DOWNLOAD_ATTEMPTS {
+                tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt))).await;
+            }
+        }
+        tracing::warn!("downloading {what} from {url} failed: {:#}", last.as_ref().unwrap());
+    }
+
+    Err(last.unwrap_or_else(|| anyhow::anyhow!("no route to the asset")))
+        .with_context(|| format!("downloading {what}"))
+}
+
 /// Fetch the release, check it, and put the new binary in place.
 ///
 /// Returns the staged path on success so the caller can decide when to swap. Every failure is an
@@ -266,28 +335,32 @@ pub async fn download_and_stage(release: &Release, current_exe: &Path) -> anyhow
 
     let client = reqwest::Client::builder()
         .user_agent(concat!("Aether/", env!("CARGO_PKG_VERSION")))
-        .timeout(std::time::Duration::from_secs(120))
+        // Separate from the overall limit: a host that cannot be reached should fail in seconds,
+        // while a hundred megabytes over a slow line is allowed to take its time.
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(600))
         .build()?;
 
-    let archive = client
-        .get(&release.archive_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await
-        .context("downloading the update")?;
+    let archive = fetch_asset(
+        &client,
+        "the update",
+        &release.archive_url,
+        release.archive_api_url.as_deref(),
+    )
+    .await?;
 
     // Verified before anything is written to disk, let alone run.
     let actual = format!("{:x}", Sha256::digest(&archive));
-    let listing = client
-        .get(&release.checksums_url)
-        .send()
-        .await?
-        .error_for_status()?
-        .text()
-        .await
-        .context("downloading the checksums")?;
+    let listing = String::from_utf8_lossy(
+        &fetch_asset(
+            &client,
+            "the checksums",
+            &release.checksums_url,
+            release.checksums_api_url.as_deref(),
+        )
+        .await?,
+    )
+    .into_owned();
 
     if !checksum_matches(&parse_checksums(&listing), &release.archive_name, &actual) {
         bail!(
@@ -301,7 +374,7 @@ pub async fn download_and_stage(release: &Release, current_exe: &Path) -> anyhow
     let staged = current_exe.with_extension("exe.new");
     let _ = std::fs::remove_file(&staged);
 
-    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.as_ref()))
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive.as_slice()))
         .context("reading the update archive")?;
     let mut entry = zip
         .by_name("aether.exe")
@@ -350,7 +423,7 @@ Would you like to update now?",
                 .set_description(format!(
                     "The update could not be downloaded.
 
-{error}
+{error:#}
 
 Aether will start normally."
                 ))
@@ -621,5 +694,46 @@ mod tests {
         // Nothing to clean is the normal case and must be silent.
         clean_stale_backup(&current);
         assert!(current.exists());
+    }
+}
+
+#[cfg(test)]
+mod asset_route_tests {
+    use super::*;
+
+    /// GitHub gives every asset two URLs on two different hosts. Keeping only the first leaves a
+    /// player on a network that cannot reach `objects.githubusercontent.com` with an update they
+    /// have been offered and cannot download, which is what happened.
+    #[test]
+    fn both_routes_to_an_asset_are_kept() {
+        let json = r#"{"tag_name":"v1.2.3","assets":[
+            {"name":"Aether-Portable-1.2.3-win-x64.zip",
+             "browser_download_url":"https://github.com/x/releases/download/v1.2.3/a.zip",
+             "url":"https://api.github.com/repos/x/releases/assets/1"},
+            {"name":"SHA256SUMS.txt",
+             "browser_download_url":"https://github.com/x/releases/download/v1.2.3/SHA256SUMS.txt",
+             "url":"https://api.github.com/repos/x/releases/assets/2"}]}"#;
+
+        let release = parse_latest_release(json).expect("a well-formed release should parse");
+        assert_eq!(
+            release.archive_api_url.as_deref(),
+            Some("https://api.github.com/repos/x/releases/assets/1")
+        );
+        assert_eq!(
+            release.checksums_api_url.as_deref(),
+            Some("https://api.github.com/repos/x/releases/assets/2")
+        );
+    }
+
+    /// The second route is a bonus, not a requirement. An older or trimmed reply still updates.
+    #[test]
+    fn a_release_without_api_urls_still_parses() {
+        let json = r#"{"tag_name":"v1.2.3","assets":[
+            {"name":"Aether-Portable-1.2.3-win-x64.zip","browser_download_url":"https://x/a.zip"},
+            {"name":"SHA256SUMS.txt","browser_download_url":"https://x/SHA256SUMS.txt"}]}"#;
+
+        let release = parse_latest_release(json).expect("a release without api urls should parse");
+        assert_eq!(release.archive_url, "https://x/a.zip");
+        assert!(release.archive_api_url.is_none());
     }
 }

@@ -37,6 +37,8 @@ impl DropShadowFilter {
             &filter.inner_glow_filter(),
             blur_filter,
             (-x, -y),
+            // A drop shadow is one colour, so it takes the plain path through the ramp.
+            &[],
         )
     }
 }
