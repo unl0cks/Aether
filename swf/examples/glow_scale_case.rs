@@ -14,7 +14,7 @@
 use std::fs::File;
 
 use swf::{
-    Color, CharacterId, Compression, Fixed8, Fixed16, FillStyle, Filter, GlowFilter,
+    BlendMode, Color, CharacterId, Compression, Fixed8, Fixed16, FillStyle, Filter, GlowFilter,
     GlowFilterFlags, Header, Matrix, PlaceObject, PlaceObjectAction, Point, PointDelta, Rectangle,
     Shape, ShapeFlag, ShapeRecord, ShapeStyles, Sprite, StyleChangeData, Tag, Twips,
 };
@@ -36,7 +36,11 @@ fn main() {
         .and_then(|arg| arg.parse().ok())
         .expect("usage: glow_scale_case <scale> <out.swf>");
     let out = args.next().expect("usage: glow_scale_case <scale> <out.swf>");
-    let nested = args.next().is_some_and(|arg| arg == "nested");
+    let rest: Vec<String> = args.collect();
+    let nested = rest.iter().any(|arg| arg == "nested");
+    // A cached sprite under a trivial blend reaches the renderer as a blend wrapping exactly one
+    // bitmap draw, which is the shape the blend bypass is about.
+    let screen = rest.iter().any(|arg| arg == "screen");
 
     let square = Rectangle {
         x_min: Twips::ZERO,
@@ -136,7 +140,7 @@ fn main() {
         class_name: None,
         filters: (!nested).then(|| glow.clone()),
         background_color: None,
-        blend_mode: None,
+        blend_mode: screen.then_some(BlendMode::Screen.into()),
         clip_actions: None,
         has_image: false,
         is_bitmap_cached: nested.then_some(true),
