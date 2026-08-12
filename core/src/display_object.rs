@@ -157,6 +157,19 @@ enum BitmapCacheTexturePolicy {
     BoundedReuse,
 }
 
+/// Whether a blend mode's result depends on what is already behind the object.
+///
+/// `Normal` composites over and `Layer` only groups, so neither can tell whether an ancestor was
+/// flattened into a bitmap first. Everything else can: the fixed-function ones such as `Add` and
+/// `Screen` combine with the destination, and the shader ones such as `Overlay` and `Multiply` read
+/// it outright.
+fn aether_blend_reads_what_is_behind(mode: ExtendedBlendMode) -> bool {
+    !matches!(
+        mode,
+        ExtendedBlendMode::Normal | ExtendedBlendMode::Layer
+    )
+}
+
 /// Grid that cache texture sizes are rounded up to.
 ///
 /// AQW avatars shift their bounds by a pixel or two every frame as they animate, so one object asks
@@ -2735,7 +2748,32 @@ pub trait TDisplayObject<'gc>:
     /// Descendants are traversed so any stale eligibility from reparenting is cleared, but
     /// equipment sublayers never own independent live GPU caches.
     #[cfg(feature = "aether_performance")]
-    fn refresh_aether_adaptive_avatar_cache_candidates(self) {
+    /// Reports whether anything in this subtree blends against what is behind it.
+    ///
+    /// This cache is Aether's own: AQW does not ask for it, and it is only allowed because holding a
+    /// character as a bitmap is invisible to everything else. That stops being true the moment
+    /// something inside the character blends with what is underneath. Held as a bitmap, a weapon
+    /// highlight blends against the transparent nothing inside the character's own image, and the
+    /// finished image is then laid over the map normally. Not held, it blends against the map.
+    /// Those are different pictures, and the authored one is the second.
+    ///
+    /// AQW's weapons do exactly this: `VoidKnightStar.swf` carries no filters at all and blends at
+    /// Overlay, and Overlay divides by the destination's alpha, which inside the character's own
+    /// image is zero.
+    ///
+    /// Only `Normal` and `Layer` survive the question. `Layer` already flattens its own group, so
+    /// what it contains cannot see past it either way.
+    fn refresh_aether_adaptive_avatar_cache_candidates(self) -> bool {
+        let mut subtree_blends_with_what_is_behind =
+            aether_blend_reads_what_is_behind(self.blend_mode());
+
+        if let Some(container) = self.as_container() {
+            for child in container.iter_render_list() {
+                subtree_blends_with_what_is_behind |=
+                    child.refresh_aether_adaptive_avatar_cache_candidates();
+            }
+        }
+
         let is_root = self
             .base()
             .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_ROOT);
@@ -2748,14 +2786,11 @@ pub trait TDisplayObject<'gc>:
                         .is_some_and(|unit| (u16::from(b'0')..=u16::from(b'9')).contains(&unit))
                 })
         });
-        self.base()
-            .set_aether_adaptive_avatar_cache_candidate(is_root && is_world_avatar);
+        self.base().set_aether_adaptive_avatar_cache_candidate(
+            is_root && is_world_avatar && !subtree_blends_with_what_is_behind,
+        );
 
-        if let Some(container) = self.as_container() {
-            for child in container.iter_render_list() {
-                child.refresh_aether_adaptive_avatar_cache_candidates();
-            }
-        }
+        subtree_blends_with_what_is_behind
     }
 
     fn filters(self) -> Ref<'gc, [Filter]> {
@@ -4699,6 +4734,74 @@ mod avm2_lifecycle_dirty_tests {
                     .contains_flag(DisplayObjectFlags::AETHER_ADAPTIVE_AVATAR_CACHE_CANDIDATE)
             );
         });
+    }
+
+    /// The weapon glow. AQW blends weapons at Overlay against whatever is behind the character, and
+    /// holding the character as a bitmap puts transparent nothing there instead. Overlay divides by
+    /// the destination's alpha, so inside the character's own image that is a division by zero.
+    ///
+    /// This cache is Aether's own and AQW never asked for it, so where it would change the picture
+    /// it does not get to run.
+    #[test]
+    #[cfg(feature = "aether_performance")]
+    fn aether_adaptive_avatar_declines_a_character_that_blends_with_the_map() {
+        rootless_mutate(|mc| {
+            let movie = Arc::new(SwfMovie::empty(10, None));
+            let avatar: DisplayObject<'_> = MovieClip::new(movie.clone(), mc).into();
+            let weapon: DisplayObject<'_> = MovieClip::new(movie, mc).into();
+
+            avatar
+                .base()
+                .set_aether_adaptive_avatar_cache_root_candidate(true);
+            avatar.set_name(mc, AvmString::new_utf8(mc, "a12"));
+            DisplayObjectBase::set_parent_ignoring_orphan_list(
+                Gc::write(mc, weapon.base()),
+                Some(avatar),
+            );
+
+            // `set_parent_ignoring_orphan_list` links the parent without putting the child on a
+            // render list, so this asks each object for its own answer; the walk that unions them
+            // is the `|=` in the function and is exercised by the candidate tests above.
+            assert!(
+                !avatar.refresh_aether_adaptive_avatar_cache_candidates(),
+                "an ordinary character does not blend with the map"
+            );
+
+            // The blend AQW actually ships on a weapon.
+            weapon.base().set_blend_mode(ExtendedBlendMode::Overlay);
+            assert!(
+                weapon.refresh_aether_adaptive_avatar_cache_candidates(),
+                "a weapon blending at Overlay reads what is behind the character"
+            );
+        });
+    }
+
+    /// Normal composites over and Layer only groups, so neither can tell whether an ancestor was
+    /// flattened first. Everything else can, including the fixed-function ones.
+    #[test]
+    fn only_normal_and_layer_survive_being_flattened_into_an_ancestor() {
+        assert!(!aether_blend_reads_what_is_behind(ExtendedBlendMode::Normal));
+        assert!(!aether_blend_reads_what_is_behind(ExtendedBlendMode::Layer));
+
+        for reads in [
+            ExtendedBlendMode::Overlay,
+            ExtendedBlendMode::Multiply,
+            ExtendedBlendMode::HardLight,
+            ExtendedBlendMode::Difference,
+            ExtendedBlendMode::Add,
+            ExtendedBlendMode::Screen,
+            ExtendedBlendMode::Subtract,
+            ExtendedBlendMode::Erase,
+            ExtendedBlendMode::Alpha,
+            ExtendedBlendMode::Invert,
+            ExtendedBlendMode::Lighten,
+            ExtendedBlendMode::Darken,
+        ] {
+            assert!(
+                aether_blend_reads_what_is_behind(reads),
+                "{reads:?} depends on what is behind it"
+            );
+        }
     }
 
     #[test]

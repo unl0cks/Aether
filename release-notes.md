@@ -20,9 +20,17 @@ When a blend composites part of the screen, it samples the image it drew into. T
 
 The sizes happen to line up today, so nothing looks different, and the same frame renders byte for byte identically. It is fixed because it is the kind of thing that is only correct by accident, and the accident is one grid size away from ending.
 
+## Weapon glows
+
+A weapon's glow is not a filter. AQW builds it as a blend, which means the weapon is drawn by combining it with whatever is behind it: the map, the ground, the other characters.
+
+Aether holds each character as a finished image, which is a large part of why crowded rooms run as well as they do. Nothing else can tell the difference, because a finished image laid over the map looks the same as the parts drawn one at a time. A blend can tell. Held as an image, a weapon blends against the empty space inside the character's own picture rather than against the map, and Overlay, which is the blend AQW uses, divides by how solid the thing behind it is. Inside the character's own picture, that is nothing at all.
+
+A character with anything inside it that blends is no longer held as an image. It costs that character the optimisation and keeps everyone else's, which is the right way round: the optimisation is ours and the artwork is theirs.
+
 ## Still to come
 
-Dragging the window still costs frames while you are dragging, and the weapon glow is still wrong.
+Dragging the window still costs frames while you are dragging.
 
 ## Downloads
 
