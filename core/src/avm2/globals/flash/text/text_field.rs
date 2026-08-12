@@ -59,19 +59,34 @@ fn aether_field_is_a_readout(this: EditText<'_>) -> bool {
     const MAX_ANCESTRY: usize = 32;
 
     let mut ancestor = this.parent();
-    for _ in 0..MAX_ANCESTRY {
-        let Some(clip) = ancestor else {
-            break;
-        };
+    let mut depth = 0;
+    while let Some(clip) = ancestor {
         if let Some(name) = clip.name()
             && crate::aether_compatibility::is_aqw_player_text_container(&name)
         {
             return false;
         }
+        depth += 1;
+        if depth == MAX_ANCESTRY {
+            break;
+        }
         ancestor = clip.parent();
     }
 
-    true
+    // A field with no parent at all is one a script is still building, and where it will be hung
+    // cannot be asked yet. That is not a corner case here: AQW's current chat interface fills in a
+    // line and only adds it to the log at the end of the function, so at the moment the text
+    // arrives the field is attached to nothing and the walk above sees nothing.
+    //
+    // What it does have by then is its shape, and for this one question the shape is enough.
+    // Wrapping is set on a field that holds sentences, and every runtime-built field in AQW that
+    // holds a quantity leaves it off: the quest reward scene sets one line of `x` plus a number,
+    // the drops panel sets a count. The two that do wrap are a chat line and a quest description.
+    //
+    // This is asked only of an unparented field, so it cannot reach the quest reward panel or any
+    // other wrapped readout that is already on the stage. Those are settled by the walk above.
+    let unparented_prose = depth == 0 && this.is_multiline() && this.is_word_wrap();
+    !unparented_prose
 }
 
 /// Whether a value is even a candidate, decided without converting it.
@@ -552,7 +567,11 @@ pub fn set_html_text<'gc>(
         #[cfg(feature = "aether_compatibility")]
         if let Some(grouped) = aether_grouped_display_html(this, &html_text) {
             this.set_html_text(&grouped, activation.context);
-            return Ok(Value::Undefined);
+            if this.aether_text_fits_its_field() {
+                return Ok(Value::Undefined);
+            }
+            // Wider than the field the author drew, and Flash cuts rather than shrinks. Fall
+            // through and write the number as AQW sent it.
         }
 
         this.set_html_text(&html_text, activation.context);
@@ -687,7 +706,9 @@ pub fn set_text<'gc>(
         #[cfg(feature = "aether_compatibility")]
         if let Some(grouped) = aether_grouped_display_text(this, &text) {
             this.set_text(&grouped, activation.context);
-            return Ok(Value::Undefined);
+            if this.aether_text_fits_its_field() {
+                return Ok(Value::Undefined);
+            }
         }
 
         this.set_text(&text, activation.context);

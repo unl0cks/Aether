@@ -22,6 +22,8 @@ Which means these all read properly now, including the three that were still mis
 
 Two things are still never touched. An editable field, because that is one the game reads back, and a separator in one would send `1,250,000` where `1250000` was meant. And a number welded to a name, which is what keeps `citadelruins-99922` a room rather than a count.
 
+A third thing changed with them. Separators make a number wider, and a field drawn to fit six digits does not grow to fit eight; Flash cuts it off at the edge instead. The reputation panel showed this as `100,00`, which is worse than no separators at all. A number that would not fit the field it is going into is now left as the game wrote it.
+
 The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
 
 ## Lag when a control deck launches it
