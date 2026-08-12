@@ -65,9 +65,9 @@ still costs frames while you are dragging.
 
 ## Downloads
 
-`Aether-Setup-0.5.17-win-x64.exe` for the installer, `Aether-Portable-0.5.17-win-x64.zip` if you
+`Aether-Setup-0.5.18-win-x64.exe` for the installer, `Aether-Portable-0.5.18-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.17-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.5.18-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
