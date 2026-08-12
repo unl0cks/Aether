@@ -1,6 +1,28 @@
-A division by zero in every blend that reads what is behind it.
+The weapon glow, found.
 
 ## Weapon glows
+
+A filter that draws outside the thing it is applied to has to be given room to do it, or it is cut
+off at the edge of that room. Room is reserved for a blur, a glow, a drop shadow, a bevel and a
+displacement map. It was never reserved for a **gradient** glow, which fell through to "reserve
+nothing at all".
+
+AQW's weapons wear a gradient glow. `UltimateGameClaymore.swf`, the Ultimate Flame Blade, carries
+one 17 pixels wide over 3 passes, running from transparent red to opaque orange.
+
+So the glow was cut off at the weapon's own outline, on all four sides, against a straight line.
+Measured: at three sizes from 30 to 360 pixels across, the glow reached **zero pixels** past the
+object. Not a small amount. None.
+
+That is the rectangle. A glow is soft everywhere and nothing soft draws a straight edge, so the
+rectangle was never the glow -- it was the edge of the space the glow was allowed to occupy. It got
+worse as a character got smaller because the reach is measured in screen pixels while the outline
+shrinks with the weapon, so a greater share of it fell outside.
+
+Gradient glows and gradient bevels are now given the same room as the plain ones, plus the offset
+they are drawn at.
+
+## A division by zero in every blend that reads what is behind it
 
 A blend that reads what is behind it -- Overlay, Multiply, Hardlight, Darken, Lighten, Difference,
 Invert -- has to recover the colour underneath from a form that has already been multiplied by how
@@ -14,14 +36,9 @@ Measured on a test case: a square blended this way over an empty background came
 across all 14,400 of its pixels**, and now comes out its own colour. Nothing else in the frame
 moves.
 
-This is why a weapon's glow appears as a hard-edged rectangle. A glow is soft everywhere; nothing
-soft can produce a straight edge. The rectangle was never the glow, it was the block.
-
 The same recovery is guarded everywhere else in the renderer. These seven were the exception.
 
-## The glow does not scale with the weapon, and that part is unresolved
-
-## The weapon glow, measured at last
+## The glow does not scale with the weapon, which is a separate question
 
 Every previous attempt at this argued from screenshots. This one has numbers.
 

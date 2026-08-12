@@ -15,8 +15,9 @@ use std::fs::File;
 
 use swf::{
     BlendMode, Color, CharacterId, Compression, Fixed8, Fixed16, FillStyle, Filter, GlowFilter,
-    GlowFilterFlags, Header, Matrix, PlaceObject, PlaceObjectAction, Point, PointDelta, Rectangle,
-    Shape, ShapeFlag, ShapeRecord, ShapeStyles, Sprite, StyleChangeData, Tag, Twips,
+    GlowFilterFlags, GradientFilter, GradientFilterFlags, GradientRecord, Header, Matrix,
+    PlaceObject, PlaceObjectAction, Point, PointDelta, Rectangle, Shape, ShapeFlag, ShapeRecord,
+    ShapeStyles, Sprite, StyleChangeData, Tag, Twips,
 };
 
 /// The square, in twips. Big enough that a 40 pixel glow around it is obvious, small enough that a
@@ -118,6 +119,30 @@ fn main() {
         ],
     }));
 
+    // The filter AQW actually ships on a weapon, copied field for field out of
+    // `UltimateGameClaymore.swf`: a gradient glow, two stops, transparent red running to opaque
+    // orange, offset by a short distance. This is the one that was never given room to draw.
+    let gradient = rest.iter().any(|arg| arg == "gradient");
+    let weapon_glow = vec![Filter::GradientGlowFilter(Box::new(GradientFilter {
+        colors: vec![
+            // Transparent red at the outside of the ramp, opaque orange at the object.
+            GradientRecord {
+                ratio: 0,
+                color: Color::from_rgba(0x00ff0000),
+            },
+            GradientRecord {
+                ratio: 255,
+                color: Color::from_rgba(0xffff6600),
+            },
+        ],
+        blur_x: Fixed16::from_f64(17.0),
+        blur_y: Fixed16::from_f64(17.0),
+        angle: Fixed16::from_f64(4.6425628662109375),
+        distance: Fixed16::from_f64(4.0),
+        strength: Fixed8::from_f64(1.7890625),
+        flags: GradientFilterFlags::COMPOSITE_SOURCE | GradientFilterFlags::from_passes(3),
+    }))];
+
     let glow = vec![Filter::GlowFilter(Box::new(GlowFilter {
         color: Color::from_rgba(0xff00a5ff),
         blur_x: Fixed16::from_f64(40.0),
@@ -125,6 +150,8 @@ fn main() {
         strength: Fixed8::from_f64(2.0),
         flags: GlowFilterFlags::COMPOSITE_SOURCE | GlowFilterFlags::from_passes(3),
     }))];
+
+    let glow = if gradient { weapon_glow } else { glow };
 
     // Centred, so the glow has room on every side whatever the scale and rotation are.
     let matrix = placed(scale, rotation);

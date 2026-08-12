@@ -86,6 +86,12 @@ impl Filter {
             Filter::DropShadowFilter(filter) => filter.calculate_dest_rect(source_rect),
             Filter::BevelFilter(filter) => filter.calculate_dest_rect(source_rect),
             Filter::DisplacementMapFilter(filter) => filter.calculate_dest_rect(source_rect),
+            // Both gradient filters draw outside their object exactly as their plain counterparts
+            // do. Leaving them to fall through to `source_rect` reserved no room at all for that,
+            // so the glow was cut off against the edge of the object's own bounds -- a straight
+            // line on every side, which is a rectangle around the object rather than a glow.
+            Filter::GradientGlowFilter(filter) => filter.calculate_dest_rect(source_rect),
+            Filter::GradientBevelFilter(filter) => filter.calculate_dest_rect(source_rect),
             _ => source_rect,
         }
     }
