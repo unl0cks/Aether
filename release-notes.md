@@ -58,6 +58,13 @@ The earlier attempt at this measured the object with the wrong part of its trans
 weapon with it. This one measures the length of the transform's basis vectors instead, so a weapon
 turned ninety degrees renders a glow identical to one not turned at all. There is a test for it.
 
+## Frame rate around other players
+
+The change in 0.5.16 that stopped holding a character as a finished image whenever anything inside it
+blended is reverted. It cost frames in exactly the place they are worth most -- a crowded room is
+mostly characters carrying blending weapons -- and it fixed nothing, because the fault it was aimed
+at was the division by zero above, in a shader, rather than anything about caching.
+
 ## Still to come
 
 Frame rate is steadier in a crowded room than it was, but still not steady. Dragging the window
@@ -65,9 +72,9 @@ still costs frames while you are dragging.
 
 ## Downloads
 
-`Aether-Setup-0.5.18-win-x64.exe` for the installer, `Aether-Portable-0.5.18-win-x64.zip` if you
+`Aether-Setup-0.5.19-win-x64.exe` for the installer, `Aether-Portable-0.5.19-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.18-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.5.19-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
