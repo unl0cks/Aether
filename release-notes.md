@@ -22,7 +22,17 @@ Which means these all read properly now, including the three that were still mis
 
 Two things are still never touched. An editable field, because that is one the game reads back, and a separator in one would send `1,250,000` where `1250000` was meant. And a number welded to a name, which is what keeps `citadelruins-99922` a room rather than a count.
 
-A third thing changed with them. Separators make a number wider, and a field drawn to fit six digits does not grow to fit eight; Flash cuts it off at the edge instead. The reputation panel showed this as `100,00`, which is worse than no separators at all. A number that would not fit the field it is going into is now left as the game wrote it.
+A third thing changed with them. Separators make a number wider, and a field drawn to fit six digits does not grow to fit eight; Flash cuts it off at the edge instead. The reputation panel showed this as `100,00`. A column that is too narrow for its separators now takes the room it needs from the left, which leaves the right edge where it was drawn and grows the number into the gap beside it. If even that is not enough, the number is written as the game sent it.
+
+## Dragging the window no longer wrecks the client
+
+Moving or resizing the window made everything slow, and staying at the new size did not undo it. Long enough at it and the client ran out of graphics memory and closed.
+
+Windows reports a resize once per frame for the whole time a window is being dragged, and reports one for a plain move as well, where nothing has changed at all. Every one of those emptied both texture caches and rebuilt every render target. So a two second drag threw away and rebuilt the entire cache a hundred times, and a graphics driver cannot reclaim a texture until the card has finished with the frame that used it. Asked faster than the card retires them, the ones waiting to be freed are the memory. A 10 GB card reached 44.2 GB that way while the renderer had only asked for 14.2 GB, and died on the next large allocation, which is why maximising the window was often the moment it went.
+
+A resize that changes nothing is now ignored, and a real one keeps the caches. Nothing in them depends on how big the window is: a texture is keyed by its own size, and the ones that no longer fit the new viewport expire on their own a couple of seconds later.
+
+Thanks to Laaiti for finding it. The client had been crashing without a pattern, and the pattern was the window.
 
 The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
 

@@ -971,29 +971,54 @@ impl<'gc> EditText<'gc> {
         }
     }
 
-    /// Whether the laid-out text still fits across the width the author gave this field.
+    /// Make room for text that digit grouping has widened, and report whether there is now room.
     ///
-    /// Asked after digit grouping has widened a number, because Flash cuts a fixed-size field off
-    /// at its edge rather than shrinking the text to suit. AQW's reputation panel is the case that
-    /// needed it: the rank columns are sized to the digits they were written for, so `100000`
-    /// became `100,00` with the last digit past the edge, which is worse than no separators at all.
+    /// Separators make a number wider, and Flash cuts a fixed-size field off at its edge rather
+    /// than shrinking the text to suit. AQW's reputation panel is the case that needed this: the
+    /// columns are sized to the digits they were drawn for, so `100000` became `100,00` with the
+    /// last digit past the edge.
     ///
-    /// Two kinds of field always pass. An autosizing one grows to whatever it is handed, and a
+    /// The room is taken from the left, which leaves the right edge where the author put it. In a
+    /// column of figures that reads as the number growing leftwards into the gap beside it, which
+    /// is where the space is; taking it from the right would push into whatever sits after.
+    ///
+    /// Two kinds of field never need this. An autosizing one grows to whatever it is handed, and a
     /// wrapping one moves the overflow onto the next line instead of cutting it.
     ///
-    /// The comparison is made in layout width, and against the same content width `relayout` lays
-    /// text into, so it answers the question the layout itself already asked.
+    /// Widening is refused when the shortfall is wider than the field itself, which would mean the
+    /// number is not merely a little too long for its column but has no business being in it. The
+    /// caller writes the ungrouped number in that case.
+    ///
+    /// Measurement is in layout width against the same content width [`Self::relayout`] lays text
+    /// into, so this asks the question the layout itself already asked.
     #[cfg(feature = "aether_compatibility")]
-    pub fn aether_text_fits_its_field(self) -> bool {
+    pub fn aether_fit_grouped_text(self, context: &mut UpdateContext<'gc>) -> bool {
         if self.0.autosize.get() != AutoSizeMode::None
             || self.0.flags.get().contains(EditTextFlag::WORD_WRAP)
         {
             return true;
         }
 
-        let available =
-            self.local_width_to_layout_width(self.0.bounds.get().width()) - Self::GUTTER * 2;
-        self.0.layout.borrow().text_size().width() <= available
+        let bounds = self.0.bounds.get();
+        let available = self.local_width_to_layout_width(bounds.width()) - Self::GUTTER * 2;
+        let needed = self.0.layout.borrow().text_size().width();
+        if needed <= available {
+            return true;
+        }
+
+        let shortfall = self.layout_width_to_local_width(needed - available);
+        if shortfall >= bounds.width() {
+            return false;
+        }
+
+        // Only ever wider, and only ever leftwards. A field that has already been widened for a
+        // longer number keeps that room, so a column settles at the width of the largest figure it
+        // has shown rather than twitching every time the number changes.
+        let mut widened = bounds;
+        widened.x_min -= shortfall;
+        self.0.bounds.set(widened);
+        self.relayout(context);
+        true
     }
 
     /// Measure the width and height of the `EditText`'s current text load.

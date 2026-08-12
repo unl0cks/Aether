@@ -567,11 +567,11 @@ pub fn set_html_text<'gc>(
         #[cfg(feature = "aether_compatibility")]
         if let Some(grouped) = aether_grouped_display_html(this, &html_text) {
             this.set_html_text(&grouped, activation.context);
-            if this.aether_text_fits_its_field() {
+            if this.aether_fit_grouped_text(activation.context) {
                 return Ok(Value::Undefined);
             }
-            // Wider than the field the author drew, and Flash cuts rather than shrinks. Fall
-            // through and write the number as AQW sent it.
+            // Too wide for the field even after widening it. Flash cuts rather than shrinks, so
+            // fall through and write the number as AQW sent it.
         }
 
         this.set_html_text(&html_text, activation.context);
@@ -706,7 +706,7 @@ pub fn set_text<'gc>(
         #[cfg(feature = "aether_compatibility")]
         if let Some(grouped) = aether_grouped_display_text(this, &text) {
             this.set_text(&grouped, activation.context);
-            if this.aether_text_fits_its_field() {
+            if this.aether_fit_grouped_text(activation.context) {
                 return Ok(Value::Undefined);
             }
         }
