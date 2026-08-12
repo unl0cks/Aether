@@ -1,39 +1,52 @@
-Frame rate work, aimed at the thing that costs the most when a room fills up.
+A measurement, and a switch to settle the weapon glow with.
 
-## Crowded rooms
+## The weapon glow, measured at last
 
-Every player in a room brings their own effects with them, and each one of those was costing far more than the pixels it drew.
+Every previous attempt at this argued from screenshots. This one has numbers.
 
-When the game asks for a blend, a glow on a weapon or a highlight on a cape, the renderer was setting aside an offscreen image, spending a drawing pass filling it, and then compositing the result. Measured across roughly two million blends in a session, **99% of them wrap exactly one thing**. For those the offscreen image is pure ceremony: the same pixels come out of drawing the thing directly with the blend switched on.
+A test case draws one square with a glow on it, at sizes from 30 pixels across to 376, and the glow
+is measured in pixels rather than looked at:
 
-Frame time is almost entirely the number of drawing passes, at somewhere between 50 and 62 microseconds each, so passes are the frame. Those are now skipped for the blends that can skip them, which is every blend of the simple kind, Add, Screen, Subtract and plain layering, wrapped around a single drawn thing. Of the blend modes AQW's own artwork uses, a third are of that kind.
+| square drawn at | square on screen | how far the glow reaches |
+|---|---|---|
+| 0.25x | 30 x 30 | 17 px |
+| 0.5x | 70 x 70 | 19 px |
+| 1x | 136 x 136 | 17 px |
+| 2x | 256 x 256 | 17 px |
+| 3x | 376 x 376 | 18 px |
 
-This scales with how many players are on screen, because the blends do.
+The square grows twelve times over and the glow does not move. A glow covers a fixed number of
+screen pixels no matter how large or small the thing wearing it is drawn, which is why it swamps a
+small weapon and barely rims a large one, and why shrinking a character makes it worse.
 
-Two kinds keep their offscreen image. The ones that read what is underneath them, such as Multiply and Overlay, genuinely need the picture gathered somewhere first. And a shape made of several overlapping fills keeps it too, because blending each fill separately is not the same as blending the finished shape: where two fills overlap, doing it the short way would blend twice.
+That is not a mistake in Aether. It is what the renderer has always done, deliberately. Whether it
+is what Flash did is the one thing that cannot be worked out from in here, and guessing at it has
+now made things worse twice: measured against the object instead, most weapons lose their glow
+almost entirely, while a few look better.
 
-None of this changes what anything looks like. Each case was checked by rendering the same frame with and without the change and comparing the files byte for byte, not by eye.
+So both readings are in this build, and one run tells us which is right. Normally nothing changes.
+Started this way, a glow is measured against the weapon wearing it instead of the screen:
 
-## A blend no longer assumes its source fills its own image
+    set AETHER_FILTER_SCALE=object
 
-When a blend composites part of the screen, it samples the image it drew into. That image comes from a pool which hands back something at least as big as was asked for, and often bigger, so the drawn part may occupy only a corner of it. The sampling assumed the two were the same size, which would squash the source into a fraction of itself and read empty padding for the rest.
+The same test case under that setting reaches 5, 9, 17, 35 and 53 pixels for the five sizes above,
+in proportion to the weapon rather than fixed.
 
-The sizes happen to line up today, so nothing looks different, and the same frame renders byte for byte identically. It is fixed because it is the kind of thing that is only correct by accident, and the accident is one grid size away from ending.
-
-## Weapon glows
-
-A weapon's glow is not a filter. AQW builds it as a blend, which means the weapon is drawn by combining it with whatever is behind it: the map, the ground, the other characters.
-
-Aether holds each character as a finished image, which is a large part of why crowded rooms run as well as they do. Nothing else can tell the difference, because a finished image laid over the map looks the same as the parts drawn one at a time. A blend can tell. Held as an image, a weapon blends against the empty space inside the character's own picture rather than against the map, and Overlay, which is the blend AQW uses, divides by how solid the thing behind it is. Inside the character's own picture, that is nothing at all.
-
-A character with anything inside it that blends is no longer held as an image. It costs that character the optimisation and keeps everyone else's, which is the right way round: the optimisation is ours and the artwork is theirs.
+The earlier attempt at this measured the object with the wrong part of its transform, which holds
+`scale x cos(angle)` and so falls to nothing at a quarter turn, taking the glow of every rotated
+weapon with it. This one measures the length of the transform's basis vectors instead, so a weapon
+turned ninety degrees renders a glow identical to one not turned at all. There is a test for it.
 
 ## Still to come
 
-Dragging the window still costs frames while you are dragging.
+Frame rate is steadier in a crowded room than it was, but still not steady. Dragging the window
+still costs frames while you are dragging.
 
 ## Downloads
 
-`Aether-Setup-0.5.16-win-x64.exe` for the installer, `Aether-Portable-0.5.16-win-x64.zip` if you would rather not install anything.
+`Aether-Setup-0.5.17-win-x64.exe` for the installer, `Aether-Portable-0.5.17-win-x64.zip` if you
+would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.16-win-x64.exe`. It is the same installer at a few megabytes instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It needs a connection; the other two do not.
+There may also be `Aether-Launcher-0.5.17-win-x64.exe`. It is the same installer at a few megabytes
+instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
+needs a connection; the other two do not.

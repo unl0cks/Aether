@@ -157,6 +157,95 @@ enum BitmapCacheTexturePolicy {
     BoundedReuse,
 }
 
+/// The scale a matrix applies, as the length of each of its basis vectors.
+///
+/// Taking `a` and `d` alone would be right only while nothing is rotated: under a rotation of
+/// theta they carry `scale * cos(theta)`, which collapses to nothing at a quarter turn. AQW rotates
+/// weapons constantly, so anything that wants "how big is this drawn" has to ask this way.
+fn matrix_scale(matrix: &Matrix) -> (f32, f32) {
+    (
+        (matrix.a * matrix.a + matrix.b * matrix.b).sqrt(),
+        (matrix.c * matrix.c + matrix.d * matrix.d).sqrt(),
+    )
+}
+
+/// Whether a filter is measured in screen pixels or in the pixels of the object wearing it.
+///
+/// Upstream Ruffle scales a filter by the stage view matrix alone, so a blur covers the same number
+/// of screen pixels however large or small the thing wearing it is drawn. Measured on a test case,
+/// a square drawn from 30px to 376px across keeps a glow reaching 17-18px the whole way. That is
+/// deliberate upstream and it is what Aether has always done.
+///
+/// It is also exactly what the reports about weapon glows describe from the other side: a glow that
+/// swamps a small weapon and barely rims a large one. But scaling by the whole transform instead was
+/// tried once and made most weapons *worse*, so which of the two matches Flash cannot be settled
+/// from in here. This switch is how the two get compared in the game itself, on real artwork,
+/// instead of argued about from screenshots.
+fn filter_scale_follows_object() -> bool {
+    static CHOICE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CHOICE.get_or_init(|| {
+        std::env::var("AETHER_FILTER_SCALE")
+            .is_ok_and(|choice| choice.eq_ignore_ascii_case("object"))
+    })
+}
+
+/// How much to scale a filter authored in an object's own pixels.
+///
+/// `concatenated` is everything between the object and the screen; `stage` is only the last step of
+/// it. Both sites that grow a filtered region must agree, or the region reserved for a blur and the
+/// blur drawn into it come out different sizes and the blur is cut off at a straight edge.
+fn filter_scale(concatenated: &Matrix, stage: &Matrix) -> (f32, f32) {
+    if filter_scale_follows_object() {
+        matrix_scale(concatenated)
+    } else {
+        (stage.a, stage.d)
+    }
+}
+
+#[cfg(test)]
+mod matrix_scale_tests {
+    use super::*;
+
+    fn turned(scale: f32, degrees: f32) -> Matrix {
+        let (sin, cos) = degrees.to_radians().sin_cos();
+        Matrix {
+            a: scale * cos,
+            b: scale * sin,
+            c: -scale * sin,
+            d: scale * cos,
+            tx: Twips::ZERO,
+            ty: Twips::ZERO,
+        }
+    }
+
+    #[test]
+    fn a_turn_does_not_change_the_scale() {
+        // The whole reason this is not `matrix.a`. At a quarter turn `a` is zero, and a filter
+        // scaled by it disappears -- which is what an earlier attempt at the weapon glow did to
+        // every rotated weapon in the game.
+        for degrees in [0.0, 15.0, 45.0, 90.0, 180.0, 270.0] {
+            let (x, y) = matrix_scale(&turned(2.0, degrees));
+            assert!(
+                (x - 2.0).abs() < 1e-4 && (y - 2.0).abs() < 1e-4,
+                "a {degrees} degree turn reported scale {x} x {y}, not 2 x 2",
+            );
+        }
+    }
+
+    #[test]
+    fn each_axis_keeps_its_own_scale() {
+        let (x, y) = matrix_scale(&Matrix {
+            a: 3.0,
+            b: 0.0,
+            c: 0.0,
+            d: 0.5,
+            tx: Twips::ZERO,
+            ty: Twips::ZERO,
+        });
+        assert!((x - 3.0).abs() < 1e-4 && (y - 0.5).abs() < 1e-4);
+    }
+}
+
 /// Whether a blend mode's result depends on what is already behind the object.
 ///
 /// `Normal` composites over and `Layer` only groups, so neither can tell whether an ancestor was
@@ -1753,9 +1842,10 @@ pub fn render_base<'gc>(
                         y_min: Twips::ZERO,
                         y_max: Twips::from_pixels_i32(height as i32),
                     };
+                    let (filter_scale_x, filter_scale_y) =
+                        filter_scale(&base_transform.matrix, &stage_matrix);
                     for filter in &mut filters {
-                        // Scaling is done by *stage view matrix* only, nothing in-between
-                        filter.scale(stage_matrix.a, stage_matrix.d);
+                        filter.scale(filter_scale_x, filter_scale_y);
                         filter_rect = filter.calculate_dest_rect(filter_rect);
                     }
                     let filter_rect = Rectangle {
@@ -2366,8 +2456,9 @@ pub trait TDisplayObject<'gc>:
         }
 
         if include_own_filters {
+            let (filter_scale_x, filter_scale_y) = filter_scale(matrix, view_matrix);
             for mut filter in self.filters().iter().cloned() {
-                filter.scale(view_matrix.a, view_matrix.d);
+                filter.scale(filter_scale_x, filter_scale_y);
                 bounds = filter.calculate_dest_rect(bounds);
             }
         }

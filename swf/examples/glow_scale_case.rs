@@ -29,6 +29,25 @@ const STAGE: f64 = 900.0;
 /// Enough frames of drift for a reused cache texture to be well clear of the size its contents want.
 const FRAMES: u16 = 24;
 
+/// The square, scaled and turned about its own centre, sitting in the middle of the stage whatever
+/// those two are. Keeping the centre fixed is what makes two renders comparable: any difference in
+/// how far the glow reaches is then a difference in the glow, not in where the square landed.
+fn placed(scale: f32, rotation_degrees: f32) -> Matrix {
+    let radians = rotation_degrees.to_radians();
+    let (sin, cos) = radians.sin_cos();
+    let (a, b, c, d) = (scale * cos, scale * sin, -scale * sin, scale * cos);
+    let centre = SQUARE as f32 / 2.0;
+    let stage_centre = STAGE as f32 / 2.0;
+    Matrix {
+        a: Fixed16::from_f32(a),
+        b: Fixed16::from_f32(b),
+        c: Fixed16::from_f32(c),
+        d: Fixed16::from_f32(d),
+        tx: Twips::from_pixels((stage_centre - (a * centre + c * centre)) as f64),
+        ty: Twips::from_pixels((stage_centre - (b * centre + d * centre)) as f64),
+    }
+}
+
 fn main() {
     let mut args = std::env::args().skip(1);
     let scale: f32 = args
@@ -49,6 +68,14 @@ fn main() {
     // The blend goes on the child inside the cached sprite rather than on the sprite itself, which
     // is how AQW is built: the weapon blends inside the character, and the character is the bitmap.
     let innerblend = rest.iter().any(|arg| arg == "innerblend");
+    // Rotation, in degrees. The in-game camera tool shows a glow that is wrong when the weapon is
+    // axis-aligned and clean when it is turned, so rotation has to be a variable here: a turned
+    // object has a far larger axis-aligned bounding box, and therefore far more slack around it.
+    let rotation: f32 = rest
+        .iter()
+        .find_map(|arg| arg.strip_prefix("rot:"))
+        .and_then(|deg| deg.parse().ok())
+        .unwrap_or(0.0);
 
     let square = Rectangle {
         x_min: Twips::ZERO,
@@ -99,12 +126,8 @@ fn main() {
         flags: GlowFilterFlags::COMPOSITE_SOURCE | GlowFilterFlags::from_passes(3),
     }))];
 
-    // Centred, so the glow has room on every side whatever the scale is.
-    let drawn = SQUARE as f32 * scale;
-    let offset = Twips::from_pixels(((STAGE as f32 - drawn) / 2.0) as f64);
-    let mut matrix = Matrix::scale(Fixed16::from_f32(scale), Fixed16::from_f32(scale));
-    matrix.tx = offset;
-    matrix.ty = offset;
+    // Centred, so the glow has room on every side whatever the scale and rotation are.
+    let matrix = placed(scale, rotation);
 
     // The wrapper carries the scale and is held as a bitmap; the square inside it carries the glow
     // at its authored size. Placed at the identity inside, so the only scale in the chain is the
@@ -188,11 +211,7 @@ fn main() {
     // contents drawn into it.
     for frame in 1..FRAMES {
         let drifted = scale * (1.0 + frame as f32 * 0.017);
-        let drawn = SQUARE as f32 * drifted;
-        let offset = Twips::from_pixels(((STAGE as f32 - drawn) / 2.0) as f64);
-        let mut matrix = Matrix::scale(Fixed16::from_f32(drifted), Fixed16::from_f32(drifted));
-        matrix.tx = offset;
-        matrix.ty = offset;
+        let matrix = placed(drifted, rotation);
         tags.push(Tag::PlaceObject(Box::new(PlaceObject {
             version: 3,
             action: PlaceObjectAction::Modify,
@@ -218,5 +237,5 @@ fn main() {
     let file = File::create(&out).expect("could not create the output file");
     swf::write_swf(&header, &tags, file).expect("could not write the SWF");
     let shape_of_it = if nested { "glow inside a cached sprite scaled" } else { "glow on a square scaled" };
-    println!("{out}: {shape_of_it} to {scale}, 40px glow, {STAGE}px stage");
+    println!("{out}: {shape_of_it} to {scale}, turned {rotation}deg, 40px glow, {STAGE}px stage");
 }
