@@ -20,16 +20,19 @@ Thanks to Necro for spotting it.
 
 Every release so far has called itself something like `0.5.10-local` in logs and crash reports. That was a build setting nobody had set, so published builds carried a developer's suffix. Released builds now say `0.5.13-release`.
 
-## Frame rate groundwork
+## Anti-aliasing quality no longer wrecks the frame rate
 
-No speed change in this build. A diagnostic build can now report which art in the game is issuing the expensive drawing work, aggregated per symbol rather than per object, so fifteen players wearing the same armour show up as one entry rather than fifteen.
+Changing quality down to Low or Medium and back up to High or Best dropped the client to a few frames a second, and stayed that way until you restarted it.
 
-The first results are worth saying out loud, because they were not what anyone expected:
+Every offscreen image the renderer keeps to reuse is tied to the anti-aliasing level it was made at, so changing that level made the whole cache unusable. It was kept anyway, while a full second set was built alongside it. On a 10 GB card that pushed graphics memory to 14.2 GB, and past that point the driver starts shuffling images over the bus, which is the same frame doing the same work ten times slower.
 
-- The map is the largest single cost, not player avatars. One Battleon overlay layer redraws 4.0 megapixels every time it is composited, on a stage that is only 960 by 550, because a cached map sizes its work to the whole map rather than to what is on your screen.
-- 89% of all blended layers wrap a single shape. Each one currently allocates its own offscreen image, draws one shape into it, copies the background back out, and composites, for one shape.
+That also explains why only one direction was slow. Going down to Low is fine, because the new set is the small one. Going back up is what crossed the line. The unusable images are now dropped when the level changes.
 
-Both of those are fixable and both are next.
+Thanks to Laaiti for finding the exact steps to reproduce it; the fact that only one direction lagged is what identified the cause.
+
+## The launcher records what it installed
+
+A 0.5.11 launcher that downloaded and installed 0.5.12 wrote 0.5.11 into Windows as the installed version. Add/Remove Programs showed the wrong number, and the update check read it back and offered an update you already had. It now records the version it actually installed, so one launcher keeps working rather than needing a fresh one each time.
 
 ## Downloads
 
