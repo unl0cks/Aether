@@ -350,6 +350,12 @@ impl AetherOptionsDialog {
                         "Idle upload eviction",
                         "Releases upload buffers that have gone unused instead of holding them for the whole session.",
                     ),
+                    (
+                        &mut settings.low_vram,
+                        resolved.low_vram,
+                        "Low VRAM mode",
+                        "Keeps a much smaller budget of textures for reuse. Costs frames on a card with memory to spare, and gains them on one without, because a card that cannot hold the full budget spills into system memory instead. Try it if you see coloured noise or streaks.",
+                    ),
                 ],
             ),
             (

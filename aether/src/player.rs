@@ -105,9 +105,11 @@ impl From<&GlobalPreferences> for LaunchOptions {
             gamepad_button_mapping: HashMap::from_iter(value.cli.gamepad_button.iter().cloned()),
             avm2_optimizer_enabled: !value.cli.no_avm2_optimizer,
             offscreen_texture_pool_policy: if value.cli.aether_bounded_offscreen_pool {
-                OffscreenTexturePoolPolicy::BoundedReuse(
-                    crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS,
-                )
+                OffscreenTexturePoolPolicy::BoundedReuse(if value.cli.aether_low_vram_resolved {
+                    crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
+                } else {
+                    crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
+                })
             } else {
                 OffscreenTexturePoolPolicy::Ephemeral
             },

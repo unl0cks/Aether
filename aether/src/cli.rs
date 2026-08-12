@@ -191,6 +191,18 @@ pub struct Opt {
     #[clap(skip)]
     pub aether_bounded_offscreen_pool: bool,
 
+    /// Cap the texture pool budgets for cards with little video memory.
+    #[clap(long = "low-vram", conflicts_with = "no_aether_low_vram")]
+    pub aether_low_vram: bool,
+
+    /// Keep the full texture pool budgets.
+    #[clap(long = "no-low-vram", conflicts_with = "aether_low_vram")]
+    pub no_aether_low_vram: bool,
+
+    /// Resolved launch-mode setting; populated by the AQW preset.
+    #[clap(skip)]
+    pub aether_low_vram_resolved: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(

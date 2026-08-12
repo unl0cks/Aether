@@ -24,6 +24,25 @@ pub const AQW_PAGE_URL: &str = "https://game.aq.com/";
 /// two of AQW's ~12 MB render targets, which made the pool a no-op and produced 48 GB/second
 /// of allocation churn. Raising it far past the design instead (768 MiB per pool) restored
 /// reuse but pushed a 10 GB card into a device-lost fault, so this is the documented budget.
+/// The same pools, sized for a card that cannot hold the budget above.
+///
+/// Measured on the tuning runs that produced those numbers: at 128 MiB the offscreen pool reused
+/// 62.2% of its requests against 99.8% for the general pool at 512 MiB. So this costs roughly four
+/// times as many fresh allocations per frame, which is why it is opt-in and never a default.
+///
+/// It is still the better trade on a small card. Two pools at 512 MiB is a gigabyte of retention
+/// before a single live render target, and a 2 GB card holding that spills into system memory --
+/// paid on every access, every frame, rather than once on a miss. That spilling is also what the
+/// reports of coloured pixel noise and diagonal streaks on a GT 1030 look like.
+pub const AQW_LOW_VRAM_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
+    max_cached_bytes: 96 * 1024 * 1024,
+    max_cached_entries: 512,
+    // Unchanged. Frames are what let an animation loop come back for a size it already has, and
+    // shortening that window is what shredded an allocator into 24 MB fragments once already.
+    max_idle_frames: 120,
+    max_cached_globals: 128,
+};
+
 pub const AQW_OFFSCREEN_TEXTURE_POOL_LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
     // Measured: with 128 MiB the offscreen pool reused 62.2% of its requests and threw away 99,073
     // entries for budget against 28,372 for age, so the byte limit was the dominant reason a
@@ -123,6 +142,12 @@ pub fn apply(opt: &mut Opt) -> Result<bool> {
     // budget for transient filter/surface textures, so changing maps or logging in repeatedly
     // cannot accumulate every GPU allocation size encountered during the session.
     opt.aether_bounded_offscreen_pool = !opt.no_aether_aqw_bounded_offscreen_pool;
+
+    // Opt-in only. It trades texture reuse for a smaller resident footprint, which is a loss on a
+    // card with room to spare and a gain on one without: a card that cannot hold the full budget
+    // spills into system memory instead, and paying for that on every access costs far more than
+    // a pool miss does.
+    opt.aether_low_vram_resolved = opt.aether_low_vram;
 
     opt.movie_url = Some(Url::parse(AQW_LOADER_URL).context("Invalid built-in AQW loader URL")?);
 
@@ -486,5 +511,35 @@ mod tests {
 
         let movie = parse_and_apply(&["aether", "https://example.invalid/movie.swf"]);
         assert!(!movie.aether_aqw_movement_stop_guard);
+    }
+}
+
+#[cfg(test)]
+mod low_vram_tests {
+    use super::*;
+
+    /// The point of the mode is a smaller resident footprint, so it has to actually be smaller --
+    /// and by enough to matter on a 2 GB card, where the full budget cannot fit at all.
+    #[test]
+    fn low_vram_keeps_far_less_than_the_full_budget() {
+        assert!(
+            AQW_LOW_VRAM_TEXTURE_POOL_LIMITS.max_cached_bytes * 4
+                <= AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_bytes,
+            "low VRAM mode has to be a large reduction, not a trim"
+        );
+        assert!(
+            AQW_LOW_VRAM_TEXTURE_POOL_LIMITS.max_cached_entries
+                < AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_cached_entries
+        );
+    }
+
+    /// Shortening the idle window is what fragmented an allocator into 24 MB runs and lost a
+    /// device. Whatever else this mode does, it must not repeat that.
+    #[test]
+    fn low_vram_does_not_shorten_the_idle_window() {
+        assert_eq!(
+            AQW_LOW_VRAM_TEXTURE_POOL_LIMITS.max_idle_frames,
+            AQW_OFFSCREEN_TEXTURE_POOL_LIMITS.max_idle_frames
+        );
     }
 }

@@ -157,6 +157,18 @@ enum BitmapCacheTexturePolicy {
     BoundedReuse,
 }
 
+/// The scale a matrix applies, as the length of each of its basis vectors.
+///
+/// Taking `a` and `d` alone would be right only while nothing is rotated: under a rotation of theta
+/// they carry `scale * cos(theta)`, which collapses to nothing at a quarter turn. AQW rotates
+/// weapons constantly, so anything asking "how big is this drawn" has to ask this way.
+fn matrix_scale(matrix: &Matrix) -> (f32, f32) {
+    (
+        (matrix.a * matrix.a + matrix.b * matrix.b).sqrt(),
+        (matrix.c * matrix.c + matrix.d * matrix.d).sqrt(),
+    )
+}
+
 /// Grid that cache texture sizes are rounded up to.
 ///
 /// AQW avatars shift their bounds by a pixel or two every frame as they animate, so one object asks
@@ -1742,9 +1754,18 @@ pub fn render_base<'gc>(
                         y_min: Twips::ZERO,
                         y_max: Twips::from_pixels_i32(height as i32),
                     };
+                    // Scaled by the whole transform down to this object, not by the stage alone.
+                    //
+                    // A blur is authored in the object's own pixels. Scaling it by the stage alone
+                    // fixes its reach in screen pixels, so the same kernel that keeps a full-size
+                    // weapon's glow bright spreads a quarter-size one's thin -- the glow does not
+                    // shrink with the weapon, it dilutes. Flash rasterises a filtered object at its
+                    // own resolution and transforms the result, which is why its filters track the
+                    // object. Aether keeps rasterising at stage resolution, for sharpness, and
+                    // scales the filter to match instead.
+                    let (filter_scale_x, filter_scale_y) = matrix_scale(&base_transform.matrix);
                     for filter in &mut filters {
-                        // Scaling is done by *stage view matrix* only, nothing in-between
-                        filter.scale(stage_matrix.a, stage_matrix.d);
+                        filter.scale(filter_scale_x, filter_scale_y);
                         filter_rect = filter.calculate_dest_rect(filter_rect);
                     }
                     let filter_rect = Rectangle {
@@ -2381,8 +2402,11 @@ pub trait TDisplayObject<'gc>:
         }
 
         if include_own_filters {
+            // Must agree with the cache path above, or the room reserved for a filter and the
+            // filter drawn into it come out different sizes.
+            let (filter_scale_x, filter_scale_y) = matrix_scale(matrix);
             for mut filter in self.filters().iter().cloned() {
-                filter.scale(view_matrix.a, view_matrix.d);
+                filter.scale(filter_scale_x, filter_scale_y);
                 bounds = filter.calculate_dest_rect(bounds);
             }
         }

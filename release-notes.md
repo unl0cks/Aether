@@ -1,4 +1,28 @@
-Two real rendering faults fixed, and the frame rate given back.
+The glow no longer fades out on a small character, and a mode for cards short of memory.
+
+## Weapon glows keep their proportions at any size
+
+The clipping is fixed. What was left was a glow that thinned out as a character got smaller, which
+is the same fault seen from the other side.
+
+A blur was measured in screen pixels rather than in the pixels of the thing wearing it. The same
+kernel that keeps a full-size weapon's glow bright spreads a quarter-size one's thin, so the glow
+did not shrink with the weapon -- it diluted.
+
+Measured on the real Ultimate Flame Blade, drawn at half and quarter size, as a fraction of its
+full-size width:
+
+| drawn at | before | now | should be |
+|---|---|---|---|
+| 0.5x | 0.534 | 0.511 | 0.50 |
+| 0.25x | 0.301 | 0.262 | 0.25 |
+
+Filters now scale by the whole transform down to the object, taken as the length of the transform's
+basis vectors rather than as two of its four numbers, so a weapon turned a quarter turn keeps the
+size its matrix actually carries.
+
+If a map background looks softer than it did, that is this change and worth reporting.
+
 
 ## A gradient glow was given no room to draw
 
@@ -57,11 +81,27 @@ with `AETHER_GLOW_ANCESTRY=1`, it writes one line per filtered object naming eve
 it and the stage, with each one's scale, blend mode, mask and cache state, followed by the room
 reserved for the filter. A glow that is cut off will say it grew by nothing.
 
+## Low VRAM mode
+
+A new switch under Advanced options, off by default. It keeps a much smaller budget of textures for
+reuse.
+
+On a card with memory to spare this **costs** frames: the tuning runs that set the current budget
+measured 62.2% texture reuse at the small size against 99.8% at the full one, so roughly four times
+as many fresh allocations per frame.
+
+On a card without, it should gain them. Two pools at the full budget is a gigabyte of retention
+before a single live render target, and a 2 GB card holding that spills into system memory instead
+-- paid on every access, every frame, rather than once on a miss. That spilling is also what the
+coloured pixel noise and diagonal streaks reported on a GT 1030 look like.
+
+Try it if you see either.
+
 ## Downloads
 
-`Aether-Setup-0.5.20-win-x64.exe` for the installer, `Aether-Portable-0.5.20-win-x64.zip` if you
+`Aether-Setup-0.5.21-win-x64.exe` for the installer, `Aether-Portable-0.5.21-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.5.20-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.5.21-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

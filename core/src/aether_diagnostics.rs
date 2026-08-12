@@ -4086,7 +4086,9 @@ pub fn filter_ancestry_enabled() -> bool {
     })
 }
 
-const MAX_REPORTED_FILTER_ANCESTRIES: usize = 64;
+// The login screen and UI alone spend dozens of these before a map is even loaded, so the cap has
+// to be well clear of them or the report never reaches anything in the world.
+const MAX_REPORTED_FILTER_ANCESTRIES: usize = 512;
 
 /// One link in the chain between a filtered object and the stage.
 fn describe_ancestor(object: DisplayObject<'_>) -> String {
