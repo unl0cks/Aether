@@ -32,7 +32,19 @@ Windows reports a resize once per frame for the whole time a window is being dra
 
 Three things changed. A resize is now applied once per drawn frame rather than once per report, so a drag costs one rebuild a frame instead of a hundred a second. A report for the size already in use is dropped entirely, which is every report a window move produces. And a real resize now keeps both caches, because nothing in them depends on how big the window is: a texture is keyed by its own size, and the ones that no longer suit the new viewport expire on their own a couple of seconds later.
 
+The game also no longer stops while the window is being dragged. Taking hold of a title bar or a resize border on Windows hands control to a message loop inside the operating system, and the client's own loop does not run again until you let go. Everything that moves the movie forward lived in that loop, so the game stood still for the whole drag and was then handed the entire elapsed time at once, which it spent catching up. It now keeps running through a drag.
+
 Thanks to Laaiti for finding it, and for going back and breaking it again twice after the first fix. The client had been crashing without a pattern, and the pattern was the window.
+
+## Glows are the right size again
+
+A glow on a weapon was drawn far too large, with a visible rectangular edge where it was cut off. It got worse the smaller the character was, which is what gave it away: the same weapon in the same map looked fine on the largest character and worst on the smallest.
+
+A blur is authored in the object's own pixels, so a character drawn at a third of its authored size should get a third of the blur. Aether scaled filters by the stage only and ignored everything between, so the glow stayed at full size around a third-size character. A blur is also cut off at the edge of the region set aside for it, and a glow far larger than the thing it surrounds shows that edge as a rectangle, which is the box you could see around the sword.
+
+Filters now scale by the whole path down to the object they belong to, including its own size and every parent's, and including rotation, which reading the matrix the old way could not account for.
+
+Thanks to Laaiti for measuring it across the three room sizes in `whitemap`. Window size was the obvious suspect and it was the wrong one; the character's size was the answer.
 
 The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
 

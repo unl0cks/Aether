@@ -54,6 +54,9 @@ impl MainWindow {
     pub fn window_event(&mut self, event_loop: &ActiveEventLoop, event: WindowEvent) {
         if matches!(&event, WindowEvent::RedrawRequested) {
             self.apply_pending_resize();
+            // Not only the idle callback advances the movie, because the idle callback does not run
+            // while the OS is dragging the window. See `tick_player`.
+            self.tick_player();
 
             let rendered_mouse_move = self.flush_render_mouse_move(Instant::now());
 
@@ -160,6 +163,12 @@ impl MainWindow {
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
+            }
+            WindowEvent::Moved(_) => {
+                // Nothing to redraw for a move on its own, but asking for one is what keeps frames
+                // arriving while the OS holds the event loop for the drag. Without it the window
+                // moves and the game inside it stands still.
+                self.gui.window().request_redraw();
             }
             WindowEvent::Resized(size) => {
                 // TODO: Change this when winit adds a `Window::minimized` or `WindowEvent::Minimize`.
@@ -555,27 +564,53 @@ impl MainWindow {
         // Core loop
         // [NA] This used to be called `MainEventsCleared`, but I think the behaviour is different now.
         // We should look at changing our tick to happen somewhere else if we see any behavioural problems.
-        if matches!(self.loaded, LoadingState::Loaded) {
-            let new_time = Instant::now();
-            let dt = FloatDuration::from_std(new_time.duration_since(self.time));
-            if dt.as_millis() > 0.0 {
-                self.time = new_time;
-                if let Some(mut player) = self.player.get() {
-                    #[cfg(feature = "metrics")]
-                    let tick_started = Instant::now();
-                    player.tick(dt);
-                    #[cfg(feature = "metrics")]
-                    {
-                        let phases = ruffle_core::aether_metrics::take_tick_snapshot();
-                        self.metrics.record_tick(tick_started.elapsed(), phases);
-                    }
-                    self.next_frame_time = Some(new_time + player.time_til_next_frame());
-                } else {
-                    self.next_frame_time = None;
-                }
-                self.check_redraw();
-            }
+        if self.tick_player() {
+            self.check_redraw();
         }
+    }
+
+    /// Advance the movie by however long it has been since it was last advanced.
+    ///
+    /// Reports whether any time passed, which is the caller's cue that there may be something new
+    /// to draw.
+    ///
+    /// Called from the redraw as well as from the idle callback, and that is not redundant. Taking
+    /// hold of a window's title bar or its resize border on Windows hands control to a message loop
+    /// inside the OS, and winit 0.30 does nothing to keep its own loop running while that lasts: it
+    /// notes the window is in a size-move and otherwise waits it out. So the idle callback, which is
+    /// where the tick used to live alone, does not run again until the drag ends.
+    ///
+    /// That is the freeze. The movie stands still for the whole drag, and then receives the entire
+    /// elapsed time as one tick, which it spends catching up. Window events are still delivered
+    /// during the modal loop, so ticking from the redraw keeps the movie running through a drag
+    /// instead of stopping it.
+    fn tick_player(&mut self) -> bool {
+        if !matches!(self.loaded, LoadingState::Loaded) {
+            return false;
+        }
+
+        let new_time = Instant::now();
+        let dt = FloatDuration::from_std(new_time.duration_since(self.time));
+        if dt.as_millis() <= 0.0 {
+            return false;
+        }
+
+        self.time = new_time;
+        if let Some(mut player) = self.player.get() {
+            #[cfg(feature = "metrics")]
+            let tick_started = Instant::now();
+            player.tick(dt);
+            #[cfg(feature = "metrics")]
+            {
+                let phases = ruffle_core::aether_metrics::take_tick_snapshot();
+                self.metrics.record_tick(tick_started.elapsed(), phases);
+            }
+            self.next_frame_time = Some(new_time + player.time_til_next_frame());
+        } else {
+            self.next_frame_time = None;
+        }
+
+        true
     }
 
     fn next_wake_time(&self) -> Option<Instant> {
