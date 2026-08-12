@@ -530,6 +530,28 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     }
 
     fn set_quality(&mut self, quality: StageQuality) {
+        // Every pooled texture carries the sample count it was made with, so a change to it strands
+        // the lot: not one of them can answer a request at the new count, and they sit in the
+        // retention budget until they age out. Meanwhile a complete second set is allocated
+        // alongside them.
+        //
+        // That is not merely wasteful. A session that switched quality was measured holding 14.2 GB
+        // of textures live on a 10 GB card, where a fresh start at the same quality held far less,
+        // and once past the card the driver pages over PCIe: identical pass and draw counts, ten
+        // times the frame time, all of it waiting to present.
+        //
+        // The reported symptom is asymmetric, and that is the tell. Dropping from 4x samples to 1x
+        // or 2x stays fast, because the set being allocated is the small one and the stranded 4x set
+        // still fits alongside it. Going back up is what lags, because now the large set is the new
+        // one and the stranded set is on top of it. Only the upward direction crosses the card.
+        //
+        // Dropping what cannot be used is correct on its own terms, and is what stops the two sets
+        // coexisting in either direction.
+        if quality_change_strands_pooled_textures(self.surface.quality(), quality) {
+            self.texture_pool.reset();
+            self.offscreen_texture_pool.reset();
+        }
+
         self.surface = Surface::new(
             &self.descriptors,
             quality,
@@ -1461,6 +1483,51 @@ impl<T> SubmissionRetirement<T> {
 
     fn push_target(&mut self, submission: T) -> Option<T> {
         self.push(submission)
+    }
+}
+
+/// Whether a quality change leaves the texture pools holding nothing usable.
+///
+/// Sample count is part of a pooled texture's identity, so changing it means no entry can answer a
+/// request any more. Quality settings that share a sample count, such as High and Best, leave the
+/// pool entirely valid, and throwing it away then would be a stall in exchange for nothing.
+fn quality_change_strands_pooled_textures(before: StageQuality, after: StageQuality) -> bool {
+    before.sample_count() != after.sample_count()
+}
+
+#[cfg(test)]
+mod quality_change_tests {
+    use super::*;
+
+    /// Low and Best differ in sample count, so nothing pooled at one is usable at the other.
+    #[test]
+    fn a_change_in_sample_count_strands_everything_the_pools_hold() {
+        assert!(quality_change_strands_pooled_textures(
+            StageQuality::Low,
+            StageQuality::Best
+        ));
+        assert!(quality_change_strands_pooled_textures(
+            StageQuality::Best,
+            StageQuality::Low
+        ));
+        assert!(quality_change_strands_pooled_textures(
+            StageQuality::Medium,
+            StageQuality::High
+        ));
+    }
+
+    /// High and Best are both 4x, so the pool is still entirely valid and throwing it away would be
+    /// a stall for nothing.
+    #[test]
+    fn a_change_that_keeps_the_sample_count_keeps_the_pool() {
+        assert!(!quality_change_strands_pooled_textures(
+            StageQuality::High,
+            StageQuality::Best
+        ));
+        assert!(!quality_change_strands_pooled_textures(
+            StageQuality::Low,
+            StageQuality::Low
+        ));
     }
 }
 

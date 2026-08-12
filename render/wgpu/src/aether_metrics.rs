@@ -373,6 +373,18 @@ pub fn estimate_texture_bytes(
     crate::texture_pool_policy::estimate_texture_bytes(size, format, mip_level_count, sample_count)
 }
 
+/// Serialises the tests that touch the process-global census.
+///
+/// The counters and the recent-texture ring are one shared set of statics, so any two tests that
+/// write them are reading each other's work when cargo runs them on different threads. That is not
+/// hypothetical: the ring test records textures, which lands in the same census the pool and
+/// residency tests assert exact totals against, and those four failed in parallel while passing
+/// under `--test-threads=1`.
+///
+/// It lives out here rather than inside one test module because both modules need it.
+#[cfg(test)]
+static METRICS_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[cfg(test)]
 mod recent_texture_tests {
     use super::*;
@@ -382,6 +394,7 @@ mod recent_texture_tests {
     /// the ring must not report it first or bury it once it wraps.
     #[test]
     fn the_ring_reports_recent_creations_oldest_first_and_survives_wrapping() {
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = recent_textures();
         for index in 0..(RECENT_TEXTURE_SLOTS as u32 + 3) {
             record_texture_created(TextureOrigin::Pool, 100 + index, 200 + index, 4, 64);
@@ -406,9 +419,6 @@ mod recent_texture_tests {
 mod tests {
     use super::*;
     use crate::texture_pool_policy::PoolMaintenanceReport;
-    use std::sync::Mutex;
-
-    static METRICS_TEST_LOCK: Mutex<()> = Mutex::new(());
 
     #[test]
     fn texture_estimator_handles_blocks_mips_layers_and_samples() {
@@ -481,7 +491,7 @@ mod tests {
 
     #[test]
     fn pool_snapshot_separates_general_and_offscreen_and_resets() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let _ = take_snapshot();
         record_texture_request(TexturePoolKind::General, true, Some(64));
         record_texture_request(TexturePoolKind::General, false, Some(128));
@@ -501,7 +511,7 @@ mod tests {
 
     #[test]
     fn pool_maintenance_keeps_gauges_and_resets_counters() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         record_pool_reset(TexturePoolKind::Offscreen, 0);
         let _ = take_snapshot();
 
@@ -554,7 +564,7 @@ mod tests {
         // The table fills within a minute of real play, and once it does every later allocation
         // lands in the overflow. A session reported 83,252 of 140,258 allocations there, excluded
         // from the totals and unattributed -- so the visible rows looked like the whole story.
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_texture_census();
         for height in 0..TEXTURE_BUCKETS as u32 {
             record_texture_created(TextureOrigin::Pool, 1, height + 1, 1, 10);
@@ -583,7 +593,7 @@ mod tests {
 
     #[test]
     fn texture_census_names_gradient_atlas_allocations() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_texture_census();
         record_texture_created(TextureOrigin::GradientAtlas, 256, 4_096, 1, 4_194_304);
 
@@ -603,7 +613,7 @@ mod tests {
         // Whether the pool reuses anything is the question the entry cap was raised to answer, and
         // it cannot be read off allocation counts alone -- a request that reuses and a request that
         // allocates look identical in the size table.
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_texture_census();
         record_texture_request(TexturePoolKind::General, true, Some(64));
         record_texture_request(TexturePoolKind::General, false, Some(64));
@@ -649,7 +659,7 @@ mod tests {
 
     #[test]
     fn census_reports_live_residency_so_churn_is_distinguishable_from_retention() {
-        let _guard = METRICS_TEST_LOCK.lock().unwrap();
+        let _guard = METRICS_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         reset_texture_census();
         record_gpu_residency(39_600_000_000, 1185, 812);
 

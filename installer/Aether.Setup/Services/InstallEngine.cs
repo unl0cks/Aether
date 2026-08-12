@@ -54,6 +54,18 @@ public static class InstallEngine
         Path.Combine(Path.GetTempPath(), $"Aether-Portable-{version}-win-x64.zip");
 
     /// <summary>Install. Reports coarse stages with a 0..1 fraction so a bar can move sensibly.</summary>
+    /// <summary>The version to record as the one now on disk.
+    ///
+    /// A full setup carries its payload, so <paramref name="carried"/> is the answer and nothing can disagree.
+    /// A launcher carries nothing and installs whatever the releases page is currently offering, so its own
+    /// version is simply not the answer: a 0.5.11 launcher that installs 0.5.12 and records 0.5.11 leaves
+    /// Add/Remove Programs wrong and the update check offering an update the player already has.
+    ///
+    /// A download that named no version falls back rather than recording nothing, because a blank
+    /// DisplayVersion is worse than a stale one: there is then nothing to compare against at all.</summary>
+    public static string InstalledVersion(string carried, string? downloaded) =>
+        string.IsNullOrWhiteSpace(downloaded) ? carried : downloaded;
+
     public static async Task InstallAsync(InstallOptions o, string version, IProgress<Progress>? progress,
                                           Action<string> log, CancellationToken ct)
     {
@@ -67,9 +79,10 @@ public static class InstallEngine
         progress?.Report(new Progress("Checking for an older install", 0.02));
         await RemoveLegacyInstallAsync(log, ct);
 
+        string? downloaded = null;
         if (SourceOfFiles == FileSource.Download)
         {
-            await DownloadAndExtractAsync(o, progress, log, ct);
+            downloaded = await DownloadAndExtractAsync(o, progress, log, ct);
         }
         else
         {
@@ -83,7 +96,7 @@ public static class InstallEngine
 
         progress?.Report(new Progress("Registering with Windows", 0.95));
         RegisterFileTypes(o, log);
-        RegisterUninstall(o, version, log);
+        RegisterUninstall(o, InstalledVersion(version, downloaded), log);
 
         progress?.Report(new Progress("Done", 1));
         log("Install complete.");
@@ -97,8 +110,9 @@ public static class InstallEngine
     /// Nothing here decides whether the download is trustworthy. <see cref="ReleaseFetcher"/> refuses anything
     /// that does not match the hash the release published, and refuses a release that publishes no hash at
     /// all, so by the time this unpacks there is nothing left to second-guess.</summary>
-    private static async Task DownloadAndExtractAsync(InstallOptions o, IProgress<Progress>? progress,
-                                                      Action<string> log, CancellationToken ct)
+    /// Returns the version it installed, which is what the registry has to record.
+    private static async Task<string> DownloadAndExtractAsync(InstallOptions o, IProgress<Progress>? progress,
+                                                              Action<string> log, CancellationToken ct)
     {
         progress?.Report(new Progress("Checking for the latest version", 0.05));
         using var fetcher = new ReleaseFetcher();
@@ -121,6 +135,8 @@ public static class InstallEngine
             progress?.Report(new Progress("Copying files", 0.7));
             var extracting = new Progress<double>(f => progress?.Report(new Progress("Copying files", 0.7 + f * 0.15)));
             await Payload.ExtractZipAsync(staged, o.InstallDir, extracting, log, ct);
+
+            return release.Version;
         }
         finally
         {
