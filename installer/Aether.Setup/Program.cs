@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia;
@@ -12,11 +13,16 @@ internal sealed class Program
     public static SetupArgs Args { get; private set; } = new();
 
     /// <summary>Whether this run removes Aether rather than installing it. Either asked for — <c>--uninstall</c>,
-    /// which is what the Add/Remove Programs entry passes — or IMPLIED: a build with no payload cannot install
-    /// anything, so it is the uninstaller and nothing else. That second form is how uninstall.exe works: the
-    /// build script publishes a payload-less copy of this exe into the payload, so removing Aether never
-    /// depends on the original setup.exe still being around.</summary>
-    public static bool Uninstalling => Args.Uninstall || !Payload.Exists;
+    /// which is what the Add/Remove Programs entry passes — or IMPLIED: a build that has no way to obtain
+    /// Aether's files cannot install anything, so it is the uninstaller and nothing else. That second form is
+    /// how uninstall.exe works: the build script publishes a copy of this exe with neither a payload nor the
+    /// launcher flag into the payload, so removing Aether never depends on the original setup.exe still being
+    /// around.
+    ///
+    /// The launcher has no payload either, and downloads instead, so the test is "no source of files" rather
+    /// than "no payload".</summary>
+    public static bool Uninstalling =>
+        Args.Uninstall || InstallEngine.SourceOfFiles == InstallEngine.FileSource.None;
 
     /// <summary>%AppData%\Aether\setup.log — the only place a startup failure can surface. This is a WinExe, so
     /// there's no console: an exception before the window appears exits silently and looks like nothing
@@ -154,6 +160,24 @@ public sealed class SetupArgs
 public static class SetupInfo
 {
     public static string Version { get; } = Read();
+
+    /// <summary>Whether this build fetches Aether from the releases page rather than carrying it.
+    ///
+    /// Set by the <c>AetherLauncher</c> MSBuild property, so it is a property of the build rather than
+    /// something an argument can turn on. See the comment on that property in Aether.Setup.csproj.</summary>
+    public static bool IsLauncher { get; } = ReadLauncherFlag();
+
+    private static bool ReadLauncherFlag()
+    {
+        foreach (var metadata in typeof(SetupInfo).Assembly
+                     .GetCustomAttributes(typeof(System.Reflection.AssemblyMetadataAttribute), false)
+                     .Cast<System.Reflection.AssemblyMetadataAttribute>())
+        {
+            if (metadata.Key == "AetherLauncher")
+                return bool.TryParse(metadata.Value, out bool on) && on;
+        }
+        return false;
+    }
 
     private static string Read()
     {

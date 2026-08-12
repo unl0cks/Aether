@@ -900,6 +900,18 @@ impl ApplicationHandler<RuffleEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        // The probe measures every click for the whole session and had nowhere to say so, which
+        // made it instrumentation that cost something and reported nothing. Reported here because
+        // percentiles over one session are the point: a single click says nothing about how the
+        // client feels to use. Silent unless --aether-input-latency-probe asked for it.
+        //
+        // Before the window is taken below, which is what owns the probe.
+        if let Some(window) = self.main_window.as_ref()
+            && let Some(summary) = window.click_latency.summary()
+        {
+            tracing::info!(target: "aether::perf", "{summary}");
+        }
+
         // `MainWindow` needs a tokio context to properly drop.
         {
             enter_runtime!(self);

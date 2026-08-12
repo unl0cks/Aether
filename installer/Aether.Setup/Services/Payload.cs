@@ -2,6 +2,7 @@ using System;
 using System.Formats.Tar;
 using System.IO;
 using System.IO.Compression;
+using System.Linq;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
@@ -70,6 +71,51 @@ public static class Payload
         }
         progress?.Report(1);
         log?.Invoke($"Extracted {files} files to {targetDir}");
+    }
+
+    /// <summary>Unpack a downloaded portable archive into <paramref name="targetDir"/>.
+    ///
+    /// The launcher installs what the releases page publishes, and that is a .zip rather than the tar+Brotli
+    /// stream embedded in a full setup. Same guarantees either way: nothing lands outside the install folder,
+    /// and progress runs 0..1.
+    ///
+    /// Progress counts entries rather than bytes here. A zip knows how many it holds without decompressing,
+    /// and the archive is a handful of large files, so entries and bytes tell nearly the same story.</summary>
+    public static async Task ExtractZipAsync(string archivePath, string targetDir, IProgress<double>? progress,
+                                             Action<string>? log, CancellationToken ct)
+    {
+        Directory.CreateDirectory(targetDir);
+        string root = Path.GetFullPath(targetDir);
+
+        using var zip = ZipFile.OpenRead(archivePath);
+        var files = zip.Entries.Where(e => !string.IsNullOrEmpty(e.Name)).ToList();
+
+        int done = 0;
+        foreach (var entry in files)
+        {
+            ct.ThrowIfCancellationRequested();
+
+            string dest = Path.GetFullPath(Path.Combine(targetDir, entry.FullName.Replace('/', Path.DirectorySeparatorChar)));
+            // Checked before anything is created, so a refused archive leaves no partial directory tree behind
+            // outside the target either.
+            if (!dest.StartsWith(root + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) &&
+                !dest.Equals(root, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidOperationException($"Archive entry escapes the install folder: {entry.FullName}");
+
+            Directory.CreateDirectory(Path.GetDirectoryName(dest)!);
+            await using (var source = entry.Open())
+            await using (var file = new FileStream(dest, FileMode.Create, FileAccess.Write, FileShare.None,
+                                                   bufferSize: 128 * 1024, useAsync: true))
+            {
+                await source.CopyToAsync(file, ct);
+            }
+
+            done++;
+            progress?.Report(files.Count > 0 ? Math.Clamp((double)done / files.Count, 0, 1) : 1);
+        }
+
+        progress?.Report(1);
+        log?.Invoke($"Extracted {done} files to {targetDir}");
     }
 
     /// <summary>Wraps a stream purely to report how far through it we are.</summary>

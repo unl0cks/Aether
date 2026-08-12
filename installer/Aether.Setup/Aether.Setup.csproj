@@ -21,6 +21,26 @@
     <EmbeddedResource Include="$(AetherPayload)" LogicalName="Aether.payload" />
   </ItemGroup>
 
+  <!-- THE LAUNCHER FLAG.
+       Two of the three builds carry no payload, so "no payload" alone can no longer mean "uninstall":
+
+         no payload, no flag  → the bare build, which becomes uninstall.exe
+         no payload, flag set → the launcher, which downloads the published portable zip
+         payload              → the full setup, which installs what it carries
+
+       Compiled in rather than passed at runtime, so a build cannot be talked into downloading by an argument.
+       Off unless asked for, which is what keeps uninstall.exe an uninstaller. -->
+  <PropertyGroup>
+    <AetherLauncher Condition="'$(AetherLauncher)' == ''">false</AetherLauncher>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyAttribute Include="System.Reflection.AssemblyMetadataAttribute">
+      <_Parameter1>AetherLauncher</_Parameter1>
+      <_Parameter2>$(AetherLauncher)</_Parameter2>
+    </AssemblyAttribute>
+  </ItemGroup>
+
   <ItemGroup>
     <AvaloniaResource Include="Assets\Aether.png" />
     <AvaloniaResource Include="Themes\Setup.axaml" />

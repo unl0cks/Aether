@@ -431,6 +431,8 @@ impl GuiController {
                 // Always reported, metrics build or not. Device loss is the failure that ends real
                 // sessions, it is reported from ordinary release builds, and without these counts
                 // a report cannot say whether a fix changed anything on the affected machine.
+                // Mutable only when the texture census below is compiled in.
+                #[cfg_attr(not(feature = "metrics"), allow(unused_mut))]
                 let mut sections = vec![
                     // Kept, but read it knowing what it is: wgpu has already torn the device down
                     // by the time this runs, so it describes the aftermath. The timeline below is

@@ -12,6 +12,9 @@
                                              via its own --pack mode, so packing and unpacking are the same code.
       3. dotnet publish Aether.Setup      -> the real setup.exe, single-file, with the archive embedded
          (AetherPayload=<archive>)
+      4. dotnet publish Aether.Setup      -> OPTIONAL, -Launcher only. The same GUI with no payload, which
+         (AetherLauncher=true)               downloads the published portable zip at install time instead of
+                                             carrying one. A few megabytes rather than a hundred.
 
     The staging directory IS the payload: whatever ends up in it is what gets installed, so new runtime files
     are picked up without editing a file list.
@@ -32,6 +35,10 @@ param(
     [switch] $SkipCargo,
 
     [switch] $SkipPortableZip,
+
+    # Also publish the launcher: the same GUI with no payload, which downloads the published portable archive
+    # instead of carrying it. A few megabytes rather than a hundred, at the cost of needing a connection.
+    [switch] $Launcher,
 
     [switch] $OpenOutputFolder,
 
@@ -177,9 +184,11 @@ $configRoot = Join-Path $buildRoot 'Release'
 $payloadDir = Join-Path $configRoot 'payload'      # <- this directory IS what gets installed
 $bareDir = Join-Path $configRoot 'bare'            # <- payload-less installer / packer / uninstall.exe
 $setupDir = Join-Path $configRoot 'setup'
+$launcherDir = Join-Path $configRoot 'launcher'
 $archive = Join-Path $configRoot 'Aether.payload'
 $distDir = Join-Path $installerDir 'dist'
 $setupPath = Join-Path $distDir "Aether-Setup-$Version-win-x64.exe"
+$launcherPath = Join-Path $distDir "Aether-Launcher-$Version-win-x64.exe"
 $portablePath = Join-Path $distDir "Aether-Portable-$Version-win-x64.zip"
 $hashPath = Join-Path $distDir 'SHA256SUMS.txt'
 
@@ -341,6 +350,51 @@ if (Test-Path -LiteralPath $setupPath) { Remove-Item -LiteralPath $setupPath -Fo
 Copy-Item -LiteralPath $builtSetup -Destination $setupPath -Force
 
 # ---------------------------------------------------------------------------
+# Pass 4 (optional) — the launcher
+# ---------------------------------------------------------------------------
+
+# The same GUI as setup.exe, with no payload and the launcher flag set, so it fetches the published portable
+# archive at install time instead of carrying one. That makes it a few megabytes instead of a hundred, which is
+# the difference between a download people will start and one they put off.
+#
+# It has to be published AFTER the payload passes and never instead of them: the launcher installs whatever the
+# releases page is currently offering, so the portable zip for this version has to exist and be published
+# before a launcher built alongside it can install this version.
+if ($Launcher) {
+    Write-Step 'Publishing the launcher (downloads instead of carrying a payload)'
+    Invoke-NativeCommand -FilePath $dotnet -Arguments @(
+        'publish', $setupProject,
+        '-c', 'Release', '-r', 'win-x64', '--self-contained', 'true',
+        '-o', $launcherDir,
+        '-p:PublishSingleFile=true',
+        '-p:EnableCompressionInSingleFile=true',
+        '-p:IncludeNativeLibrariesForSelfExtract=true',
+        '-p:PublishTrimmed=false', '-p:PublishReadyToRun=false',
+        '-p:DebugType=none', '-p:DebugSymbols=false',
+        "-p:Version=$Version", "-p:AssemblyVersion=$fileVersion",
+        "-p:FileVersion=$fileVersion", "-p:InformationalVersion=$Version",
+        '-p:AetherLauncher=true'
+    ) -FailureMessage 'Publishing the launcher failed.'
+
+    $builtLauncher = Join-Path $launcherDir 'Aether.Setup.exe'
+    if (-not (Test-Path -LiteralPath $builtLauncher -PathType Leaf)) {
+        throw "Expected $builtLauncher after publishing the launcher."
+    }
+
+    # A launcher the size of the full setup means the payload leaked into it, and it would then install the
+    # embedded copy rather than the published one. Cheap to check, silent and confusing if it ever happens.
+    $launcherBytes = (Get-Item -LiteralPath $builtLauncher).Length
+    if ($launcherBytes -ge $archiveBytes) {
+        throw ("The launcher is {0:0.0} MiB, which is no smaller than the payload it is supposed to omit. It was built with a payload embedded." -f ($launcherBytes / 1MB))
+    }
+
+    if (Test-Path -LiteralPath $launcherPath) { Remove-Item -LiteralPath $launcherPath -Force }
+    Copy-Item -LiteralPath $builtLauncher -Destination $launcherPath -Force
+    Write-Host ("  Launcher: {0:0.0} MiB against {1:0.0} MiB for the full setup" -f `
+        ($launcherBytes / 1MB), ((Get-Item -LiteralPath $setupPath).Length / 1MB))
+}
+
+# ---------------------------------------------------------------------------
 # Portable ZIP + hashes
 # ---------------------------------------------------------------------------
 
@@ -371,6 +425,9 @@ if (-not $SkipPortableZip) {
 
 Write-Step 'Writing SHA256 checksums'
 $hashTargets = @($setupPath)
+if ($Launcher -and (Test-Path -LiteralPath $launcherPath -PathType Leaf)) {
+    $hashTargets += $launcherPath
+}
 if (-not $SkipPortableZip -and (Test-Path -LiteralPath $portablePath -PathType Leaf)) {
     $hashTargets += $portablePath
 }
@@ -385,6 +442,7 @@ $setupMiB = (Get-Item -LiteralPath $setupPath).Length / 1MB
 Write-Host ''
 Write-Host 'BUILD SUCCEEDED' -ForegroundColor Green
 Write-Host ("  Setup:    $setupPath ({0:0.0} MiB)" -f $setupMiB)
+if ($Launcher) { Write-Host "  Launcher: $launcherPath" }
 if (-not $SkipPortableZip) { Write-Host "  Portable: $portablePath" }
 Write-Host "  SHA256:   $hashPath"
 Write-Host ''

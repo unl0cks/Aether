@@ -118,18 +118,26 @@ public partial class SetupWindow : Window
         FlashCheck.IsChecked = _options.AssociateFlash;
         ProjectorCheck.IsChecked = _options.AssociateProjector;
 
+        // The launcher does not know what it is about to install until it has asked the releases page, which
+        // it does at install time rather than on this screen. Naming its own version here would name the
+        // launcher's, which is not the version anyone ends up with.
+        bool downloads = InstallEngine.SourceOfFiles == InstallEngine.FileSource.Download;
         string version = SetupInfo.Version;
+        string incoming = downloads ? "the latest version" : $"version {version}";
+
         if (existing is not null && InstallEngine.ExistingVersion() is { } have)
         {
             Heading.Text = "Update Aether";
-            Subheading.Text = $"Version {have} is installed. This will replace it with {version}. Your settings " +
+            Subheading.Text = $"Version {have} is installed. This will replace it with {incoming}. Your settings " +
                               "and saved game data are kept.";
             NextButton.Content = "Update";
         }
         else
         {
             Heading.Text = "Install Aether";
-            Subheading.Text = $"Version {version}. An AdventureQuest Worlds client with a GPU renderer.";
+            Subheading.Text = downloads
+                ? "An AdventureQuest Worlds client with a GPU renderer. The latest version is downloaded when you install."
+                : $"Version {version}. An AdventureQuest Worlds client with a GPU renderer.";
         }
 
         AssocNote.Text = "Aether is offered in \"Open with\" and listed in Windows' Default apps — it doesn't take " +
@@ -144,7 +152,9 @@ public partial class SetupWindow : Window
         string? why = _options.Validate();
         DirNote.Text = why ?? "Installs for you only, so it needs no administrator rights.";
         DirNote.Foreground = why is null ? Brush("TextMutedBrush") : Brush("CloseHoverBrush");
-        NextButton.IsEnabled = why is null && Payload.Exists;
+        // Not Payload.Exists: the launcher has no payload and downloads instead, and testing for one here
+        // would leave its Install button disabled forever with nothing on screen to say why.
+        NextButton.IsEnabled = why is null && InstallEngine.SourceOfFiles != InstallEngine.FileSource.None;
     }
 
     private IBrush Brush(string key) => this.TryFindResource(key, out object? v) && v is IBrush b ? b : Brushes.White;

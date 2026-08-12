@@ -104,7 +104,11 @@ try {
             throw "Missing $([System.IO.Path]::GetFileName($asset)). Run installer\build-setup.cmd first."
         }
     }
-    Write-Ok "artifacts present for $version"
+    # The launcher is optional, since it is only built with -Launcher. It is uploaded when it is there and
+    # not demanded when it is not, because a release without one is still a complete release.
+    $launcher = Join-Path $distDir "Aether-Launcher-$version-win-x64.exe"
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) { $assets += $launcher }
+    Write-Ok "artifacts present for $version ($($assets.Count) files)"
 
     if (-not $Force) {
         $existing = & git tag --list $tag

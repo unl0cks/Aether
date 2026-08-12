@@ -105,6 +105,8 @@ thread_local! {
 }
 
 impl EnterFrameHandlerAttributionState {
+    /// Reached from [`record_enter_frame_handler`], which only the metrics build calls.
+    #[cfg_attr(not(feature = "aether_metrics"), allow(dead_code))]
     fn record_with(
         &mut self,
         method_key: usize,
@@ -229,6 +231,9 @@ pub fn enter_frame_handler_attribution_enabled() -> bool {
     ENTER_FRAME_HANDLER_ATTRIBUTION_ENABLED.load(Ordering::Relaxed)
 }
 
+/// Only the metrics build calls this, from the AVM2 broadcast dispatch. The tests below cover it
+/// either way, so it stays compiled rather than being cfg'd out and losing that coverage.
+#[cfg_attr(not(feature = "aether_metrics"), allow(dead_code))]
 pub(crate) fn record_enter_frame_handler(
     method_key: usize,
     elapsed: Duration,

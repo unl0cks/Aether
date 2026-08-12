@@ -27,6 +27,32 @@ public static class InstallEngine
 
     public sealed record Progress(string Stage, double Fraction);
 
+    /// <summary>Where this build gets Aether's files.</summary>
+    public enum FileSource
+    {
+        /// <summary>Nowhere. This build is the uninstaller.</summary>
+        None,
+        /// <summary>Compressed inside this executable. The full setup.</summary>
+        Embedded,
+        /// <summary>Downloaded from the releases page. The launcher.</summary>
+        Download,
+    }
+
+    /// <summary>Decided by how this copy was built, never by an argument. See SetupInfo.IsLauncher.</summary>
+    public static FileSource SourceOfFiles =>
+        Payload.Exists ? FileSource.Embedded
+        : SetupInfo.IsLauncher ? FileSource.Download
+        : FileSource.None;
+
+    /// <summary>Where a downloaded archive is staged.
+    ///
+    /// The temp folder, not the install folder. A hundred megabyte zip left in Program Files after every
+    /// install is litter, and writing into the install folder before the download has been verified would put
+    /// unverified bytes where the installed program lives. The version is in the name so a retry after a
+    /// failure and a different version in flight cannot collide.</summary>
+    public static string StagedArchivePath(string version) =>
+        Path.Combine(Path.GetTempPath(), $"Aether-Portable-{version}-win-x64.zip");
+
     /// <summary>Install. Reports coarse stages with a 0..1 fraction so a bar can move sensibly.</summary>
     public static async Task InstallAsync(InstallOptions o, string version, IProgress<Progress>? progress,
                                           Action<string> log, CancellationToken ct)
@@ -41,9 +67,16 @@ public static class InstallEngine
         progress?.Report(new Progress("Checking for an older install", 0.02));
         await RemoveLegacyInstallAsync(log, ct);
 
-        progress?.Report(new Progress("Copying files", 0));
-        var inner = new Progress<double>(f => progress?.Report(new Progress("Copying files", f * 0.85)));
-        await Payload.ExtractAsync(o.InstallDir, inner, log, ct);
+        if (SourceOfFiles == FileSource.Download)
+        {
+            await DownloadAndExtractAsync(o, progress, log, ct);
+        }
+        else
+        {
+            progress?.Report(new Progress("Copying files", 0));
+            var inner = new Progress<double>(f => progress?.Report(new Progress("Copying files", f * 0.85)));
+            await Payload.ExtractAsync(o.InstallDir, inner, log, ct);
+        }
 
         progress?.Report(new Progress("Creating shortcuts", 0.9));
         Shortcuts(o, log);
@@ -54,6 +87,48 @@ public static class InstallEngine
 
         progress?.Report(new Progress("Done", 1));
         log("Install complete.");
+    }
+
+    /// <summary>The launcher's half of the install: ask the releases page what is current, fetch it, unpack it.
+    ///
+    /// Progress is split so the bar keeps the same shape as an embedded install. Downloading is most of the
+    /// wait on any normal connection, so it gets most of the bar.
+    ///
+    /// Nothing here decides whether the download is trustworthy. <see cref="ReleaseFetcher"/> refuses anything
+    /// that does not match the hash the release published, and refuses a release that publishes no hash at
+    /// all, so by the time this unpacks there is nothing left to second-guess.</summary>
+    private static async Task DownloadAndExtractAsync(InstallOptions o, IProgress<Progress>? progress,
+                                                      Action<string> log, CancellationToken ct)
+    {
+        progress?.Report(new Progress("Checking for the latest version", 0.05));
+        using var fetcher = new ReleaseFetcher();
+
+        var release = await fetcher.LatestAsync(ct)
+            ?? throw new InvalidOperationException(
+                "Could not reach the Aether releases page. Check your connection and try again, or download the portable version instead.");
+
+        log($"Latest release is {release.Version}.");
+        string staged = StagedArchivePath(release.Version);
+
+        try
+        {
+            progress?.Report(new Progress($"Downloading Aether {release.Version}", 0.1));
+            var downloading = new Progress<double>(f =>
+                progress?.Report(new Progress($"Downloading Aether {release.Version}", 0.1 + f * 0.6)));
+            await fetcher.DownloadClientAsync(release, staged, downloading, ct);
+            log($"Downloaded and verified {Path.GetFileName(staged)}.");
+
+            progress?.Report(new Progress("Copying files", 0.7));
+            var extracting = new Progress<double>(f => progress?.Report(new Progress("Copying files", 0.7 + f * 0.15)));
+            await Payload.ExtractZipAsync(staged, o.InstallDir, extracting, log, ct);
+        }
+        finally
+        {
+            // Whatever happened, the staged copy has done its job. Leaving a hundred megabytes in the temp
+            // folder after a failed install is the kind of thing nobody finds until the disk is full.
+            try { if (File.Exists(staged)) File.Delete(staged); }
+            catch { /* temp files are the operating system's problem from here */ }
+        }
     }
 
     public static async Task UninstallAsync(string installDir, bool keepSettings, IProgress<Progress>? progress,
