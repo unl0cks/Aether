@@ -647,18 +647,18 @@ impl<'gc> TDisplayObject<'gc> for Avm2Button<'gc> {
         self,
         matrix: &Matrix,
         include_own_filters: bool,
+        view_matrix: &Matrix,
     ) -> Rectangle<Twips> {
         let mut bounds = *matrix * self.self_bounds(BoundsMode::Engine);
 
         if let Some(child) = self.get_state_child(self.0.state.get().into()) {
             let matrix = *matrix * child.base().matrix();
-            bounds = bounds.union(&child.render_bounds_with_transform(&matrix, true));
+            bounds = bounds.union(&child.render_bounds_with_transform(&matrix, true, view_matrix));
         }
 
         if include_own_filters {
-            let (scale_x, scale_y) = crate::display_object::matrix_scale(matrix);
             for mut filter in self.filters().iter().cloned() {
-                filter.scale(scale_x, scale_y);
+                filter.scale(view_matrix.a, view_matrix.d);
                 bounds = filter.calculate_dest_rect(bounds);
             }
         }

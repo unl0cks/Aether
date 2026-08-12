@@ -157,19 +157,6 @@ enum BitmapCacheTexturePolicy {
     BoundedReuse,
 }
 
-/// The scale a matrix applies, as the length of each of its basis vectors.
-///
-/// Filters are measured in the object's own pixels and have to be converted to the pixels they
-/// will actually be drawn at, which is everything between the object and the screen: its own
-/// scale, every parent's, and the stage's. Taking `a` and `d` alone would be right only while
-/// nothing is rotated, and AQW rotates weapons constantly.
-pub(crate) fn matrix_scale(matrix: &Matrix) -> (f32, f32) {
-    (
-        (matrix.a * matrix.a + matrix.b * matrix.b).sqrt(),
-        (matrix.c * matrix.c + matrix.d * matrix.d).sqrt(),
-    )
-}
-
 /// Grid that cache texture sizes are rounded up to.
 ///
 /// AQW avatars shift their bounds by a pixel or two every frame as they animate, so one object asks
@@ -1730,6 +1717,7 @@ pub fn render_base<'gc>(
             let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
                 &base_transform.matrix,
                 false, // we want to do the filter growth for this object ourselves, to know the offsets
+                &stage_matrix,
             );
             let bounds_offset = Point::new(
                 bounds.x_min - base_transform.matrix.tx,
@@ -1752,17 +1740,9 @@ pub fn render_base<'gc>(
                         y_min: Twips::ZERO,
                         y_max: Twips::from_pixels_i32(height as i32),
                     };
-                    // Scaled by the whole transform down to this object, not by the stage alone.
-                    //
-                    // A blur is authored in the object's own pixels, so a character drawn at a
-                    // third of its authored size wants a third of the blur. Scaling by the stage
-                    // alone left the glow at full size around a third-size character, and a blur is
-                    // cut off at the edge of the region reserved for it, so a glow far larger than
-                    // the thing it surrounds shows that edge as a rectangle. Which is how it looked,
-                    // and why it got worse the smaller the character was.
-                    let (filter_scale_x, filter_scale_y) = matrix_scale(&base_transform.matrix);
                     for filter in &mut filters {
-                        filter.scale(filter_scale_x, filter_scale_y);
+                        // Scaling is done by *stage view matrix* only, nothing in-between
+                        filter.scale(stage_matrix.a, stage_matrix.d);
                         filter_rect = filter.calculate_dest_rect(filter_rect);
                     }
                     let filter_rect = Rectangle {
@@ -2012,6 +1992,7 @@ pub fn render_base<'gc>(
             let bounds: Rectangle<Twips> = this.render_bounds_with_transform(
                 &context.transform_stack.transform().matrix,
                 true,
+                &context.stage.view_matrix(),
             );
             context
                 .commands
@@ -2054,9 +2035,11 @@ pub fn render_base<'gc>(
             // it is in the current render target's space — the same space the commands were recorded
             // in. `true` includes this object's own filters: a glow draws OUTSIDE the object, and a
             // target sized to the bare bounds would clip it.
+            let stage_matrix = context.stage.view_matrix();
             let blend_bounds = this.render_bounds_with_transform(
                 &context.transform_stack.transform().matrix,
                 true,
+                &stage_matrix,
             );
             #[cfg(feature = "aether_diagnostics")]
             if crate::aether_diagnostics::blend_attribution_enabled() {
@@ -2177,9 +2160,11 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
         // bounds everything that can appear -- measured here, before the stack unwinds, so it is in
         // the space the commands were recorded in. `true` includes this object's filters: a glow
         // draws outside the object, and a target sized to the bare bounds would clip it.
+        let stage_matrix = context.stage.view_matrix();
         let mask_bounds = this.render_bounds_with_transform(
             &context.transform_stack.transform().matrix,
             true,
+            &stage_matrix,
         );
         context
             .commands
@@ -2355,23 +2340,21 @@ pub trait TDisplayObject<'gc>:
         self,
         matrix: &Matrix,
         include_own_filters: bool,
+        view_matrix: &Matrix,
     ) -> Rectangle<Twips> {
         let mut bounds = *matrix * self.self_bounds(BoundsMode::Engine);
 
         if let Some(ctr) = self.as_container() {
             for child in ctr.iter_render_list() {
                 let matrix = *matrix * child.base().matrix();
-                bounds = bounds.union(&child.render_bounds_with_transform(&matrix, true));
+                bounds =
+                    bounds.union(&child.render_bounds_with_transform(&matrix, true, view_matrix));
             }
         }
 
         if include_own_filters {
-            // `matrix` runs the whole way down to this object, so the room reserved here is the
-            // size of the blur that will be drawn into it. Those two disagreed whenever anything
-            // between the stage and the object was scaled.
-            let (scale_x, scale_y) = matrix_scale(matrix);
             for mut filter in self.filters().iter().cloned() {
-                filter.scale(scale_x, scale_y);
+                filter.scale(view_matrix.a, view_matrix.d);
                 bounds = filter.calculate_dest_rect(bounds);
             }
         }
@@ -5032,74 +5015,5 @@ impl<'gc> DisplayObjectWeak<'gc> {
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
             DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
-    }
-}
-
-#[cfg(test)]
-mod filter_scale_tests {
-    use super::matrix_scale;
-    use ruffle_render::matrix::Matrix;
-    use swf::Twips;
-
-    fn scale(scale_x: f32, scale_y: f32) -> Matrix {
-        Matrix {
-            a: scale_x,
-            b: 0.0,
-            c: 0.0,
-            d: scale_y,
-            tx: Twips::ZERO,
-            ty: Twips::ZERO,
-        }
-    }
-
-    #[test]
-    fn an_unscaled_matrix_leaves_a_filter_alone() {
-        let (x, y) = matrix_scale(&Matrix::IDENTITY);
-        assert!((x - 1.0).abs() < 1e-6, "{x}");
-        assert!((y - 1.0).abs() < 1e-6, "{y}");
-    }
-
-    /// The case behind the glow. AQW draws the same character at three sizes across one map, and a
-    /// blur authored for the full-size version has to shrink with it.
-    #[test]
-    fn a_scaled_object_scales_its_filters_with_it() {
-        let (x, y) = matrix_scale(&scale(0.35, 0.35));
-        assert!((x - 0.35).abs() < 1e-6, "{x}");
-        assert!((y - 0.35).abs() < 1e-6, "{y}");
-
-        let (x, y) = matrix_scale(&scale(2.0, 3.0));
-        assert!((x - 2.0).abs() < 1e-6, "{x}");
-        assert!((y - 3.0).abs() < 1e-6, "{y}");
-    }
-
-    /// Reading `a` and `d` alone was right only while nothing was rotated. A quarter turn puts the
-    /// whole scale into `b` and `c` and leaves `a` and `d` at zero, which would have read as a
-    /// filter scaled to nothing.
-    #[test]
-    fn a_rotated_object_keeps_the_scale_its_basis_vectors_carry() {
-        let quarter_turn = Matrix {
-            a: 0.0,
-            b: 1.0,
-            c: -1.0,
-            d: 0.0,
-            tx: Twips::ZERO,
-            ty: Twips::ZERO,
-        };
-        let (x, y) = matrix_scale(&quarter_turn);
-        assert!((x - 1.0).abs() < 1e-6, "{x}");
-        assert!((y - 1.0).abs() < 1e-6, "{y}");
-
-        // Half a turn, at half size.
-        let rotated_and_scaled = Matrix {
-            a: 0.0,
-            b: 0.5,
-            c: -0.5,
-            d: 0.0,
-            tx: Twips::ZERO,
-            ty: Twips::ZERO,
-        };
-        let (x, y) = matrix_scale(&rotated_and_scaled);
-        assert!((x - 0.5).abs() < 1e-6, "{x}");
-        assert!((y - 0.5).abs() < 1e-6, "{y}");
     }
 }

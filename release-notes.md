@@ -36,28 +36,6 @@ The game also no longer stops while the window is being dragged. Taking hold of 
 
 Thanks to Laaiti for finding it, and for going back and breaking it again twice after the first fix. The client had been crashing without a pattern, and the pattern was the window.
 
-## Glows are the right size again
-
-A glow on a weapon was drawn far too large, with a visible rectangular edge where it was cut off. It got worse the smaller the character was, which is what gave it away: the same weapon in the same map looked fine on the largest character and worst on the smallest.
-
-A blur is authored in the object's own pixels, so a character drawn at a third of its authored size should get a third of the blur. Aether scaled filters by the stage only and ignored everything between, so the glow stayed at full size around a third-size character. A blur is also cut off at the edge of the region set aside for it, and a glow far larger than the thing it surrounds shows that edge as a rectangle, which is the box you could see around the sword.
-
-Filters now scale by the whole path down to the object they belong to, including its own size and every parent's, and including rotation, which reading the matrix the old way could not account for.
-
-Thanks to Laaiti for measuring it across the three room sizes in `whitemap`. Window size was the obvious suspect and it was the wrong one; the character's size was the answer.
-
-The old guess about the word "room" is gone. It existed to protect chat, and chat is no longer somewhere this runs.
-
-## Lag when a control deck launches it
-
-Reported by one of Laaiti's friends: slow when launched from a Fifine control deck, fine when the same `aether.exe` is double clicked. Same binary, same machine, same graphics card, so nothing about the rendering explains it.
-
-A process inherits two things from whatever started it, and a control deck is a background helper that has both. Priority class is handed straight down. Power throttling is the one that hurts: Windows 11 puts a process it considers background into a low power mode that parks it on efficiency cores and holds the clocks down, and a child of a background process inherits that. For something drawing frames it reads exactly like a slow computer.
-
-Aether now switches that throttling off for itself at startup and lifts its priority back to normal if it was handed something lower. It does not raise itself above normal in either case.
-
-If this was the cause, the deck and the desktop shortcut should now behave the same. If it is still slower from the deck, it is something else and worth saying so.
-
 ## Downloads
 
 `Aether-Setup-0.5.14-win-x64.exe` for the installer, `Aether-Portable-0.5.14-win-x64.zip` if you would rather not install anything.
