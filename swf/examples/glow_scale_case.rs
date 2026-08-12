@@ -41,6 +41,9 @@ fn main() {
     // A cached sprite under a trivial blend reaches the renderer as a blend wrapping exactly one
     // bitmap draw, which is the shape the blend bypass is about.
     let screen = rest.iter().any(|arg| arg == "screen");
+    // What AQW actually uses. VoidKnightStar.swf carries no filters at all: the glow on a weapon
+    // is blendMode 13, Overlay, which is a complex blend and takes the long way through a target.
+    let overlay = rest.iter().any(|arg| arg == "overlay");
 
     let square = Rectangle {
         x_min: Twips::ZERO,
@@ -57,7 +60,7 @@ fn main() {
         edge_bounds: square,
         flags: ShapeFlag::empty(),
         styles: ShapeStyles {
-            fill_styles: vec![FillStyle::Color(Color::WHITE)],
+            fill_styles: vec![FillStyle::Color(Color::from_rgba(0xff2090f0))],
             line_styles: vec![],
         },
         shape: vec![
@@ -140,7 +143,11 @@ fn main() {
         class_name: None,
         filters: (!nested).then(|| glow.clone()),
         background_color: None,
-        blend_mode: screen.then_some(BlendMode::Screen.into()),
+        blend_mode: if overlay {
+            Some(BlendMode::Overlay.into())
+        } else {
+            screen.then_some(BlendMode::Screen.into())
+        },
         clip_actions: None,
         has_image: false,
         is_bitmap_cached: nested.then_some(true),
@@ -161,7 +168,9 @@ fn main() {
         num_frames: FRAMES,
     };
 
-    let mut tags = vec![shape];
+    // A mid grey stage, so an Overlay blend has something to act on and anything it does to a
+    // pixel it should have left alone is visible.
+    let mut tags = vec![Tag::SetBackgroundColor(Color::from_rgba(0xff808080)), shape];
     if nested {
         tags.push(sprite);
     }
