@@ -132,6 +132,7 @@ pub struct AetherExplicitFlags {
     pub tooltips_follow_pointer: Explicit,
     pub hide_skill_tooltips: Explicit,
     pub always_show_aura_tooltips: Explicit,
+    pub nine_slice: Explicit,
     pub cache_texture_grid: Explicit,
     pub idle_gpu_upload_eviction: Explicit,
     pub crash_report: Explicit,
@@ -208,6 +209,7 @@ impl AetherExplicitFlags {
                 opt.aether_always_show_aura_tooltips,
                 opt.no_aether_always_show_aura_tooltips,
             ),
+            nine_slice: pair(opt.aether_nine_slice, opt.no_aether_nine_slice),
             cache_texture_grid: pair(
                 opt.aether_aqw_cache_texture_grid,
                 opt.no_aether_aqw_cache_texture_grid,
@@ -250,6 +252,7 @@ pub struct AetherSettings {
     pub tooltips_follow_pointer: bool,
     pub hide_skill_tooltips: bool,
     pub always_show_aura_tooltips: bool,
+    pub nine_slice: bool,
     pub cache_texture_grid: bool,
     pub idle_gpu_upload_eviction: bool,
     pub crash_report: bool,
@@ -285,6 +288,8 @@ impl Default for AetherSettings {
             // On: this is the tooltip that says what is on you, and turning it off is a
             // deliberate choice rather than a default.
             always_show_aura_tooltips: true,
+            // Off: it fixes stretched corners and has also moved content that was correct.
+            nine_slice: false,
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
@@ -346,6 +351,7 @@ pub struct ResolvedAetherSettings {
     pub tooltips_follow_pointer: ResolvedSetting,
     pub hide_skill_tooltips: ResolvedSetting,
     pub always_show_aura_tooltips: ResolvedSetting,
+    pub nine_slice: ResolvedSetting,
     pub cache_texture_grid: ResolvedSetting,
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
@@ -406,6 +412,7 @@ impl ResolvedAetherSettings {
                 explicit.always_show_aura_tooltips,
                 saved.always_show_aura_tooltips,
             ),
+            nine_slice: ResolvedSetting::resolve(explicit.nine_slice, saved.nine_slice),
             cache_texture_grid: ResolvedSetting::resolve(
                 explicit.cache_texture_grid,
                 saved.cache_texture_grid,
@@ -468,6 +475,7 @@ pub fn apply_live_settings(
     ruffle_core::aether_compatibility::set_aura_tooltips_always_shown(
         aqw_mode && settings.always_show_aura_tooltips.value,
     );
+    ruffle_core::aether_performance::set_nine_slice_scaling_enabled(settings.nine_slice.value);
 
     // Quality is a property of the running stage, so it can change without a restart. MSAA and the
     // frame rate are read while the renderer and the player are built, and cannot.

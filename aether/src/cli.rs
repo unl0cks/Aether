@@ -227,6 +227,14 @@ pub struct Opt {
     #[clap(long = "no-always-show-aura-tooltips", conflicts_with = "aether_always_show_aura_tooltips")]
     pub no_aether_always_show_aura_tooltips: bool,
 
+    /// Honour a panel's scaling grid, so its borders keep their size when it is resized.
+    #[clap(long = "nine-slice", conflicts_with = "no_aether_nine_slice")]
+    pub aether_nine_slice: bool,
+
+    /// Stretch a resized panel whole, corners included.
+    #[clap(long = "no-nine-slice", conflicts_with = "aether_nine_slice")]
+    pub no_aether_nine_slice: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(

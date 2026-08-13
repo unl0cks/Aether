@@ -1,19 +1,18 @@
-A pre-release. Nine-slice, held to the cases it is for.
+A pre-release. Panels draw as they did before, and the scaling-grid work is behind a switch.
 
-## Seams and shifted buttons
+## Scaling grids are opt-in now
 
-Two faults in the scaling-grid work from 0.6.5, both mine.
+Drawing a panel in nine pieces so its borders keep their size is right in principle, and measurably
+does what it is for: a 12 pixel border on a box drawn at three times its size stayed 12 pixels
+instead of becoming 36.
 
-A thin line could appear through a panel. A panel is drawn as nine pieces, and two pieces that meet
-exactly on a boundary can both miss the pixels that boundary falls inside, leaving a hairline where
-they join. Pieces that meet agree about what is at the join -- it is the same point of the same
-object -- so they now overlap there by half a pixel, and there is nothing left to fall through.
+It has also moved things that were correct before. Buttons and icons sat up and to the left, tooltip
+corners came out square, and a seam could run through a panel. Two attempts at confining it have
+each fixed one report and left another, and nothing in here can tell a panel that now draws right
+from one that now draws wrong without it being looked at.
 
-Buttons sat too far up and left. Slicing was being applied to objects that had no business being
-sliced. It now happens only to an object that has actually been resized, and only one sitting square
-to its own axes: a grid says nothing about an object drawn at the size it was authored, and the
-bands are worked out from two of the transform's four numbers, which stop describing the object's
-size the moment it is turned.
+So it is off by default, and everything draws as it did in 0.6.4. It is under Advanced, as **Keep
+panel borders unstretched**, for anyone who wants to compare the two.
 
 ## Buff tooltips are a switch of their own
 
@@ -184,9 +183,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.6-win-x64.exe` for the installer, `Aether-Portable-0.6.6-win-x64.zip` if you
+`Aether-Setup-0.6.7-win-x64.exe` for the installer, `Aether-Portable-0.6.7-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.6-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.7-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

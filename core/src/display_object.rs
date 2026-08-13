@@ -2104,6 +2104,22 @@ pub fn render_base<'gc>(
 ///
 /// It uses the stencil buffer so that any pixel drawn in the mask will allow the inner contents to show.
 /// This is what is used for most cases, except for cacheAsBitmap-on-cacheAsBitmap.
+/// Whether a scaling grid is honoured when drawing.
+///
+/// Off by default. Drawing a panel in nine pieces is right in principle and measurably fixes the
+/// stretched corners it exists for, but it has also moved content that used to sit correctly, and
+/// nothing here can tell the difference between the two without being looked at. Until it can be,
+/// the default is the behaviour everything was drawn with before.
+static NINE_SLICE_SCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn set_nine_slice_scaling_enabled(enabled: bool) {
+    NINE_SLICE_SCALING.store(enabled, std::sync::atomic::Ordering::Relaxed);
+}
+
+pub fn nine_slice_scaling_enabled() -> bool {
+    NINE_SLICE_SCALING.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// How far a cell's clip reaches past its neighbour's, in the object's own pixels.
 ///
 /// Only inwards, between cells. Reaching past the object's own outer edge would let a corner draw a
@@ -2184,7 +2200,8 @@ fn draw_possibly_sliced<'gc, F>(
     F: FnMut(&mut RenderContext<'_, 'gc>),
 {
     let grid = this.scaling_grid();
-    if grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
+    if nine_slice_scaling_enabled()
+        && grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
         let bounds = this.bounds(BoundsMode::Engine);
         let matrix = this.base().matrix();
         // Only an object that has actually been resized, and only along its own axes.
