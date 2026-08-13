@@ -159,7 +159,3 @@ mod tests {
     }
 }
 
-/// Whether a scaling grid is honoured when a panel is resized. See `display_object`.
-pub fn set_nine_slice_scaling_enabled(enabled: bool) {
-    crate::display_object::set_nine_slice_scaling_enabled(enabled);
-}

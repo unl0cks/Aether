@@ -1051,6 +1051,11 @@ impl<'gc> Class<'gc> {
         self.0.traits.get().expect("Traits not yet initialized!")
     }
 
+    /// The same, for a caller that runs before traits are guaranteed to be loaded.
+    pub fn traits_if_loaded(&self) -> Option<&[Trait<'gc>]> {
+        self.0.traits.get().map(|traits| &**traits)
+    }
+
     /// Get this class's instance allocator.
     ///
     /// If `None`, then you should use the instance allocator of the superclass

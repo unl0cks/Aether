@@ -2016,6 +2016,8 @@ pub fn render_base<'gc>(
                 )
             },
             &options,
+            // Replaying a finished image, which carries its own scaling and ignores the stack's.
+            false,
         );
     } else {
         if let Some(background) = this.opaque_background() {
@@ -2043,6 +2045,7 @@ pub fn render_base<'gc>(
                 context.filterless_direct_subtree_safe = previous_filterless_direct_subtree_safe;
             },
             &options,
+            true,
         );
     }
 
@@ -2100,30 +2103,15 @@ pub fn render_base<'gc>(
     }
 }
 
-/// This applies the **standard** method of `mask` and `scrollRect`.
-///
-/// It uses the stencil buffer so that any pixel drawn in the mask will allow the inner contents to show.
-/// This is what is used for most cases, except for cacheAsBitmap-on-cacheAsBitmap.
-/// Whether a scaling grid is honoured when drawing.
-///
-/// Off by default. Drawing a panel in nine pieces is right in principle and measurably fixes the
-/// stretched corners it exists for, but it has also moved content that used to sit correctly, and
-/// nothing here can tell the difference between the two without being looked at. Until it can be,
-/// the default is the behaviour everything was drawn with before.
-static NINE_SLICE_SCALING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-
-pub fn set_nine_slice_scaling_enabled(enabled: bool) {
-    NINE_SLICE_SCALING.store(enabled, std::sync::atomic::Ordering::Relaxed);
-}
-
-pub fn nine_slice_scaling_enabled() -> bool {
-    NINE_SLICE_SCALING.load(std::sync::atomic::Ordering::Relaxed)
-}
-
-/// How far a cell's clip reaches past its neighbour's, in the object's own pixels.
+/// How far a cell's clip reaches past its neighbour's, in **screen** pixels.
 ///
 /// Only inwards, between cells. Reaching past the object's own outer edge would let a corner draw a
 /// sliver of the middle beyond where the object ends.
+///
+/// Screen pixels rather than the object's own, because the object's own are worth however much it
+/// has been scaled by. Half a pixel of overlap on a tooltip stretched ten times over is five pixels
+/// of the middle band painted across the corner beside it, which is enough to swallow the rounded
+/// corner whole -- the taller the tooltip, the squarer its corners came out.
 const SLICE_BLEED: f64 = 0.5;
 
 /// One axis of a nine-slice: where each of the three bands starts and how much it is scaled by.
@@ -2192,16 +2180,23 @@ impl SliceAxis {
 /// Each of the nine cells is drawn as the whole object under a transform that maps that cell's
 /// source band onto its destination band, masked to the destination so the other eight stay out of
 /// it.
+///
+/// `sliceable` is false when `draw` replays a finished image rather than drawing the object. A
+/// cached object's picture already has its scaling baked in, so its draw ignores everything in the
+/// transform stack except the translation -- which turns each cell's transform into a bare offset
+/// applied to an unscaled bitmap, and draws the object nine times, each copy a little further up and
+/// to the left. That is what moved the drop-accept button, the buff icons and the text in the aura
+/// bar, and what squared off the corners of tall tooltips.
 fn draw_possibly_sliced<'gc, F>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
     draw: &mut F,
+    sliceable: bool,
 ) where
     F: FnMut(&mut RenderContext<'_, 'gc>),
 {
     let grid = this.scaling_grid();
-    if nine_slice_scaling_enabled()
-        && grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
+    if sliceable && grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
         let bounds = this.bounds(BoundsMode::Engine);
         let matrix = this.base().matrix();
         // Only an object that has actually been resized, and only along its own axes.
@@ -2232,6 +2227,26 @@ fn draw_possibly_sliced<'gc, F>(
                 f64::from(matrix.d),
             )
         {
+            // What one of the object's own pixels is worth on screen, so the overlap below can be
+            // asked for in pixels the viewer would recognise.
+            //
+            // The stage pushes its view matrix before rendering anything, so the window's own
+            // scaling is already in here. Multiplying by it again would square it, and the overlap
+            // would shrink to nothing on a large window -- which is where the seams were seen.
+            let to_screen = context.transform_stack.transform().matrix;
+            let screen_scale_x = f64::from(to_screen.a).abs();
+            let screen_scale_y = f64::from(to_screen.d).abs();
+            let bleed_x = if screen_scale_x > 0.0 {
+                SLICE_BLEED / screen_scale_x
+            } else {
+                0.0
+            };
+            let bleed_y = if screen_scale_y > 0.0 {
+                SLICE_BLEED / screen_scale_y
+            } else {
+                0.0
+            };
+
             for row in 0..3 {
                 let (source_y, dest_y, stretch_y, dest_y_end) = vertical.band(row);
                 for column in 0..3 {
@@ -2244,10 +2259,10 @@ fn draw_possibly_sliced<'gc, F>(
                     // thin seam down the middle of a panel. Cells that meet agree about what is at
                     // the join -- it is the same point of the same object -- so letting them
                     // overlap there costs nothing and closes the gap.
-                    let bleed_left = if column > 0 { SLICE_BLEED } else { 0.0 };
-                    let bleed_right = if column < 2 { SLICE_BLEED } else { 0.0 };
-                    let bleed_up = if row > 0 { SLICE_BLEED } else { 0.0 };
-                    let bleed_down = if row < 2 { SLICE_BLEED } else { 0.0 };
+                    let bleed_left = if column > 0 { bleed_x } else { 0.0 };
+                    let bleed_right = if column < 2 { bleed_x } else { 0.0 };
+                    let bleed_up = if row > 0 { bleed_y } else { 0.0 };
+                    let bleed_down = if row < 2 { bleed_y } else { 0.0 };
                     let clip = Matrix::create_box(
                         (dest_x_end - dest_x + bleed_left + bleed_right) as f32,
                         (dest_y_end - dest_y + bleed_up + bleed_down) as f32,
@@ -2287,11 +2302,19 @@ fn draw_possibly_sliced<'gc, F>(
     draw(context);
 }
 
+/// This applies the **standard** method of `mask` and `scrollRect`.
+///
+/// It uses the stencil buffer so that any pixel drawn in the mask will allow the inner contents to show.
+/// This is what is used for most cases, except for cacheAsBitmap-on-cacheAsBitmap.
+///
+/// `sliceable` says whether `draw` actually draws the object, and so whether a scaling grid can be
+/// honoured by drawing it in nine pieces. See `draw_possibly_sliced`.
 pub fn apply_standard_mask_and_scroll<'gc, F>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
     mut draw: F,
     options: &RenderOptions,
+    sliceable: bool,
 ) where
     // `FnMut` rather than `FnOnce` because a nine-sliced object is drawn once per cell.
     F: FnMut(&mut RenderContext<'_, 'gc>),
@@ -2357,7 +2380,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
     if let RenderMask::Alpha(m) = mask {
         let original_commands = std::mem::take(&mut context.commands);
 
-        draw_possibly_sliced(this, context, &mut draw);
+        draw_possibly_sliced(this, context, &mut draw, sliceable);
 
         let maskee_commands = std::mem::take(&mut context.commands);
 
@@ -2386,7 +2409,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
             .commands
             .render_alpha_mask(maskee_commands, mask_commands, Some(mask_bounds));
     } else {
-        draw_possibly_sliced(this, context, &mut draw);
+        draw_possibly_sliced(this, context, &mut draw, sliceable);
     }
 
     if let Some(rect_mat) = scroll_rect_matrix {
@@ -5257,6 +5280,36 @@ mod nine_slice_tests {
         assert!((trailing_stretch - 1.0 / 3.0).abs() < 1e-9);
         // Everything the borders gave up goes to the middle.
         assert!(middle_stretch > 1.0);
+    }
+
+    /// Why a cached object must not be sliced, in the arithmetic that broke it.
+    ///
+    /// A cell's transform carries a stretch and a translation. The cached draw path reads only the
+    /// translation off the transform stack and discards the stretch, because the image it replays
+    /// already has its scaling baked in. So the translation arrives on its own, applied to an
+    /// unscaled bitmap, and the object is drawn nine times at nine wrong offsets.
+    ///
+    /// The offset is `low * (1 - 1/scale)` for the leading band. It is zero only when the art
+    /// starts at the object's own origin, which is why a test box drawn from (0,0) showed nothing
+    /// wrong. Measured on a box centred on its origin instead, at 3x: the middle moved from 96,96
+    /// to 60,60 -- 36 pixels up and to the left -- and the border art disappeared entirely.
+    #[test]
+    fn a_cells_translation_alone_would_move_a_centred_object() {
+        // Art from -50 to 50 rather than 0 to 100: the same box, centred on its origin.
+        let axis = SliceAxis::plan(-50.0, -38.0, 38.0, 50.0, 3.0).expect("a sane grid should plan");
+
+        let (source_start, dest_start, stretch, _) = axis.band(0);
+        let translation = dest_start - source_start * stretch;
+
+        // With the stretch applied the band lands where it should.
+        assert!((source_start * stretch + translation - dest_start).abs() < 1e-9);
+
+        // Without it -- which is what a cached draw does -- the same translation is a bare shift,
+        // and it is neither zero nor harmless.
+        assert!(
+            translation < -30.0,
+            "a centred object's leading cell shifts it {translation} px, not nothing"
+        );
     }
 
     #[test]

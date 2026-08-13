@@ -50,7 +50,21 @@ fn main() {
         .and_then(|arg| arg.parse().ok())
         .expect("usage: nine_slice_case <scale> <out.swf> [nogrid]");
     let out = args.next().expect("usage: nine_slice_case <scale> <out.swf>");
-    let no_grid = args.any(|arg| arg == "nogrid");
+    let rest: Vec<String> = args.collect();
+    let no_grid = rest.iter().any(|arg| arg == "nogrid");
+    // `cached` is the case that mattered: a cached object's draw replays a finished image and reads
+    // only the translation off the transform stack, so slicing one moves it instead of slicing it.
+    let cached = rest.iter().any(|arg| arg == "cached");
+    // How far the art sits above and left of the sprite's own origin.
+    //
+    // A cell's transform translates by `low * (1 - 1/scale)`, where `low` is the near edge of the
+    // object's bounds. Art drawn from the origin outwards makes that zero and hides every fault in
+    // the translation; a panel centred on its origin -- which is how AQW builds them -- does not.
+    let origin = rest
+        .iter()
+        .find_map(|arg| arg.strip_prefix("offset:"))
+        .and_then(|value| value.parse::<f64>().ok())
+        .unwrap_or(0.0);
 
     let bounds = Rectangle {
         x_min: Twips::ZERO,
@@ -104,7 +118,10 @@ fn main() {
                 version: 2,
                 action: PlaceObjectAction::Place(CharacterId::from(1u16)),
                 depth: 1,
-                matrix: Some(Matrix::IDENTITY),
+                matrix: Some(Matrix::translate(
+                    Twips::from_pixels(-origin),
+                    Twips::from_pixels(-origin),
+                )),
                 color_transform: None,
                 ratio: None,
                 name: None,
@@ -124,8 +141,8 @@ fn main() {
                 action: PlaceObjectAction::Place(CharacterId::from(3u16)),
                 depth: 2,
                 matrix: Some(Matrix::translate(
-                    Twips::from_pixels(BORDER),
-                    Twips::from_pixels(BORDER),
+                    Twips::from_pixels(BORDER - origin),
+                    Twips::from_pixels(BORDER - origin),
                 )),
                 color_transform: None,
                 ratio: None,
@@ -146,8 +163,8 @@ fn main() {
     });
 
     let mut matrix = Matrix::scale(Fixed16::from_f32(scale), Fixed16::from_f32(scale));
-    matrix.tx = Twips::from_pixels(60.0);
-    matrix.ty = Twips::from_pixels(60.0);
+    matrix.tx = Twips::from_pixels(60.0 + origin * f64::from(scale));
+    matrix.ty = Twips::from_pixels(60.0 + origin * f64::from(scale));
 
     let mut tags = vec![
         Tag::SetBackgroundColor(Color::from_rgba(0xff808080)),
@@ -159,15 +176,17 @@ fn main() {
         tags.push(Tag::DefineScalingGrid {
             id: CharacterId::from(2u16),
             splitter_rect: Rectangle {
-                x_min: Twips::from_pixels(BORDER),
-                x_max: Twips::from_pixels(BOX - BORDER),
-                y_min: Twips::from_pixels(BORDER),
-                y_max: Twips::from_pixels(BOX - BORDER),
+                x_min: Twips::from_pixels(BORDER - origin),
+                x_max: Twips::from_pixels(BOX - BORDER - origin),
+                y_min: Twips::from_pixels(BORDER - origin),
+                y_max: Twips::from_pixels(BOX - BORDER - origin),
             },
         });
     }
     tags.push(Tag::PlaceObject(Box::new(PlaceObject {
-        version: 2,
+        // `cacheAsBitmap` is a PlaceObject3 field. At version 2 the writer drops it without
+        // complaint, and the case renders as though it had never been asked for.
+        version: if cached { 3 } else { 2 },
         action: PlaceObjectAction::Place(CharacterId::from(2u16)),
         depth: 1,
         matrix: Some(matrix),
@@ -181,7 +200,7 @@ fn main() {
         blend_mode: None,
         clip_actions: None,
         has_image: false,
-        is_bitmap_cached: None,
+        is_bitmap_cached: cached.then_some(true),
         is_visible: None,
         amf_data: None,
     })));
@@ -203,7 +222,8 @@ fn main() {
     let file = File::create(&out).expect("could not create the output movie");
     swf::write_swf(&header, &tags, file).expect("could not write the output movie");
     println!(
-        "{out}: {BORDER}px border on a {BOX}px box at {scale}x, grid {}",
-        if no_grid { "off" } else { "on" }
+        "{out}: {BORDER}px border on a {BOX}px box at {scale}x, grid {}, cacheAsBitmap {}, origin offset {origin}",
+        if no_grid { "off" } else { "on" },
+        if cached { "on" } else { "off" }
     );
 }

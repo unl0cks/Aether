@@ -331,7 +331,7 @@ impl AetherOptionsDialog {
     ///
     /// Built as data so the ordering is one readable list rather than a run of near-identical
     /// blocks, and so a setting cannot end up drawn twice or not at all.
-    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 6] {
+    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 5] {
         let settings = &mut self.settings;
         let resolved = &self.resolved;
 
@@ -390,15 +390,6 @@ impl AetherOptionsDialog {
                         "Keeps a much smaller budget of textures for reuse. Costs frames on a card with memory to spare, and gains them on one without, because a card that cannot hold the full budget spills into system memory instead. Try it if you see coloured noise or streaks.",
                     ),
                 ],
-            ),
-            (
-                "Interface",
-                vec![(
-                    &mut settings.nine_slice,
-                    resolved.nine_slice,
-                    "Keep panel borders unstretched",
-                    "A panel says which parts of it may stretch when it is resized, so its corners and borders keep the size they were drawn at. Experimental: it fixes corners that stretch into ellipses, and has also been seen to shift the contents of some panels.",
-                )],
             ),
             (
                 "Performance",

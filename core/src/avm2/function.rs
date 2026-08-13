@@ -225,6 +225,38 @@ fn classify_aether_movement_method_for_parts(
     })
 }
 
+/// The name a build that publishes none still carries: the trait the method is installed as.
+///
+/// A shipped AQW build strips every ABC method name. Measured on `Game3098r24.swf`, the build
+/// `Loader3.swf` loads today: all 5,605 of its methods have an empty name, so the name this
+/// classifier used to read was always `""` and never matched anything. The staging build,
+/// `spider.swf`, keeps its names -- which is why every check against that file passed, and why the
+/// stop guard has nonetheless never once fired for a player.
+///
+/// Traits are a separate table and always carry a name; that is where a decompiler reads `walkTo`
+/// from. Matching a method by identity against its class's traits recovers the name whatever the
+/// compiler chose to leave out.
+#[cfg(feature = "aether_diagnostics")]
+fn classify_aether_movement_method_by_trait(method: Method<'_>) -> Option<AetherMovementMethod> {
+    let class = method.bound_class()?;
+    if class.name().local_name().as_wstr() != b"AvatarMC" {
+        return None;
+    }
+
+    // The pointer comparison is what makes this cheap enough to run per call: every trait that is
+    // not this method fails on it, and only the one that matches is named at all.
+    class.traits_if_loaded()?.iter().find_map(|class_trait| {
+        match class_trait.kind() {
+            TraitKind::Method {
+                method: trait_method,
+                ..
+            } if *trait_method == method => {}
+            _ => return None,
+        }
+        classify_bare_aether_movement_method(&class_trait.name().local_name().to_utf8_lossy())
+    })
+}
+
 #[cfg(feature = "aether_diagnostics")]
 fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovementMethod> {
     let method_name = method.method_name();
@@ -237,8 +269,8 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
     } else {
         None
     };
-    let movement_method =
-        classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)?;
+    let movement_method = classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)
+        .or_else(|| classify_aether_movement_method_by_trait(method))?;
     let owner_movie = method.owner_movie();
     let owner_url = owner_movie.url();
     if crate::aether_movie::is_aqw_game_movie(owner_url) {
@@ -818,6 +850,46 @@ pub fn display_function<'gc>(output: &mut WString, method: Method<'gc>) {
 #[cfg(all(test, feature = "aether_diagnostics"))]
 mod aether_movement_tests {
     use super::*;
+
+    /// What a shipped build actually offers, which is nothing.
+    ///
+    /// Measured with `cargo run -p swf --example abc_method_names`: `Game3098r24.swf`, the build
+    /// `Loader3.swf` loads, publishes no ABC method name for any of its 5,605 methods, so every
+    /// name this classifier used to be given was the empty string. `spider.swf` keeps all of its,
+    /// which is why checking against that file said everything was fine while the guard had in fact
+    /// never once fired for a player. The name has to come from the trait instead.
+    #[test]
+    fn a_stripped_build_offers_no_abc_name_to_match_on() {
+        assert_eq!(classify_aether_movement_method(""), None);
+        assert_eq!(classify_bare_aether_movement_method(""), None);
+        assert_eq!(classify_aether_movement_method_for_parts("", None), None);
+        assert_eq!(
+            classify_aether_movement_method_for_parts("", Some(("AvatarMC", true))),
+            None
+        );
+    }
+
+    /// The trait names the fallback reads, exactly as they appear on `AvatarMC`.
+    ///
+    /// `onEnterFrameWalk` is declared private, so its trait sits in a private namespace. Only the
+    /// local half is matched, which is what makes that work.
+    #[test]
+    fn the_trait_names_are_what_the_fallback_matches() {
+        for (name, expected) in [
+            ("walkTo", AetherMovementMethod::WalkTo),
+            ("stopWalking", AetherMovementMethod::StopWalking),
+            ("onEnterFrameWalk", AetherMovementMethod::EnterFrameWalk),
+            ("simulateTo", AetherMovementMethod::SimulateTo),
+        ] {
+            assert_eq!(
+                classify_bare_aether_movement_method(name),
+                Some(expected),
+                "the trait `{name}` should classify"
+            );
+        }
+        assert_eq!(classify_bare_aether_movement_method("walkToward"), None);
+        assert_eq!(classify_bare_aether_movement_method("stopWalkingNow"), None);
+    }
 
     #[test]
     fn movement_hook_classifies_only_exact_avatar_methods() {
