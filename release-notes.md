@@ -1,25 +1,27 @@
-Tooltips you can put where you want them, and options sorted into what they are for.
+A pre-release. Panels keep their borders, and the traces work.
 
-## Skill tooltips: above the pointer, or not at all
+## Rounded corners stopped becoming ellipses
 
-Two switches, both off unless you turn them on, under the new Gameplay tab.
+A scaling grid is how a panel says which parts of it may stretch. The corners and borders keep the
+size they were drawn at, and only the middle grows. It is what stops a rounded corner turning into
+an ellipse when a box is made bigger.
 
-**Show tooltips above the pointer.** AQW pins a skill's tooltip to the bottom-right corner of the
-stage, which puts it over the bag icon, nowhere near the skill it describes, and on top of where
-people click to move -- players have been stuck in place because a tooltip was in the way.
-`ToolTipMC` already knows how to sit above a point; its cursor-following tooltips do exactly that.
-This puts every tooltip there, using AQW's own offset so they match.
+Aether read the grid out of the file and answered it to the game's own code, but never used it when
+drawing, so a panel resized by setting its width -- which is how AQW sizes every tooltip, window and
+message box -- had its corners stretched along with its middle. The bigger the panel, the rounder
+the corners. That is why a short tooltip looked right and a long one bulged.
 
-**Hide skill tooltips.** Stops a skill's tooltip appearing at all, which is the one that covers the
-screen mid-fight. Tooltips for buffs and auras still appear, so you can still read what is on you.
-The two are told apart by where AQW put them: a skill's is pinned to the corner, a buff's follows
-the cursor, and that is decided on the frame it opens before anything here has moved it.
+Measured on a bordered box with a 12 pixel border, drawn at three times its size:
 
-The account-safety warning is left alone by both. It is the one tooltip not attached to anything
-hovered -- chat opens it, it closes itself after ten seconds, and it is meant to be read where it
-was put.
+| | box | border |
+|---|---|---|
+| drawn at 1x | 100 x 100 | 12 px |
+| 3x, as before | 300 x 300 | 36 px |
+| 3x, now | 300 x 300 | **12 px** |
 
-Raised by PacketLoss and HardLuck.
+This is the first build with it, and it touches every panel in the game rather than only the ones
+that looked wrong, which is why this is a pre-release. If something that used to draw correctly now
+does not, that is this.
 
 ## The traces work in a normal build
 
@@ -158,9 +160,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.4-win-x64.exe` for the installer, `Aether-Portable-0.6.4-win-x64.zip` if you
+`Aether-Setup-0.6.5-win-x64.exe` for the installer, `Aether-Portable-0.6.5-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.4-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.5-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

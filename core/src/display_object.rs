@@ -1997,7 +1997,7 @@ pub fn render_base<'gc>(
             context,
             |context| {
                 context.commands.render_bitmap(
-                    cache_info.handle,
+                    cache_info.handle.clone(),
                     Transform {
                         matrix: Matrix {
                             tx: context.transform_stack.transform().matrix.tx + offset_x,
@@ -2104,13 +2104,152 @@ pub fn render_base<'gc>(
 ///
 /// It uses the stencil buffer so that any pixel drawn in the mask will allow the inner contents to show.
 /// This is what is used for most cases, except for cacheAsBitmap-on-cacheAsBitmap.
+/// One axis of a nine-slice: where each of the three bands starts and how much it is scaled by.
+///
+/// The outer two bands keep the size they were authored at, whatever the object is scaled to, and
+/// the middle one takes up whatever is left. That is the whole point of the grid: a border stays a
+/// border instead of being stretched into an ellipse along with everything else.
+#[derive(Clone, Copy)]
+struct SliceAxis {
+    /// Source edges, in the object's own space.
+    source: [f64; 4],
+    /// Where those edges land once the object is scaled, again in the object's own space.
+    dest: [f64; 4],
+}
+
+impl SliceAxis {
+    /// Returns `None` when slicing would not be an improvement, and the object should be drawn the
+    /// ordinary way: no room left for the middle band, a grid that is not inside the bounds, or a
+    /// scale so small that the borders alone would overflow.
+    fn plan(low: f64, grid_low: f64, grid_high: f64, high: f64, scale: f64) -> Option<Self> {
+        if !(low < grid_low && grid_low < grid_high && grid_high < high) || !scale.is_finite() {
+            return None;
+        }
+        let scale = scale.abs();
+        if scale < 0.001 {
+            return None;
+        }
+
+        let leading = grid_low - low;
+        let trailing = high - grid_high;
+        // The borders are drawn unscaled, so in the object's own space they have to shrink by
+        // exactly as much as the object is being grown.
+        let (leading_dest, trailing_dest) = (leading / scale, trailing / scale);
+        let middle_dest = (high - low) - leading_dest - trailing_dest;
+        if middle_dest <= 0.0 {
+            return None;
+        }
+
+        Some(Self {
+            source: [low, grid_low, grid_high, high],
+            dest: [
+                low,
+                low + leading_dest,
+                low + leading_dest + middle_dest,
+                high,
+            ],
+        })
+    }
+
+    /// How much band `index` is stretched by, and where it starts.
+    fn band(&self, index: usize) -> (f64, f64, f64, f64) {
+        let (source_start, source_end) = (self.source[index], self.source[index + 1]);
+        let (dest_start, dest_end) = (self.dest[index], self.dest[index + 1]);
+        let stretch = (dest_end - dest_start) / (source_end - source_start);
+        (source_start, dest_start, stretch, dest_end)
+    }
+}
+
+/// Draw an object, in nine pieces if it has a scaling grid and is being scaled.
+///
+/// `scale9Grid` was read from the file and answered to ActionScript but never reached the renderer,
+/// so an object resized by setting its width -- which is how AQW sizes every panel, tooltip and
+/// message box -- had its corners stretched along with its middle. The bigger the panel the rounder
+/// the corners got.
+///
+/// Each of the nine cells is drawn as the whole object under a transform that maps that cell's
+/// source band onto its destination band, masked to the destination so the other eight stay out of
+/// it.
+fn draw_possibly_sliced<'gc, F>(
+    this: DisplayObject<'gc>,
+    context: &mut RenderContext<'_, 'gc>,
+    draw: &mut F,
+) where
+    F: FnMut(&mut RenderContext<'_, 'gc>),
+{
+    let grid = this.scaling_grid();
+    if grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
+        let bounds = this.bounds(BoundsMode::Engine);
+        let matrix = this.base().matrix();
+        if bounds.is_valid()
+            && let Some(horizontal) = SliceAxis::plan(
+                bounds.x_min.to_pixels(),
+                grid.x_min.to_pixels(),
+                grid.x_max.to_pixels(),
+                bounds.x_max.to_pixels(),
+                f64::from(matrix.a),
+            )
+            && let Some(vertical) = SliceAxis::plan(
+                bounds.y_min.to_pixels(),
+                grid.y_min.to_pixels(),
+                grid.y_max.to_pixels(),
+                bounds.y_max.to_pixels(),
+                f64::from(matrix.d),
+            )
+        {
+            for row in 0..3 {
+                let (source_y, dest_y, stretch_y, dest_y_end) = vertical.band(row);
+                for column in 0..3 {
+                    let (source_x, dest_x, stretch_x, dest_x_end) = horizontal.band(column);
+
+                    // The cell's own destination, used both to place it and to clip it.
+                    let clip = Matrix::create_box(
+                        (dest_x_end - dest_x) as f32,
+                        (dest_y_end - dest_y) as f32,
+                        Twips::from_pixels(dest_x),
+                        Twips::from_pixels(dest_y),
+                    );
+                    let clip = context.transform_stack.transform().matrix * clip;
+
+                    context.commands.push_mask();
+                    context.commands.draw_rect(Color::WHITE, clip);
+                    context.commands.activate_mask();
+
+                    context.transform_stack.push(&Transform {
+                        matrix: Matrix {
+                            a: stretch_x as f32,
+                            b: 0.0,
+                            c: 0.0,
+                            d: stretch_y as f32,
+                            tx: Twips::from_pixels(dest_x - source_x * stretch_x),
+                            ty: Twips::from_pixels(dest_y - source_y * stretch_y),
+                        },
+                        color_transform: Default::default(),
+                        perspective_projection: None,
+                    });
+                    draw(context);
+                    context.transform_stack.pop();
+
+                    context.commands.deactivate_mask();
+                    context.commands.draw_rect(Color::WHITE, clip);
+                    context.commands.pop_mask();
+                }
+            }
+            return;
+        }
+    }
+
+    draw(context);
+}
+
 pub fn apply_standard_mask_and_scroll<'gc, F>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
-    draw: F,
+    mut draw: F,
     options: &RenderOptions,
 ) where
-    F: FnOnce(&mut RenderContext<'_, 'gc>),
+    // `FnMut` rather than `FnOnce` because a nine-sliced object is drawn once per cell.
+    F: FnMut(&mut RenderContext<'_, 'gc>),
 {
     let scroll_rect_matrix = if let Some(rect) = this.scroll_rect() {
         let cur_transform = context.transform_stack.transform();
@@ -2173,7 +2312,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
     if let RenderMask::Alpha(m) = mask {
         let original_commands = std::mem::take(&mut context.commands);
 
-        draw(context);
+        draw_possibly_sliced(this, context, &mut draw);
 
         let maskee_commands = std::mem::take(&mut context.commands);
 
@@ -2202,7 +2341,7 @@ pub fn apply_standard_mask_and_scroll<'gc, F>(
             .commands
             .render_alpha_mask(maskee_commands, mask_commands, Some(mask_bounds));
     } else {
-        draw(context);
+        draw_possibly_sliced(this, context, &mut draw);
     }
 
     if let Some(rect_mat) = scroll_rect_matrix {
@@ -5049,5 +5188,70 @@ impl<'gc> DisplayObjectWeak<'gc> {
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
             DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod nine_slice_tests {
+    use super::SliceAxis;
+
+    /// The point of the grid: a border keeps the size it was drawn at, however far the object is
+    /// stretched. Only the middle band takes up the difference.
+    #[test]
+    fn borders_keep_their_size_when_the_object_is_scaled() {
+        // A 100 wide object with 10-wide borders, drawn at three times its size.
+        let axis = SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 3.0).expect("a sane grid should plan");
+
+        let (_, _, leading_stretch, _) = axis.band(0);
+        let (_, _, middle_stretch, _) = axis.band(1);
+        let (_, _, trailing_stretch, _) = axis.band(2);
+
+        // Each border is squeezed to a third in the object's own space, so that the object's own
+        // 3x scale puts it back at exactly the size it was authored.
+        assert!((leading_stretch - 1.0 / 3.0).abs() < 1e-9);
+        assert!((trailing_stretch - 1.0 / 3.0).abs() < 1e-9);
+        // Everything the borders gave up goes to the middle.
+        assert!(middle_stretch > 1.0);
+    }
+
+    #[test]
+    fn the_bands_tile_the_whole_object_without_gaps() {
+        let axis = SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 3.0).unwrap();
+        let (_, first_start, _, first_end) = axis.band(0);
+        let (_, second_start, _, second_end) = axis.band(1);
+        let (_, third_start, _, third_end) = axis.band(2);
+
+        assert!((first_start - 0.0).abs() < 1e-9);
+        assert!((first_end - second_start).abs() < 1e-9);
+        assert!((second_end - third_start).abs() < 1e-9);
+        assert!((third_end - 100.0).abs() < 1e-9);
+    }
+
+    /// An unscaled object is already right, and slicing it would be nine draws for nothing -- but
+    /// it still has to come out identical rather than subtly shifted.
+    #[test]
+    fn an_unscaled_object_is_left_alone() {
+        let axis = SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 1.0).unwrap();
+        for band in 0..3 {
+            let (source_start, dest_start, stretch, _) = axis.band(band);
+            assert!((stretch - 1.0).abs() < 1e-9);
+            assert!((source_start - dest_start).abs() < 1e-9);
+        }
+    }
+
+    /// Squeezed so far that the borders alone would not fit, there is nothing sensible to do and
+    /// the object is better drawn the ordinary way than folded inside out.
+    #[test]
+    fn a_grid_with_no_room_left_declines() {
+        assert!(SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 0.05).is_none());
+    }
+
+    #[test]
+    fn a_grid_outside_the_bounds_declines() {
+        assert!(SliceAxis::plan(0.0, -5.0, 90.0, 100.0, 2.0).is_none());
+        assert!(SliceAxis::plan(0.0, 10.0, 120.0, 100.0, 2.0).is_none());
+        // Inverted, and a zero scale.
+        assert!(SliceAxis::plan(0.0, 90.0, 10.0, 100.0, 2.0).is_none());
+        assert!(SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 0.0).is_none());
     }
 }
