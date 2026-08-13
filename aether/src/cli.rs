@@ -219,6 +219,14 @@ pub struct Opt {
     #[clap(long = "no-hide-skill-tooltips", conflicts_with = "aether_hide_skill_tooltips")]
     pub no_aether_hide_skill_tooltips: bool,
 
+    /// Always show the tooltip a buff or aura shows, wherever the pointer is.
+    #[clap(long = "always-show-aura-tooltips", conflicts_with = "no_aether_always_show_aura_tooltips")]
+    pub aether_always_show_aura_tooltips: bool,
+
+    /// Leave buff and aura tooltips to AQW.
+    #[clap(long = "no-always-show-aura-tooltips", conflicts_with = "aether_always_show_aura_tooltips")]
+    pub no_aether_always_show_aura_tooltips: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(

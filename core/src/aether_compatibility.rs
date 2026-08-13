@@ -2411,6 +2411,10 @@ static SKILL_TOOLTIPS_HIDDEN: AtomicBool = AtomicBool::new(false);
 static TOOLTIP_WAS_SHOWING: AtomicBool = AtomicBool::new(false);
 static TOOLTIP_IS_A_SKILL: AtomicBool = AtomicBool::new(false);
 
+/// Set while a tooltip is hidden by us rather than by AQW, so it can be put back afterwards.
+static TOOLTIP_HIDDEN_BY_US: AtomicBool = AtomicBool::new(false);
+static AURA_TOOLTIPS_ALWAYS_SHOWN: AtomicBool = AtomicBool::new(false);
+
 pub fn set_tooltip_follows_pointer_enabled(enabled: bool) {
     TOOLTIP_FOLLOWS_POINTER.store(enabled, Ordering::Relaxed);
 }
@@ -2425,6 +2429,14 @@ pub fn set_skill_tooltips_hidden(hidden: bool) {
 
 pub fn skill_tooltips_hidden() -> bool {
     SKILL_TOOLTIPS_HIDDEN.load(Ordering::Relaxed)
+}
+
+pub fn set_aura_tooltips_always_shown(shown: bool) {
+    AURA_TOOLTIPS_ALWAYS_SHOWN.store(shown, Ordering::Relaxed);
+}
+
+pub fn aura_tooltips_always_shown() -> bool {
+    AURA_TOOLTIPS_ALWAYS_SHOWN.load(Ordering::Relaxed)
 }
 
 /// Whether a tooltip was placed by AQW's "pin it to the bottom right" branch.
@@ -2481,14 +2493,17 @@ fn open_aqw_tooltip<'gc>(context: &mut UpdateContext<'gc>) -> Option<DisplayObje
             continue;
         };
 
-        // `openWith` only starts a timer; `open` is what makes the contents visible, so this is how
-        // to tell a tooltip that is showing from one that is merely constructed.
-        let showing = tooltip.visible()
-            && tooltip
-                .as_container()
-                .and_then(|tooltip| tooltip.child_by_name(WStr::from_units(b"cnt"), false))
-                .is_some_and(|content| content.visible());
-        if showing {
+        // `openWith` only starts a timer; `open` is what makes the contents visible, so `cnt` is
+        // how to tell a tooltip that is showing from one that is merely constructed.
+        //
+        // Deliberately not `tooltip.visible()`: hiding one is done by clearing exactly that, and
+        // reading it back here would mean a tooltip could never be found again once hidden, and so
+        // could never be restored.
+        let open = tooltip
+            .as_container()
+            .and_then(|tooltip| tooltip.child_by_name(WStr::from_units(b"cnt"), false))
+            .is_some_and(|content| content.visible());
+        if open {
             return Some(tooltip);
         }
     }
@@ -2504,12 +2519,21 @@ fn open_aqw_tooltip<'gc>(context: &mut UpdateContext<'gc>) -> Option<DisplayObje
 /// using AQW's own offset so they match.
 pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
     let hide_skills = skill_tooltips_hidden();
-    if !tooltip_follows_pointer_enabled() && !hide_skills {
+    let follow_pointer = tooltip_follows_pointer_enabled();
+    let keep_auras = aura_tooltips_always_shown();
+    // Something we hid has to be put back even after every switch is turned off again, so the flag
+    // is part of what decides whether there is work to do.
+    let ours_to_undo = TOOLTIP_HIDDEN_BY_US.load(Ordering::Relaxed);
+    if !hide_skills && !follow_pointer && !keep_auras && !ours_to_undo {
         TOOLTIP_WAS_SHOWING.store(false, Ordering::Relaxed);
         return;
     }
+
     let Some(tooltip) = open_aqw_tooltip(context) else {
         TOOLTIP_WAS_SHOWING.store(false, Ordering::Relaxed);
+        if ours_to_undo {
+            TOOLTIP_HIDDEN_BY_US.store(false, Ordering::Relaxed);
+        }
         return;
     };
     if is_the_account_safety_warning(tooltip) {
@@ -2535,14 +2559,23 @@ pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
     let is_a_skill = TOOLTIP_IS_A_SKILL.load(Ordering::Relaxed);
 
     if hide_skills && is_a_skill {
-        // Hidden rather than closed: AQW owns when it opens and closes, and taking that over would
-        // leave a tooltip that never comes back once the setting is turned off again.
+        // Hidden rather than closed: AQW owns when a tooltip opens and closes, and taking that over
+        // would leave one that never comes back.
         tooltip.set_visible(context, false);
+        TOOLTIP_HIDDEN_BY_US.store(true, Ordering::Relaxed);
         return;
+    }
+
+    if ours_to_undo {
+        TOOLTIP_HIDDEN_BY_US.store(false, Ordering::Relaxed);
     }
     tooltip.set_visible(context, true);
 
-    if !tooltip_follows_pointer_enabled() {
+    // A buff's tooltip is the one that says what is on you, and it is worth being able to read that
+    // while a skill's is suppressed. It follows the cursor, so it is put on screen here whether or
+    // not tooltips in general are being moved.
+    let is_an_aura = !is_a_skill;
+    if !follow_pointer && !(keep_auras && is_an_aura) {
         return;
     }
 
@@ -2580,5 +2613,33 @@ mod tooltip_tests {
         assert!(tooltip_follows_pointer_enabled());
         set_tooltip_follows_pointer_enabled(false);
         assert!(!tooltip_follows_pointer_enabled());
+    }
+
+    /// A skill's tooltip is the one AQW pins to the corner; a buff's follows the cursor. Telling
+    /// them apart is the whole reason one can be hidden while the other is kept.
+    #[test]
+    fn a_corner_pinned_tooltip_is_a_skills() {
+        // 960 - 200 - 4, 480 - 100 - 4
+        assert!(was_pinned_to_the_corner(756.0, 376.0, 200.0, 100.0));
+        // A pixel of rounding either way is still the corner.
+        assert!(was_pinned_to_the_corner(755.4, 376.6, 200.0, 100.0));
+    }
+
+    #[test]
+    fn a_tooltip_near_the_pointer_is_not_a_skills() {
+        assert!(!was_pinned_to_the_corner(120.0, 88.0, 200.0, 100.0));
+        // Same height, wrong side of the stage.
+        assert!(!was_pinned_to_the_corner(20.0, 376.0, 200.0, 100.0));
+    }
+
+    /// Turning the switch off has to bring back anything it hid. Nothing restores a tooltip except
+    /// this flag, because AQW never touches `visible` itself.
+    #[test]
+    fn hiding_is_remembered_so_it_can_be_undone() {
+        assert!(!TOOLTIP_HIDDEN_BY_US.load(Ordering::Relaxed));
+        TOOLTIP_HIDDEN_BY_US.store(true, Ordering::Relaxed);
+        assert!(TOOLTIP_HIDDEN_BY_US.load(Ordering::Relaxed));
+        TOOLTIP_HIDDEN_BY_US.store(false, Ordering::Relaxed);
+        assert!(!TOOLTIP_HIDDEN_BY_US.load(Ordering::Relaxed));
     }
 }

@@ -207,6 +207,13 @@ impl AetherOptionsDialog {
             "Hide skill tooltips",
             "Stops a skill's tooltip appearing at all, which is what covers the screen and gets clicked through during a fight. Tooltips for buffs and auras still appear, so you can still read what is on you.",
         );
+        toggle(
+            ui,
+            &mut self.settings.always_show_aura_tooltips,
+            self.resolved.always_show_aura_tooltips,
+            "Always show buff and aura tooltips",
+            "Keeps the tooltip that names a buff or aura on screen and next to the pointer, whatever else is set. AQW has its own switch for these under Class Actives/Auras UI; if that one is off, nothing here can bring them back.",
+        );
     }
 
     fn show_visuals_tab(&mut self, ui: &mut Ui) {

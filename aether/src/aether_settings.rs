@@ -131,6 +131,7 @@ pub struct AetherExplicitFlags {
     pub low_vram: Explicit,
     pub tooltips_follow_pointer: Explicit,
     pub hide_skill_tooltips: Explicit,
+    pub always_show_aura_tooltips: Explicit,
     pub cache_texture_grid: Explicit,
     pub idle_gpu_upload_eviction: Explicit,
     pub crash_report: Explicit,
@@ -203,6 +204,10 @@ impl AetherExplicitFlags {
                 opt.aether_hide_skill_tooltips,
                 opt.no_aether_hide_skill_tooltips,
             ),
+            always_show_aura_tooltips: pair(
+                opt.aether_always_show_aura_tooltips,
+                opt.no_aether_always_show_aura_tooltips,
+            ),
             cache_texture_grid: pair(
                 opt.aether_aqw_cache_texture_grid,
                 opt.no_aether_aqw_cache_texture_grid,
@@ -244,6 +249,7 @@ pub struct AetherSettings {
     pub low_vram: bool,
     pub tooltips_follow_pointer: bool,
     pub hide_skill_tooltips: bool,
+    pub always_show_aura_tooltips: bool,
     pub cache_texture_grid: bool,
     pub idle_gpu_upload_eviction: bool,
     pub crash_report: bool,
@@ -276,6 +282,7 @@ impl Default for AetherSettings {
             // Off by default: it overrules where the game puts its own tooltips.
             tooltips_follow_pointer: false,
             hide_skill_tooltips: false,
+            always_show_aura_tooltips: false,
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
@@ -336,6 +343,7 @@ pub struct ResolvedAetherSettings {
     pub low_vram: ResolvedSetting,
     pub tooltips_follow_pointer: ResolvedSetting,
     pub hide_skill_tooltips: ResolvedSetting,
+    pub always_show_aura_tooltips: ResolvedSetting,
     pub cache_texture_grid: ResolvedSetting,
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
@@ -391,6 +399,10 @@ impl ResolvedAetherSettings {
             hide_skill_tooltips: ResolvedSetting::resolve(
                 explicit.hide_skill_tooltips,
                 saved.hide_skill_tooltips,
+            ),
+            always_show_aura_tooltips: ResolvedSetting::resolve(
+                explicit.always_show_aura_tooltips,
+                saved.always_show_aura_tooltips,
             ),
             cache_texture_grid: ResolvedSetting::resolve(
                 explicit.cache_texture_grid,
@@ -450,6 +462,9 @@ pub fn apply_live_settings(
     );
     ruffle_core::aether_compatibility::set_skill_tooltips_hidden(
         aqw_mode && settings.hide_skill_tooltips.value,
+    );
+    ruffle_core::aether_compatibility::set_aura_tooltips_always_shown(
+        aqw_mode && settings.always_show_aura_tooltips.value,
     );
 
     // Quality is a property of the running stage, so it can change without a restart. MSAA and the
