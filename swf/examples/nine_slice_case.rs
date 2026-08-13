@@ -239,9 +239,16 @@ fn main() {
         tags: inner_tags,
     });
 
-    let mut matrix = Matrix::scale(Fixed16::from_f32(scale), Fixed16::from_f32(scale));
+    // A tooltip sized to its text grows along one axis and shrinks along the other, so the two
+    // have to be settable independently.
+    let scale_y: f32 = rest
+        .iter()
+        .find_map(|arg| arg.strip_prefix("sy:"))
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(scale);
+    let mut matrix = Matrix::scale(Fixed16::from_f32(scale), Fixed16::from_f32(scale_y));
     matrix.tx = Twips::from_pixels(60.0 + origin * f64::from(scale));
-    matrix.ty = Twips::from_pixels(60.0 + origin * f64::from(scale));
+    matrix.ty = Twips::from_pixels(60.0 + origin * f64::from(scale_y));
 
     let mut tags = vec![
         Tag::SetBackgroundColor(Color::from_rgba(0xff808080)),

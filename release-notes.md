@@ -1,74 +1,54 @@
-A pre-release. The toolbar buttons should keep their corners whatever icon is on them.
+A pre-release. Panel corners are decided per axis now, which puts them back on the tooltips that
+lost them.
 
-## Why some buttons kept their corners and others did not
+## Corners came back off because of a rule I added
 
-The nine pieces are worked out by measuring the grid against the object's edges, so those edges have
-to be the ones the grid was drawn against -- the border art, and nothing else.
+A border is kept at its drawn size by dividing it by the object's scale. Below one that division
+makes the band *larger* than it was drawn, so the piece covering the corner magnifies whatever it
+reaches instead of protecting it. 0.6.9 dealt with that by refusing to slice anything being drawn
+smaller than it was made.
 
-They were not. They were the object's ordinary bounds, which are the union of *every* child, so an
-icon that reaches past the frame it sits in dragged the measured edge out with it and moved every
-band. Two buttons skinned by the same frame then sliced differently depending on what was sitting on
-them. That is why the third and fourth skill buttons behaved unlike the first, second and fifth: not
-the frame, the icon on it.
+That refusal was for the whole object, and it should never have been. A tooltip is sized to fit its
+text, so it routinely **grows along one axis while shrinking along the other** -- and refusing both
+is what put the stretched corners back on the aura tooltips and the skill tooltips that had already
+been fixed once.
 
-Worked through on a bordered box at three times its size, with a child reaching 14 pixels past the
-frame: the right border ran from 88 to 100 in the artwork, and was being drawn into 105 to 114
-instead. Measured, with the child overflowing:
+Each axis decides for itself now. A growing axis has its borders kept; a shrinking one is passed
+straight through and draws exactly as it always did. Measured on a bordered box, with the horizontal
+grown three times and the vertical shrunk to 0.6, which is the shape a tooltip actually takes:
 
-| | border | contents at |
+| | left border | top border |
 |---|---|---|
-| no grid | 36 px | 96, 96 |
-| grid, now | **12 px** | **72, 72** |
+| no grid | 36 px | 7 px |
+| grid, 0.6.9 to 0.6.11 | 36 px -- refused outright | 7 px |
+| grid, now | **12 px** | 7 px |
 
-Which is band for band what the same box measures with no overflowing child at all. The art's edges
-are measured now, so what is sitting on top cannot move the border behind it.
+Grown on both axes still gives 12 and 12, and shrunk on both is still pixel for pixel what it is
+with no grid at all, so the magnified corner that rule was written for stays fixed.
 
-## What the aura icons turned out not to be
+## Not fixed in this build
 
-The buff and aura icons are **not** being sliced, and have not been since 0.6.9. AQW builds each one
-at `scaleX = scaleY = 0.6`, and slicing has declined anything placed smaller than it was drawn since
-that build -- so three releases of scaling-grid work could not have been what moves them.
+Three things reported alongside the corners are **not** in here, and I would rather say so than
+imply otherwise:
 
-They are positioned by measurement rather than by transform. From AQW's own `playerAuras`:
-
-    _loc10_.scaleX = _loc10_.scaleY = 34 / _loc10_.width;
-    _loc10_.x = bg.width / 2 - _loc10_.width / 2;
-    _loc10_.y = bg.height / 2 - _loc10_.height / 2;
-
-The icon is centred using the reported width of two other objects. If a reported width is off, the
-icon is off, and no amount of drawing changes will move it. Ruled out so far: bounds correctly
-exclude filters, and correctly include invisible children, both matching Flash. That is where this
-now goes, and it is a different fault from the one the last three builds were aimed at.
-
-## Text
-
-Still open, and the mechanism is now known rather than guessed. `DefineCSMTextSettings` is how a
-Flash author says how text should be filled. Counted on the live build with
-`cargo run -p swf --example text_settings_census`: **627 text fields, every one of them asking for
-advanced antialiasing**, 500 with sub-pixel grid fitting and 105 with pixel grid fitting. Aether
-parses all of it, stores it on the text object, and draws the glyph outline plainly regardless.
-Grid fitting is what puts a glyph's stems on whole pixels instead of across two, which is the
-difference between text that reads solid and text that reads thin.
-
-## Frame rate over time
-
-Measured from a frame trace rather than described. In one two-minute session the offscreen texture
-pool made **127,487 allocations totalling 1.37 TB**, and there is a sharp change partway through:
-targets are 0.13 to 0.5 MB each for the first forty seconds and 9 to 18 MB each after that, at which
-point *every* allocation is immediately evicted for budget -- 1,808 allocated and 1,808 evicted in a
-single interval, 30 GB of churn, while the pool holds a flat 121 MB.
-
-So the collapse is a retention budget that cannot hold the targets a full-screen effect asks for.
-The budget has since been raised to 512 MiB and that trace predates it, so the numbers above are not
-today's; raising it further is not the answer either, because 768 MiB per pool has already been
-measured pushing a 10 GB card into a device-lost fault. The real cost is how many full-viewport
-targets one frame asks for. That is the next thing, and it needs a fresh trace to size properly.
+- The skill icon inside its grey button, the drop-accept checkmark, and the text inside an aura
+  tooltip all sit left of centre. AQW centres each of these by measuring another object -- the
+  pattern is `x = container.width / 2 - content.width / 2` -- so this is about a reported width
+  rather than about drawing. Bounds have been checked against Flash on three counts so far and match
+  on all three: they exclude filters, they include invisible children, and shape bounds include
+  stroke widths.
+- Text is thin and soft. The cause is known: **627 text fields in the live build, every one of them
+  asking for advanced antialiasing**, 500 with sub-pixel grid fitting and 105 with pixel grid
+  fitting, all of it parsed, stored, and then ignored at draw time.
+- Frame rate decaying over a session. Measured at 127,487 offscreen texture allocations totalling
+  1.37 TB in one two-minute trace, with every allocation past the forty-second mark evicted for
+  budget as soon as it is made.
 
 ## Downloads
 
-`Aether-Setup-0.6.11-win-x64.exe` for the installer, `Aether-Portable-0.6.11-win-x64.zip` if you
+`Aether-Setup-0.6.12-win-x64.exe` for the installer, `Aether-Portable-0.6.12-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.11-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.12-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
