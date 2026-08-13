@@ -60,6 +60,9 @@ fn main() {
     // A cell's transform translates by `low * (1 - 1/scale)`, where `low` is the near edge of the
     // object's bounds. Art drawn from the origin outwards makes that zero and hides every fault in
     // the translation; a panel centred on its origin -- which is how AQW builds them -- does not.
+    // A non-art child inside the grid'd sprite: a nested sprite, which is what a caption, a stack
+    // count or an icon amounts to. Slicing must decline when one is present.
+    let label = rest.iter().any(|arg| arg == "label");
     let origin = rest
         .iter()
         .find_map(|arg| arg.strip_prefix("offset:"))
@@ -109,11 +112,53 @@ fn main() {
         shape: rect(0.0, 0.0, inner, inner, 1),
     }));
 
-    // The grid goes on a sprite, because that is what a scaling grid can be set on.
-    let sprite = Tag::DefineSprite(Sprite {
-        id: 2,
+    let label_shape_bounds = Rectangle {
+        x_min: Twips::ZERO,
+        x_max: Twips::from_pixels(8.0),
+        y_min: Twips::ZERO,
+        y_max: Twips::from_pixels(8.0),
+    };
+    let label_shape = Tag::DefineShape(Box::new(Shape {
+        version: 1,
+        id: 5,
+        shape_bounds: label_shape_bounds,
+        edge_bounds: label_shape_bounds,
+        flags: ShapeFlag::empty(),
+        styles: ShapeStyles {
+            fill_styles: vec![FillStyle::Color(Color::from_rgba(0xff20e020))],
+            line_styles: vec![],
+        },
+        shape: rect(0.0, 0.0, 8.0, 8.0, 1),
+    }));
+    let label_sprite = Tag::DefineSprite(Sprite {
+        id: 4,
         num_frames: 1,
         tags: vec![
+            Tag::PlaceObject(Box::new(PlaceObject {
+                version: 2,
+                action: PlaceObjectAction::Place(CharacterId::from(5u16)),
+                depth: 1,
+                matrix: Some(Matrix::IDENTITY),
+                color_transform: None,
+                ratio: None,
+                name: None,
+                clip_depth: None,
+                class_name: None,
+                filters: None,
+                background_color: None,
+                blend_mode: None,
+                clip_actions: None,
+                has_image: false,
+                is_bitmap_cached: None,
+                is_visible: None,
+                amf_data: None,
+            })),
+            Tag::ShowFrame,
+        ],
+    });
+
+    // The grid goes on a sprite, because that is what a scaling grid can be set on.
+    let mut inner_tags = vec![
             Tag::PlaceObject(Box::new(PlaceObject {
                 version: 2,
                 action: PlaceObjectAction::Place(CharacterId::from(1u16)),
@@ -158,8 +203,37 @@ fn main() {
                 is_visible: None,
                 amf_data: None,
             })),
-            Tag::ShowFrame,
-        ],
+    ];
+    if label {
+        inner_tags.push(Tag::PlaceObject(Box::new(PlaceObject {
+            version: 2,
+            action: PlaceObjectAction::Place(CharacterId::from(4u16)),
+            depth: 3,
+            matrix: Some(Matrix::translate(
+                Twips::from_pixels(BORDER * 2.0 - origin),
+                Twips::from_pixels(BORDER * 2.0 - origin),
+            )),
+            color_transform: None,
+            ratio: None,
+            name: None,
+            clip_depth: None,
+            class_name: None,
+            filters: None,
+            background_color: None,
+            blend_mode: None,
+            clip_actions: None,
+            has_image: false,
+            is_bitmap_cached: None,
+            is_visible: None,
+            amf_data: None,
+        })));
+    }
+    inner_tags.push(Tag::ShowFrame);
+
+    let sprite = Tag::DefineSprite(Sprite {
+        id: 2,
+        num_frames: 1,
+        tags: inner_tags,
     });
 
     let mut matrix = Matrix::scale(Fixed16::from_f32(scale), Fixed16::from_f32(scale));
@@ -170,6 +244,8 @@ fn main() {
         Tag::SetBackgroundColor(Color::from_rgba(0xff808080)),
         frame,
         middle,
+        label_shape,
+        label_sprite,
         sprite,
     ];
     if !no_grid {

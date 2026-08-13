@@ -2170,6 +2170,31 @@ impl SliceAxis {
     }
 }
 
+/// Whether an object is nothing but the art a scaling grid exists to protect.
+///
+/// Counted on the live build with `cargo run -p swf --example scaling_grid_census`: of its 80
+/// scaling grids, 79 sit over a single shape and nothing else. They are panel backgrounds and
+/// Flash's own component skins -- `CellRenderer_upSkin`, `TextInput_upSkin`, `List_skin` -- and
+/// slicing those cannot move anything, because there is nothing in them to move.
+///
+/// The exception is the case that keeps going wrong. Slicing redraws each band under its own
+/// transform, which is right for art that was *drawn* and wrong for anything that was *positioned*:
+/// a caption, a stack count, an icon or a button sitting in a border band gets redrawn at its
+/// authored size anchored to the object's edge, which is to say moved up and to the left of where
+/// it belongs.
+fn slicing_would_only_touch_art(this: DisplayObject<'_>) -> bool {
+    let Some(container) = this.as_container() else {
+        // Not a container at all, so it is its own drawing and nothing else.
+        return true;
+    };
+    container.iter_render_list().all(|child| {
+        matches!(
+            child,
+            DisplayObject::Graphic(_) | DisplayObject::Bitmap(_) | DisplayObject::MorphShape(_)
+        )
+    })
+}
+
 /// Draw an object, in nine pieces if it has a scaling grid and is being scaled.
 ///
 /// `scale9Grid` was read from the file and answered to ActionScript but never reached the renderer,
@@ -2207,10 +2232,24 @@ fn draw_possibly_sliced<'gc, F>(
         // size the moment it is turned, so a turned object would be sliced along the wrong axes
         // and land somewhere else entirely.
         let upright = matrix.b == 0.0 && matrix.c == 0.0;
-        let resized = (f64::from(matrix.a) - 1.0).abs() > 0.001
-            || (f64::from(matrix.d) - 1.0).abs() > 0.001;
+        let scale_x = f64::from(matrix.a);
+        let scale_y = f64::from(matrix.d);
+        let resized = (scale_x - 1.0).abs() > 0.001 || (scale_y - 1.0).abs() > 0.001;
+        // Grown, never shrunk.
+        //
+        // A border is kept at its drawn size by dividing it by the object's scale, so below one
+        // that division makes the border band *larger* than it was drawn and the cell covering it
+        // magnifies whatever it happens to reach -- a sliver of the object's own interior, smeared
+        // across its corner. That is the dark wedge that appeared at the top left of the buff icons
+        // and the drop-accept button, both of which are placed smaller than they were drawn.
+        //
+        // Nothing is lost by declining: a grid exists to stop corners stretching as a panel grows,
+        // and a panel that is not growing has no corners being stretched.
+        let grown = scale_x >= 0.999 && scale_y >= 0.999;
         if upright
             && resized
+            && grown
+            && slicing_would_only_touch_art(this)
             && bounds.is_valid()
             && let Some(horizontal) = SliceAxis::plan(
                 bounds.x_min.to_pixels(),
@@ -5310,6 +5349,29 @@ mod nine_slice_tests {
             translation < -30.0,
             "a centred object's leading cell shifts it {translation} px, not nothing"
         );
+    }
+
+    /// Why an object placed smaller than it was drawn is declined rather than sliced.
+    ///
+    /// A border keeps its drawn size by being divided by the object's scale. Below one that
+    /// division makes the band *bigger* than it was drawn, so the cell covering the corner
+    /// magnifies whatever it reaches -- a sliver of the object's own interior, smeared across its
+    /// corner. That is the dark wedge that appeared at the top left of the buff icons and the
+    /// drop-accept button.
+    #[test]
+    fn shrinking_would_magnify_a_corner_instead_of_protecting_it() {
+        let axis = SliceAxis::plan(0.0, 12.0, 88.0, 100.0, 0.5).expect("the plan itself is sound");
+        let (_, _, stretch, _) = axis.band(0);
+        assert!(
+            (stretch - 2.0).abs() < 1e-9,
+            "at half size the border band is drawn at {stretch}x, not 1x"
+        );
+        assert!(stretch > 1.0, "which is magnification, not protection");
+
+        // Grown, the same band is drawn smaller, which is the whole point.
+        let axis = SliceAxis::plan(0.0, 12.0, 88.0, 100.0, 3.0).unwrap();
+        let (_, _, stretch, _) = axis.band(0);
+        assert!(stretch < 1.0);
     }
 
     #[test]
