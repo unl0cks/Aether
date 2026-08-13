@@ -38,7 +38,11 @@ param(
     [switch] $DryRun,
 
     # Replace an existing release and tag of the same version.
-    [switch] $Force
+    [switch] $Force,
+
+    # Mark the GitHub release as a pre-release, so it is not offered to anyone as the latest
+    # version and the updater leaves it alone.
+    [switch] $PreRelease
 )
 
 Set-StrictMode -Version Latest
@@ -183,7 +187,9 @@ try {
         'release', 'create', $tag,
         '--title', "Aether $version",
         '--notes-file', $notesPath.Path
-    ) + $assets + @($sumsPath)
+    )
+    if ($PreRelease) { $releaseArgs += '--prerelease' }
+    $releaseArgs = $releaseArgs + $assets + @($sumsPath)
     Invoke-Native gh $releaseArgs 'gh release create failed.'
 
     Write-Host ''
