@@ -1,54 +1,67 @@
-A pre-release. Panel corners are decided per axis now, which puts them back on the tooltips that
-lost them.
+A pre-release. AQW's own fonts are used for AQW's text, and small panels keep their corners.
 
-## Corners came back off because of a rule I added
+## The text is drawn in the wrong typeface
 
-A border is kept at its drawn size by dividing it by the object's scale. Below one that division
-makes the band *larger* than it was drawn, so the piece covering the corner magnifies whatever it
-reaches instead of protecting it. 0.6.9 dealt with that by refusing to slice anything being drawn
-smaller than it was made.
+AQW sets its interface in **Mini 7** and **Mini 7 Tight** -- pixel faces, drawn to be crisp at the
+sizes it uses them -- and it embeds both in the game: 218 glyphs each, with layout.
 
-That refusal was for the whole object, and it should never have been. A tooltip is sized to fit its
-text, so it routinely **grows along one axis while shrinking along the other** -- and refusing both
-is what put the stretched corners back on the aura tooltips and the skill tooltips that had already
-been fixed once.
+Aether never used them. Neither is a system font and neither was meant to be, so asking Windows for
+them found Tahoma for one and nothing at all for the other, and every panel of text was drawn in a
+typeface the author never chose. From the log of a normal session:
 
-Each axis decides for itself now. A growing axis has its borders kept; a shrinking one is passed
-straight through and draws exactly as it always did. Measured on a bordered box, with the horizontal
-grown three times and the vertical shrunk to 0.6, which is the shape a tooltip actually takes:
+    Loading device font "Tahoma" for "Mini 7" via Tahoma
+    Unknown device font "Mini 7 Tight"
 
-| | left border | top border |
+That is what the thin, soft text was. Not resolution, not the cache, not antialiasing -- the shapes
+the game ships were sitting in its own library, unused, while a different face was substituted at
+the same nominal size.
+
+A face the movie carries under the requested name is now preferred over one the system substitutes
+under a different one. It is guarded on the embedded font actually covering ordinary text, because a
+movie also embeds single-purpose subsets under names it shares with real fonts -- this build carries
+an `Arial` of nineteen glyphs, cut for one caption, alongside the genuine article. Preferring that
+over the system's Arial would empty out most of the interface.
+
+## Small panels keep their corners too
+
+A shrinking axis was refused outright for three releases, on the theory that dividing a border by a
+scale below one magnifies the corner. It does enlarge the band in the object's own space -- which is
+exactly how the border arrives at its drawn size once the object's own scale is applied, the same as
+when growing.
+
+The artefact that rule was written for turned out to be AQW's own cooldown overlay on the aura
+icons, which is supposed to look like that. What the rule actually did was leave every panel drawn
+smaller than its authored size with stretched corners, and a tooltip is sized to its text, so that
+is most of them -- including the aura tooltips.
+
+Measured on a bordered box drawn with a 12 pixel border, at three sizes:
+
+| | border, no grid | border, now |
 |---|---|---|
-| no grid | 36 px | 7 px |
-| grid, 0.6.9 to 0.6.11 | 36 px -- refused outright | 7 px |
-| grid, now | **12 px** | 7 px |
+| half size | 6 px | **12 px** |
+| 3x wide, 0.6x tall | 36 / 7 px | **12 / 12 px** |
+| 3x | 36 px | **12 px** |
 
-Grown on both axes still gives 12 and 12, and shrunk on both is still pixel for pixel what it is
-with no grid at all, so the magnified corner that rule was written for stays fixed.
+The drawn size, whichever way it is scaled. The one case still refused is the only one that cannot
+be drawn: squeezed so far that the two borders alone would not fit.
 
 ## Not fixed in this build
 
-Three things reported alongside the corners are **not** in here, and I would rather say so than
-imply otherwise:
+The skill icon in its grey button, the drop-accept checkmark and the text inside an aura tooltip all
+sit left of centre. AQW centres each by measuring another object -- `x = container.width / 2 -
+content.width / 2` -- so this is a reported width rather than anything about drawing, which is why
+changing how things are drawn has not moved it. Bounds match Flash on the three counts checked so
+far: filters excluded, invisible children included, stroke widths included.
 
-- The skill icon inside its grey button, the drop-accept checkmark, and the text inside an aura
-  tooltip all sit left of centre. AQW centres each of these by measuring another object -- the
-  pattern is `x = container.width / 2 - content.width / 2` -- so this is about a reported width
-  rather than about drawing. Bounds have been checked against Flash on three counts so far and match
-  on all three: they exclude filters, they include invisible children, and shape bounds include
-  stroke widths.
-- Text is thin and soft. The cause is known: **627 text fields in the live build, every one of them
-  asking for advanced antialiasing**, 500 with sub-pixel grid fitting and 105 with pixel grid
-  fitting, all of it parsed, stored, and then ignored at draw time.
-- Frame rate decaying over a session. Measured at 127,487 offscreen texture allocations totalling
-  1.37 TB in one two-minute trace, with every allocation past the forty-second mark evicted for
-  budget as soon as it is made.
+Frame rate still decays over a session: 127,487 offscreen texture allocations totalling 1.37 TB in
+one two-minute trace, everything past the forty-second mark evicted for budget as soon as it is
+made.
 
 ## Downloads
 
-`Aether-Setup-0.6.12-win-x64.exe` for the installer, `Aether-Portable-0.6.12-win-x64.zip` if you
+`Aether-Setup-0.6.13-win-x64.exe` for the installer, `Aether-Portable-0.6.13-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.12-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.13-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

@@ -6,7 +6,7 @@ use crate::character::Character;
 use crate::display_object::{Bitmap, Graphic, MorphShape, Text};
 use crate::font::{Font, FontDescriptor, FontLike, FontQuery, FontType};
 use crate::prelude::*;
-use crate::string::AvmString;
+use crate::string::{AvmString, WStr};
 use crate::tag_utils::SwfMovie;
 use gc_arena::collect::Trace;
 use gc_arena::{Collect, Mutation};
@@ -497,6 +497,9 @@ pub struct Library<'gc> {
     avm2_class_registry: Avm2ClassRegistry<'gc>,
 }
 
+/// Enough of the alphabet to tell a real face from a subset cut for one caption.
+const EMBEDDED_FONT_COVERAGE_SAMPLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,";
+
 impl<'gc> Library<'gc> {
     pub fn empty() -> Self {
         Self {
@@ -605,6 +608,26 @@ impl<'gc> Library<'gc> {
             return Some(*font);
         }
 
+        // A face the movie carries under this exact name beats one the system substitutes under a
+        // different one.
+        //
+        // AQW sets its interface in `Mini 7` and `Mini 7 Tight`, pixel faces drawn to be crisp at
+        // the sizes it uses, and embeds both -- 218 glyphs each, with layout. Neither is a system
+        // font and neither was meant to be, so Windows offered Tahoma for one and nothing for the
+        // other, and every panel of text was drawn in a typeface the author never chose. That is
+        // what "the text is too thin to read" was: the shapes were in the library, unused.
+        //
+        // Guarded on the font actually covering ordinary text, because a movie also embeds
+        // single-purpose subsets under names it shares with real fonts -- this one carries an
+        // `Arial` of nineteen glyphs, cut for one string, alongside the genuine article. Preferring
+        // that over the system's Arial would empty out most of the interface.
+        if let Some(font) = self.find_embedded_font_by_name(query)
+            && font.has_glyphs_for_str(WStr::from_units(EMBEDDED_FONT_COVERAGE_SAMPLE))
+        {
+            self.device_fonts.register(font);
+            return Some(font);
+        }
+
         // We don't have this font already. Did we ask for it before?
         let new_request = self.font_lookup_cache.insert(query.clone());
         if new_request {
@@ -619,10 +642,61 @@ impl<'gc> Library<'gc> {
                 return Some(*font);
             }
 
+            // A movie font that does not cover ordinary text is still better than nothing.
+            if let Some(font) = self.find_embedded_font_by_name(query) {
+                self.device_fonts.register(font);
+                return Some(font);
+            }
+
             let name = &query.name;
             let is_bold = query.is_bold;
             let is_italic = query.is_italic;
             warn!("Unknown device font \"{name}\" (bold: {is_bold}, italic: {is_italic})");
+        }
+
+        None
+    }
+
+    /// An embedded font of this name, from any movie that has been loaded.
+    ///
+    /// The movie asking is not known this far down, and it does not much matter: a name is enough
+    /// to identify a face, and the alternative on a miss is a different typeface entirely. Exact
+    /// weight and slant are preferred, then the same name at any weight, which is closer than a
+    /// substitute either way.
+    fn find_embedded_font_by_name(&self, query: &FontQuery) -> Option<Font<'gc>> {
+        let embedded = |font_type, is_bold, is_italic| {
+            FontQuery::new(font_type, query.name.clone(), is_bold, is_italic)
+        };
+
+        for font_type in [FontType::Embedded, FontType::EmbeddedCFF] {
+            let exact = embedded(font_type, query.is_bold, query.is_italic);
+            if let Some(font) = self.global_fonts.find(&exact) {
+                return Some(font);
+            }
+            for movie in self.movie_libraries.known_movies() {
+                if let Some(library) = self.movie_libraries.get(&movie)
+                    && let Some(font) = library.fonts.find(&exact)
+                {
+                    return Some(font);
+                }
+            }
+        }
+
+        for font_type in [FontType::Embedded, FontType::EmbeddedCFF] {
+            for (is_bold, is_italic) in [(false, false), (true, false), (false, true), (true, true)]
+            {
+                let any = embedded(font_type, is_bold, is_italic);
+                if let Some(font) = self.global_fonts.find(&any) {
+                    return Some(font);
+                }
+                for movie in self.movie_libraries.known_movies() {
+                    if let Some(library) = self.movie_libraries.get(&movie)
+                        && let Some(font) = library.fonts.find(&any)
+                    {
+                        return Some(font);
+                    }
+                }
+            }
         }
 
         None

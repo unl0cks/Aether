@@ -2141,21 +2141,18 @@ impl SliceAxis {
             return None;
         }
 
-        // An axis that is not being grown is passed straight through: its bands map onto
-        // themselves, so it draws exactly as it would have with no grid at all.
+        // Shrinking is sliced too, and the guard below is what keeps it honest.
         //
-        // Declining the whole object instead, which is what a shrinking axis used to do, left the
-        // *other* axis unprotected too. A tooltip is sized to its text and so routinely grows along
-        // one axis while shrinking along the other, and refusing both is what put the stretched
-        // corners back on them. Passing through still avoids the fault the refusal was for: below
-        // one, dividing a border by the scale would make the band larger than it was drawn and
-        // magnify the corner instead of protecting it.
-        if scale <= 1.0 {
-            return Some(Self {
-                source: [low, grid_low, grid_high, high],
-                dest: [low, grid_low, grid_high, high],
-            });
-        }
+        // A shrinking axis was refused outright for three releases, on the theory that dividing a
+        // border by a scale under one magnifies the corner. It does enlarge the band in the
+        // object's own space -- that is precisely how the border comes out at its drawn size once
+        // the object's own scale is applied, exactly as it does when growing.
+        //
+        // The artefact that rule was written for turned out to be AQW's own cooldown overlay, which
+        // is supposed to look like that. What the rule actually did was leave every tooltip smaller
+        // than its authored size with stretched corners, which is most of them: a tooltip is sized
+        // to its text. `middle_dest` below is the real limit, and it already refuses the only case
+        // that cannot be drawn -- squeezed so far that the borders alone would not fit.
 
         let leading = grid_low - low;
         let trailing = high - grid_high;
@@ -5395,28 +5392,28 @@ mod nine_slice_tests {
         );
     }
 
-    /// Why a shrinking axis is passed through rather than sliced, and why that is per axis.
+    /// A shrinking axis keeps its borders too, and why that is not the fault it looks like.
     ///
-    /// Dividing a border by a scale below one makes the band *larger* than it was drawn, so the
-    /// cell covering it would magnify the corner instead of protecting it. Passing the axis through
-    /// avoids that without refusing the object outright -- which matters because a tooltip is sized
-    /// to its text and so grows along one axis while shrinking along the other. Refusing both is
-    /// what put the stretched corners back on them.
+    /// Below one, dividing a border by the scale makes the band larger in the object's own space.
+    /// That is not magnification for its own sake -- it is exactly what makes the border come out
+    /// at its drawn size once the object's own scale is applied, the same as when growing. Refusing
+    /// it for three releases left every tooltip smaller than its authored size with stretched
+    /// corners, which is most of them.
     #[test]
-    fn a_shrinking_axis_passes_through_while_the_other_still_slices() {
+    fn a_shrinking_axis_still_keeps_its_border_at_the_drawn_size() {
         let shrunk = SliceAxis::plan(0.0, 12.0, 88.0, 100.0, 0.5).expect("a sane grid should plan");
-        assert!(!shrunk.is_sliced(), "a shrinking axis must draw as it always did");
-        for band in 0..3 {
-            let (source_start, dest_start, stretch, _) = shrunk.band(band);
-            assert!((stretch - 1.0).abs() < 1e-9, "band {band} magnifies by {stretch}");
-            assert!((source_start - dest_start).abs() < 1e-9);
-        }
+        assert!(shrunk.is_sliced());
 
-        // The other axis is unaffected by its neighbour declining.
+        let (_, dest_start, stretch, dest_end) = shrunk.band(0);
+        // Twice as wide in the object's own space, which at half scale is the 12px it was drawn.
+        assert!((stretch - 2.0).abs() < 1e-9, "border band drawn at {stretch}x");
+        assert!(((dest_end - dest_start) * 0.5 - 12.0).abs() < 1e-9);
+
+        // Growing goes the other way, and lands on the same 12px on screen.
         let grown = SliceAxis::plan(0.0, 12.0, 88.0, 100.0, 3.0).unwrap();
-        assert!(grown.is_sliced());
-        let (_, _, stretch, _) = grown.band(0);
-        assert!(stretch < 1.0, "a grown axis shrinks its border band to keep its drawn size");
+        let (_, dest_start, stretch, dest_end) = grown.band(0);
+        assert!(stretch < 1.0);
+        assert!(((dest_end - dest_start) * 3.0 - 12.0).abs() < 1e-9);
     }
 
     #[test]
@@ -5447,17 +5444,15 @@ mod nine_slice_tests {
     /// Squeezed so far that the borders alone would not fit, there is nothing sensible to do and
     /// the object is better drawn the ordinary way than folded inside out.
     ///
-    /// It reaches that the gentle way now: anything at or below its drawn size passes through, so a
-    /// scale this small is simply not sliced rather than being refused outright.
     #[test]
-    fn a_grid_with_no_room_left_is_not_sliced() {
-        let axis = SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 0.05).expect("passes through");
-        assert!(!axis.is_sliced());
+    fn a_grid_with_no_room_left_declines() {
+        // Squeezed to a twentieth, the two borders alone would need twenty times their drawn width
+        // and there is no middle left to keep.
+        assert!(SliceAxis::plan(0.0, 10.0, 90.0, 100.0, 0.05).is_none());
 
         // Growing can never run out of room: the borders are divided by the scale, so the larger
         // the object gets the less of its own space they take.
-        let axis = SliceAxis::plan(0.0, 49.0, 51.0, 100.0, 1000.0).expect("room to spare");
-        assert!(axis.is_sliced());
+        assert!(SliceAxis::plan(0.0, 49.0, 51.0, 100.0, 1000.0).unwrap().is_sliced());
     }
 
     #[test]
