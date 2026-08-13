@@ -211,8 +211,8 @@ impl AetherOptionsDialog {
             ui,
             &mut self.settings.always_show_aura_tooltips,
             self.resolved.always_show_aura_tooltips,
-            "Always show buff and aura tooltips",
-            "Keeps the tooltip that names a buff or aura on screen and next to the pointer, whatever else is set. AQW has its own switch for these under Class Actives/Auras UI; if that one is off, nothing here can bring them back.",
+            "Show buff and aura tooltips",
+            "The tooltip that names a buff or aura when you hover its icon. On, it is kept beside the pointer and on screen whatever else is set, so it survives skill tooltips being hidden. Off, it does not appear at all. AQW has its own switch for these under Class Actives/Auras UI; if that one is off, nothing here can bring them back.",
         );
     }
 
@@ -331,7 +331,7 @@ impl AetherOptionsDialog {
     ///
     /// Built as data so the ordering is one readable list rather than a run of near-identical
     /// blocks, and so a setting cannot end up drawn twice or not at all.
-    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 6] {
+    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 5] {
         let settings = &mut self.settings;
         let resolved = &self.resolved;
 
@@ -390,15 +390,6 @@ impl AetherOptionsDialog {
                         "Keeps a much smaller budget of textures for reuse. Costs frames on a card with memory to spare, and gains them on one without, because a card that cannot hold the full budget spills into system memory instead. Try it if you see coloured noise or streaks.",
                     ),
                 ],
-            ),
-            (
-                "Interface",
-                vec![(
-                    &mut settings.tooltips_follow_pointer,
-                    resolved.tooltips_follow_pointer,
-                    "Tooltips above the pointer",
-                    "AQW pins a skill's tooltip to the bottom-right corner, over the bag icon and far from the skill it describes. This puts it above whatever you are hovering instead. The account-safety warning is left where it is.",
-                )],
             ),
             (
                 "Performance",

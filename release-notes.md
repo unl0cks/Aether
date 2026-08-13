@@ -1,4 +1,28 @@
-A pre-release. Panels keep their borders, and the traces work.
+A pre-release. Nine-slice, held to the cases it is for.
+
+## Seams and shifted buttons
+
+Two faults in the scaling-grid work from 0.6.5, both mine.
+
+A thin line could appear through a panel. A panel is drawn as nine pieces, and two pieces that meet
+exactly on a boundary can both miss the pixels that boundary falls inside, leaving a hairline where
+they join. Pieces that meet agree about what is at the join -- it is the same point of the same
+object -- so they now overlap there by half a pixel, and there is nothing left to fall through.
+
+Buttons sat too far up and left. Slicing was being applied to objects that had no business being
+sliced. It now happens only to an object that has actually been resized, and only one sitting square
+to its own axes: a grid says nothing about an object drawn at the size it was authored, and the
+bands are worked out from two of the transform's four numbers, which stop describing the object's
+size the moment it is turned.
+
+## Buff tooltips are a switch of their own
+
+**Show buff and aura tooltips**, in the Gameplay tab, now decides whether that tooltip appears at
+all rather than only whether it is kept on screen. On -- which is the default -- it is kept beside
+the pointer whatever else is set, so it survives skill tooltips being hidden. Off, it does not
+appear. Skill tooltips are unaffected either way.
+
+**Tooltips above the pointer** is gone from Advanced. It lives in Gameplay and was in both.
 
 ## Rounded corners stopped becoming ellipses
 
@@ -160,9 +184,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.5-win-x64.exe` for the installer, `Aether-Portable-0.6.5-win-x64.zip` if you
+`Aether-Setup-0.6.6-win-x64.exe` for the installer, `Aether-Portable-0.6.6-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.5-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.6-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

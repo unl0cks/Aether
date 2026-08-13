@@ -2558,7 +2558,8 @@ pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
     }
     let is_a_skill = TOOLTIP_IS_A_SKILL.load(Ordering::Relaxed);
 
-    if hide_skills && is_a_skill {
+    let is_an_aura = !is_a_skill;
+    if (hide_skills && is_a_skill) || (!keep_auras && is_an_aura) {
         // Hidden rather than closed: AQW owns when a tooltip opens and closes, and taking that over
         // would leave one that never comes back.
         tooltip.set_visible(context, false);
@@ -2574,7 +2575,6 @@ pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
     // A buff's tooltip is the one that says what is on you, and it is worth being able to read that
     // while a skill's is suppressed. It follows the cursor, so it is put on screen here whether or
     // not tooltips in general are being moved.
-    let is_an_aura = !is_a_skill;
     if !follow_pointer && !(keep_auras && is_an_aura) {
         return;
     }

@@ -282,7 +282,9 @@ impl Default for AetherSettings {
             // Off by default: it overrules where the game puts its own tooltips.
             tooltips_follow_pointer: false,
             hide_skill_tooltips: false,
-            always_show_aura_tooltips: false,
+            // On: this is the tooltip that says what is on you, and turning it off is a
+            // deliberate choice rather than a default.
+            always_show_aura_tooltips: true,
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,

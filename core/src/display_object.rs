@@ -2104,6 +2104,12 @@ pub fn render_base<'gc>(
 ///
 /// It uses the stencil buffer so that any pixel drawn in the mask will allow the inner contents to show.
 /// This is what is used for most cases, except for cacheAsBitmap-on-cacheAsBitmap.
+/// How far a cell's clip reaches past its neighbour's, in the object's own pixels.
+///
+/// Only inwards, between cells. Reaching past the object's own outer edge would let a corner draw a
+/// sliver of the middle beyond where the object ends.
+const SLICE_BLEED: f64 = 0.5;
+
 /// One axis of a nine-slice: where each of the three bands starts and how much it is scaled by.
 ///
 /// The outer two bands keep the size they were authored at, whatever the object is scaled to, and
@@ -2181,7 +2187,19 @@ fn draw_possibly_sliced<'gc, F>(
     if grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
         let bounds = this.bounds(BoundsMode::Engine);
         let matrix = this.base().matrix();
-        if bounds.is_valid()
+        // Only an object that has actually been resized, and only along its own axes.
+        //
+        // A grid says nothing about an object drawn at the size it was authored, and slicing one
+        // is nine draws to arrive back where it started. Rotation and skew are worse than useless
+        // here: the bands are computed from `a` and `d` alone, which stop describing the object's
+        // size the moment it is turned, so a turned object would be sliced along the wrong axes
+        // and land somewhere else entirely.
+        let upright = matrix.b == 0.0 && matrix.c == 0.0;
+        let resized = (f64::from(matrix.a) - 1.0).abs() > 0.001
+            || (f64::from(matrix.d) - 1.0).abs() > 0.001;
+        if upright
+            && resized
+            && bounds.is_valid()
             && let Some(horizontal) = SliceAxis::plan(
                 bounds.x_min.to_pixels(),
                 grid.x_min.to_pixels(),
@@ -2203,11 +2221,21 @@ fn draw_possibly_sliced<'gc, F>(
                     let (source_x, dest_x, stretch_x, dest_x_end) = horizontal.band(column);
 
                     // The cell's own destination, used both to place it and to clip it.
+                    //
+                    // Grown by a hair towards its neighbours. Two masks that meet exactly on a
+                    // boundary can both miss the pixels the boundary lands inside, which draws a
+                    // thin seam down the middle of a panel. Cells that meet agree about what is at
+                    // the join -- it is the same point of the same object -- so letting them
+                    // overlap there costs nothing and closes the gap.
+                    let bleed_left = if column > 0 { SLICE_BLEED } else { 0.0 };
+                    let bleed_right = if column < 2 { SLICE_BLEED } else { 0.0 };
+                    let bleed_up = if row > 0 { SLICE_BLEED } else { 0.0 };
+                    let bleed_down = if row < 2 { SLICE_BLEED } else { 0.0 };
                     let clip = Matrix::create_box(
-                        (dest_x_end - dest_x) as f32,
-                        (dest_y_end - dest_y) as f32,
-                        Twips::from_pixels(dest_x),
-                        Twips::from_pixels(dest_y),
+                        (dest_x_end - dest_x + bleed_left + bleed_right) as f32,
+                        (dest_y_end - dest_y + bleed_up + bleed_down) as f32,
+                        Twips::from_pixels(dest_x - bleed_left),
+                        Twips::from_pixels(dest_y - bleed_up),
                     );
                     let clip = context.transform_stack.transform().matrix * clip;
 
