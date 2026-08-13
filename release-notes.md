@@ -21,6 +21,18 @@ was put.
 
 Raised by PacketLoss and HardLuck.
 
+## Tooltips that were hidden come back
+
+Turning "hide skill tooltips" off left every skill tooltip invisible for good. Whether a tooltip was
+open was read from the same flag that hiding one clears, so once hidden it could not be found again,
+and so could never be put back. AQW's own contents now decide whether a tooltip is open; the flag is
+Aether's alone, and it is remembered when Aether is the one that cleared it.
+
+**Always show buff and aura tooltips** is a third switch, so the tooltip that names what is on you
+survives skill tooltips being suppressed, and is kept beside the pointer and on screen. AQW has its
+own switch for these under Class Actives/Auras UI; if that one is off, nothing here can bring them
+back.
+
 ## The options window is sorted by what things are for
 
 Three tabs now. **Gameplay** for what the game does: number grouping and the tooltip switches.
@@ -134,9 +146,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.2-win-x64.exe` for the installer, `Aether-Portable-0.6.2-win-x64.zip` if you
+`Aether-Setup-0.6.3-win-x64.exe` for the installer, `Aether-Portable-0.6.3-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.2-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.3-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
