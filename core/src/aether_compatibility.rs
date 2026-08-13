@@ -10,7 +10,8 @@ use crate::display_object::{
 };
 use crate::aether_movie::{is_aqw_game_movie, is_aqw_loader_movie, is_hosted_aqw_game_movie};
 use crate::locale::get_current_date_time;
-use crate::string::AvmString;
+use crate::string::{AvmString, WStr};
+use swf::Twips;
 use crate::timer::TimerCallback;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
@@ -2387,5 +2388,140 @@ mod number_separator_tests {
         set_separator_min_digits(4);
 
         set_number_separator(NumberSeparator::None);
+    }
+}
+
+/// AQW's own stage, which every position `ToolTipMC` writes is measured against.
+const AQW_TOOLTIP_STAGE_WIDTH: f64 = 960.0;
+
+/// How far above the pointer the tooltip sits, matching AQW's own figure for its cursor-following
+/// tooltips so the two look the same.
+const AQW_TOOLTIP_POINTER_GAP: f64 = 15.0;
+
+static TOOLTIP_FOLLOWS_POINTER: AtomicBool = AtomicBool::new(false);
+
+pub fn set_tooltip_follows_pointer_enabled(enabled: bool) {
+    TOOLTIP_FOLLOWS_POINTER.store(enabled, Ordering::Relaxed);
+}
+
+pub fn tooltip_follows_pointer_enabled() -> bool {
+    TOOLTIP_FOLLOWS_POINTER.load(Ordering::Relaxed)
+}
+
+/// Whether this tooltip is the account-safety warning rather than something being hovered.
+///
+/// `ToolTipMC` paints the warning's background black through a colour transform and leaves every
+/// other tooltip's alone. The warning is not attached to anything the pointer is over -- it appears
+/// on a chat event and closes itself after ten seconds -- so dragging it to the cursor would move a
+/// thing the player is meant to read, and it is left where AQW put it.
+fn is_the_account_safety_warning(tooltip: DisplayObject<'_>) -> bool {
+    let Some(container) = tooltip.as_container() else {
+        return false;
+    };
+    let Some(content) = container.child_by_name(WStr::from_units(b"cnt"), false) else {
+        return false;
+    };
+    let Some(background) = content
+        .as_container()
+        .and_then(|content| content.child_by_name(WStr::from_units(b"bg"), false))
+    else {
+        return false;
+    };
+
+    let tint = background.base().color_transform();
+    tint.r_multiply.to_f32() == 0.0 && tint.g_multiply.to_f32() == 0.0
+}
+
+/// AQW's tooltip, if it is on screen.
+fn open_aqw_tooltip<'gc>(context: &mut UpdateContext<'gc>) -> Option<DisplayObject<'gc>> {
+    // `Game.ui.ToolTip`, reached by name rather than by walking the tree, because this runs every
+    // frame and the tree is thousands of objects deep by the time a map is loaded.
+    let stage = context.stage;
+    for child in stage.iter_render_list() {
+        let Some(game) = child.as_container() else {
+            continue;
+        };
+        let Some(ui) = game.child_by_name(WStr::from_units(b"ui"), false) else {
+            continue;
+        };
+        let Some(tooltip) = ui
+            .as_container()
+            .and_then(|ui| ui.child_by_name(WStr::from_units(b"ToolTip"), false))
+        else {
+            continue;
+        };
+
+        // `openWith` only starts a timer; `open` is what makes the contents visible, so this is how
+        // to tell a tooltip that is showing from one that is merely constructed.
+        let showing = tooltip.visible()
+            && tooltip
+                .as_container()
+                .and_then(|tooltip| tooltip.child_by_name(WStr::from_units(b"cnt"), false))
+                .is_some_and(|content| content.visible());
+        if showing {
+            return Some(tooltip);
+        }
+    }
+    None
+}
+
+/// Put AQW's tooltip above the pointer instead of wherever it asked to go.
+///
+/// AQW positions a skill's tooltip by pinning it to the bottom right of the stage, which puts it
+/// over the bag icon rather than near the skill being hovered, and far enough away that players
+/// have clicked through it while trying to move. `ToolTipMC` already knows how to sit above a
+/// point -- its cursor-following tooltips do exactly that -- so this puts every tooltip there,
+/// using AQW's own offset so they match.
+pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
+    if !tooltip_follows_pointer_enabled() {
+        return;
+    }
+    let Some(tooltip) = open_aqw_tooltip(context) else {
+        return;
+    };
+    if is_the_account_safety_warning(tooltip) {
+        return;
+    }
+    let Some(parent) = tooltip.parent() else {
+        return;
+    };
+
+    // x and y are read in the parent's space, so the pointer has to be too.
+    let pointer = parent.local_mouse_position(context);
+    let width = tooltip.width();
+    let height = tooltip.height();
+
+    let mut x = pointer.x.to_pixels() - width / 2.0;
+    let mut y = pointer.y.to_pixels() - height - AQW_TOOLTIP_POINTER_GAP;
+
+    // Kept on screen the way AQW keeps its own: pushed back inside at the right edge, and dropped
+    // below the pointer rather than off the top when there is no room above.
+    let rightmost = (AQW_TOOLTIP_STAGE_WIDTH - width - 10.0).max(1.0);
+    x = x.clamp(1.0, rightmost);
+    if y < 1.0 {
+        y = pointer.y.to_pixels() + 10.0;
+    }
+
+    tooltip.set_x(Twips::from_pixels(x));
+    tooltip.set_y(Twips::from_pixels(y));
+}
+
+#[cfg(test)]
+mod tooltip_tests {
+    use super::*;
+
+    /// Off unless asked for. It overrules where the game puts its own tooltips, which is not
+    /// something to do to someone who has not asked.
+    #[test]
+    fn repositioning_is_off_by_default() {
+        assert!(!tooltip_follows_pointer_enabled());
+    }
+
+    #[test]
+    fn repositioning_can_be_turned_on_and_off() {
+        set_tooltip_follows_pointer_enabled(true);
+        assert!(tooltip_follows_pointer_enabled());
+        set_tooltip_follows_pointer_enabled(false);
+        assert!(!tooltip_follows_pointer_enabled());
     }
 }

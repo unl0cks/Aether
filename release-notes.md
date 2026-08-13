@@ -1,4 +1,22 @@
-Weapon glows, finally.
+Tooltips where you are looking, if you want them there.
+
+## Skill tooltips above the pointer
+
+AQW pins a skill's tooltip to the bottom-right corner of the stage. That puts it over the bag icon,
+nowhere near the skill it describes, and squarely on top of where people click to move -- which is
+how players have found themselves unable to walk out of something while a tooltip was open.
+
+`ToolTipMC` already knows how to sit above a point; its cursor-following tooltips do exactly that.
+So there is a new switch under Advanced options, **off unless you turn it on**, that puts every
+tooltip above whatever the pointer is over, using AQW's own offset so it looks like the ones that
+already behave that way.
+
+The account-safety warning is left where it is. It is the one tooltip that is not attached to
+anything being hovered -- it appears on a chat event, closes itself after ten seconds, and is meant
+to be read rather than glanced at. It identifies itself by painting its own background black, which
+is how it is told apart from the rest.
+
+Raised by PacketLoss.
 
 ## A gradient glow is a ramp, and was being drawn as one flat colour
 
@@ -107,9 +125,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.0-win-x64.exe` for the installer, `Aether-Portable-0.6.0-win-x64.zip` if you
+`Aether-Setup-0.6.1-win-x64.exe` for the installer, `Aether-Portable-0.6.1-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.0-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.1-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

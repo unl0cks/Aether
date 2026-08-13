@@ -2210,6 +2210,10 @@ impl Player {
             // TODO: Is this order correct?
             run_all_phases_avm2(context);
 
+            // After the scripts have placed it, because this overrules where they placed it.
+            #[cfg(feature = "aether_compatibility")]
+            crate::aether_compatibility::reposition_aqw_tooltip(context);
+
             #[cfg(feature = "aether_metrics")]
             let phase_started = Instant::now();
             Avm1::run_frame(context);

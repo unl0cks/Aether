@@ -129,6 +129,7 @@ pub struct AetherExplicitFlags {
     pub mouse_motion_coalescing: Explicit,
     pub bounded_offscreen_pool: Explicit,
     pub low_vram: Explicit,
+    pub tooltips_follow_pointer: Explicit,
     pub cache_texture_grid: Explicit,
     pub idle_gpu_upload_eviction: Explicit,
     pub crash_report: Explicit,
@@ -193,6 +194,10 @@ impl AetherExplicitFlags {
                 opt.no_aether_aqw_bounded_offscreen_pool,
             ),
             low_vram: pair(opt.aether_low_vram, opt.no_aether_low_vram),
+            tooltips_follow_pointer: pair(
+                opt.aether_tooltips_follow_pointer,
+                opt.no_aether_tooltips_follow_pointer,
+            ),
             cache_texture_grid: pair(
                 opt.aether_aqw_cache_texture_grid,
                 opt.no_aether_aqw_cache_texture_grid,
@@ -232,6 +237,7 @@ pub struct AetherSettings {
     pub mouse_motion_coalescing: bool,
     pub bounded_offscreen_pool: bool,
     pub low_vram: bool,
+    pub tooltips_follow_pointer: bool,
     pub cache_texture_grid: bool,
     pub idle_gpu_upload_eviction: bool,
     pub crash_report: bool,
@@ -261,6 +267,8 @@ impl Default for AetherSettings {
             // Off by default: it trades reuse for a smaller footprint, which only pays on a
             // card that cannot hold the full budget in the first place.
             low_vram: false,
+            // Off by default: it overrules where the game puts its own tooltips.
+            tooltips_follow_pointer: false,
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
@@ -319,6 +327,7 @@ pub struct ResolvedAetherSettings {
     pub mouse_motion_coalescing: ResolvedSetting,
     pub bounded_offscreen_pool: ResolvedSetting,
     pub low_vram: ResolvedSetting,
+    pub tooltips_follow_pointer: ResolvedSetting,
     pub cache_texture_grid: ResolvedSetting,
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
@@ -367,6 +376,10 @@ impl ResolvedAetherSettings {
                 saved.bounded_offscreen_pool,
             ),
             low_vram: ResolvedSetting::resolve(explicit.low_vram, saved.low_vram),
+            tooltips_follow_pointer: ResolvedSetting::resolve(
+                explicit.tooltips_follow_pointer,
+                saved.tooltips_follow_pointer,
+            ),
             cache_texture_grid: ResolvedSetting::resolve(
                 explicit.cache_texture_grid,
                 saved.cache_texture_grid,
@@ -417,6 +430,12 @@ pub fn apply_live_settings(
     } else {
         4
     });
+
+    // Nothing is cached from this, so it takes effect on the next tooltip rather than the next
+    // launch.
+    ruffle_core::aether_compatibility::set_tooltip_follows_pointer_enabled(
+        aqw_mode && settings.tooltips_follow_pointer.value,
+    );
 
     // Quality is a property of the running stage, so it can change without a restart. MSAA and the
     // frame rate are read while the renderer and the player are built, and cannot.

@@ -203,6 +203,14 @@ pub struct Opt {
     #[clap(skip)]
     pub aether_low_vram_resolved: bool,
 
+    /// Put AQW's tooltips above the pointer instead of in the corner.
+    #[clap(long = "tooltips-follow-pointer", conflicts_with = "no_aether_tooltips_follow_pointer")]
+    pub aether_tooltips_follow_pointer: bool,
+
+    /// Leave AQW's tooltips where AQW puts them.
+    #[clap(long = "no-tooltips-follow-pointer", conflicts_with = "aether_tooltips_follow_pointer")]
+    pub no_aether_tooltips_follow_pointer: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(

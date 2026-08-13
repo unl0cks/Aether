@@ -298,7 +298,7 @@ impl AetherOptionsDialog {
     ///
     /// Built as data so the ordering is one readable list rather than a run of near-identical
     /// blocks, and so a setting cannot end up drawn twice or not at all.
-    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 5] {
+    fn advanced_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 6] {
         let settings = &mut self.settings;
         let resolved = &self.resolved;
 
@@ -357,6 +357,15 @@ impl AetherOptionsDialog {
                         "Keeps a much smaller budget of textures for reuse. Costs frames on a card with memory to spare, and gains them on one without, because a card that cannot hold the full budget spills into system memory instead. Try it if you see coloured noise or streaks.",
                     ),
                 ],
+            ),
+            (
+                "Interface",
+                vec![(
+                    &mut settings.tooltips_follow_pointer,
+                    resolved.tooltips_follow_pointer,
+                    "Tooltips above the pointer",
+                    "AQW pins a skill's tooltip to the bottom-right corner, over the bag icon and far from the skill it describes. This puts it above whatever you are hovering instead. The account-safety warning is left where it is.",
+                )],
             ),
             (
                 "Performance",
