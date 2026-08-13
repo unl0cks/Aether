@@ -1,22 +1,31 @@
-Tooltips where you are looking, if you want them there.
+Tooltips you can put where you want them, and options sorted into what they are for.
 
-## Skill tooltips above the pointer
+## Skill tooltips: above the pointer, or not at all
 
-AQW pins a skill's tooltip to the bottom-right corner of the stage. That puts it over the bag icon,
-nowhere near the skill it describes, and squarely on top of where people click to move -- which is
-how players have found themselves unable to walk out of something while a tooltip was open.
+Two switches, both off unless you turn them on, under the new Gameplay tab.
 
+**Show tooltips above the pointer.** AQW pins a skill's tooltip to the bottom-right corner of the
+stage, which puts it over the bag icon, nowhere near the skill it describes, and on top of where
+people click to move -- players have been stuck in place because a tooltip was in the way.
 `ToolTipMC` already knows how to sit above a point; its cursor-following tooltips do exactly that.
-So there is a new switch under Advanced options, **off unless you turn it on**, that puts every
-tooltip above whatever the pointer is over, using AQW's own offset so it looks like the ones that
-already behave that way.
+This puts every tooltip there, using AQW's own offset so they match.
 
-The account-safety warning is left where it is. It is the one tooltip that is not attached to
-anything being hovered -- it appears on a chat event, closes itself after ten seconds, and is meant
-to be read rather than glanced at. It identifies itself by painting its own background black, which
-is how it is told apart from the rest.
+**Hide skill tooltips.** Stops a skill's tooltip appearing at all, which is the one that covers the
+screen mid-fight. Tooltips for buffs and auras still appear, so you can still read what is on you.
+The two are told apart by where AQW put them: a skill's is pinned to the corner, a buff's follows
+the cursor, and that is decided on the frame it opens before anything here has moved it.
 
-Raised by PacketLoss.
+The account-safety warning is left alone by both. It is the one tooltip not attached to anything
+hovered -- chat opens it, it closes itself after ten seconds, and it is meant to be read where it
+was put.
+
+Raised by PacketLoss and HardLuck.
+
+## The options window is sorted by what things are for
+
+Three tabs now. **Gameplay** for what the game does: number grouping and the tooltip switches.
+**Visuals & Performance** for how it looks and how fast it runs, which is what the Game tab held.
+**Advanced** is unchanged.
 
 ## A gradient glow is a ramp, and was being drawn as one flat colour
 
@@ -125,9 +134,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.1-win-x64.exe` for the installer, `Aether-Portable-0.6.1-win-x64.zip` if you
+`Aether-Setup-0.6.2-win-x64.exe` for the installer, `Aether-Portable-0.6.2-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.1-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.2-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
