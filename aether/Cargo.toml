@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.6.3"
+version = "0.6.4"
 
 [lints]
 workspace = true
@@ -87,7 +87,7 @@ InternalName = "aether_player"
 OriginalFilename = "aether.exe"
 
 [features]
-default = ["software_video", "external_video", "lzma", "fontconfig"]
+default = ["software_video", "external_video", "lzma", "fontconfig", "diagnostics"]
 jpegxr = ["ruffle_core/jpegxr"]
 
 # core features
@@ -99,6 +99,11 @@ metrics = [
     "ruffle_frontend_utils/aether_metrics",
     "wgpu/counters",
 ]
+# The traces and compatibility switches, as opposed to the per-frame measurement in `metrics`.
+# `ruffle_core/aether_diagnostics` is already on unconditionally above; this exists so the wiring
+# for it in main.rs is not gated on `metrics`, which also turns on GPU counters and a per-frame
+# census and is far too expensive to ship.
+diagnostics = []
 avm_debug = ["ruffle_core/avm_debug"]
 lzma = ["ruffle_core/lzma"]
 software_video = ["ruffle_video_software"]

@@ -306,7 +306,7 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "diagnostics")]
     if preferences.cli.aether_input_trace {
         let path = preferences
             .cli
@@ -324,14 +324,14 @@ fn main() -> Result<(), Error> {
             Err(error) => tracing::warn!("Failed to enable Aether input trace: {error}"),
         }
     }
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(feature = "diagnostics"))]
     if preferences.cli.aether_input_trace {
         tracing::warn!(
-            "--input-trace was requested, but this binary was built without the `metrics` feature"
+            "--input-trace was requested, but this binary was built without the `diagnostics` feature"
         );
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "diagnostics")]
     if preferences.cli.aether_timeline_trace {
         let path = preferences
             .cli
@@ -349,14 +349,14 @@ fn main() -> Result<(), Error> {
             Err(error) => tracing::warn!("Failed to enable Aether timeline trace: {error}"),
         }
     }
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(feature = "diagnostics"))]
     if preferences.cli.aether_timeline_trace {
         tracing::warn!(
-            "--timeline-trace was requested, but this binary was built without the `metrics` feature"
+            "--timeline-trace was requested, but this binary was built without the `diagnostics` feature"
         );
     }
 
-    #[cfg(feature = "metrics")]
+    #[cfg(feature = "diagnostics")]
     {
         let retry_enabled = aqw_mode && preferences.cli.aether_aqw_frame_construction_retry;
         ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(retry_enabled);
@@ -366,10 +366,10 @@ fn main() -> Result<(), Error> {
             );
         }
     }
-    #[cfg(not(feature = "metrics"))]
+    #[cfg(not(feature = "diagnostics"))]
     if preferences.cli.aether_aqw_frame_construction_retry {
         tracing::warn!(
-            "--frame-construction-retry was requested, but this binary was built without the `metrics` feature"
+            "--frame-construction-retry was requested, but this binary was built without the `diagnostics` feature"
         );
     }
 

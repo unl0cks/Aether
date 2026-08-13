@@ -21,6 +21,18 @@ was put.
 
 Raised by PacketLoss and HardLuck.
 
+## The traces work in a normal build
+
+`--input-trace`, `--timeline-trace` and `--frame-construction-retry` all reported that the binary
+was built without the feature they needed, in every binary anyone has. They were gated on `metrics`,
+which also turns on GPU counters and a per-frame resource census and is far too expensive to ship,
+so they were unreachable outside a build made specially.
+
+They are diagnostics rather than measurements, and are now gated on that instead. The trace they
+write is what says *why* a walk stopped early: every declined stop is attributed to the first gate
+that turned it down, out of ten, which is the difference between "the guard ran and disagreed" and
+"the guard was never reached at all".
+
 ## Tooltips that were hidden come back
 
 Turning "hide skill tooltips" off left every skill tooltip invisible for good. Whether a tooltip was
@@ -146,9 +158,9 @@ Try it if you see either.
 
 ## Downloads
 
-`Aether-Setup-0.6.3-win-x64.exe` for the installer, `Aether-Portable-0.6.3-win-x64.zip` if you
+`Aether-Setup-0.6.4-win-x64.exe` for the installer, `Aether-Portable-0.6.4-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.3-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.4-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.
