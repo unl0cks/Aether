@@ -2643,3 +2643,51 @@ mod tooltip_tests {
         assert!(!TOOLTIP_HIDDEN_BY_US.load(Ordering::Relaxed));
     }
 }
+
+/// The lowest stage quality the movie is allowed to drop to, as a `StageQuality` sample count.
+///
+/// Zero means the movie decides, which is the ordinary behaviour.
+///
+/// AQW manages its own quality. `World.as` samples the frame rate and, on an average below 12 fps,
+/// steps `stage.quality` down through `["LOW","MEDIUM","HIGH"]`:
+///
+/// ```text
+/// if (avgFps <  12 && idx > 0) stage.quality = arrQuality[idx - 1];
+/// if (avgFps >= 12 && idx < 2) stage.quality = arrQuality[idx + 1];
+/// ```
+///
+/// `HIGH` is 4x multisampling, `MEDIUM` is 2x and `LOW` is none at all, so a dip below twelve
+/// leaves every piece of vector art -- which is all of the text -- drawn without antialiasing. It
+/// climbs back one step per five samples of twenty-four frames, so a moment of slowness costs
+/// hundreds of frames of soft, thin text well after the slowness has passed.
+///
+/// That is reasonable of AQW and unreasonable here: the setting is offered so the player can choose
+/// what their card should be asked for, and a transient dip should not overrule them.
+static STAGE_QUALITY_FLOOR: AtomicU8 = AtomicU8::new(0);
+
+/// Set the floor from a `StageQuality`'s own discriminant, or clear it with `None`.
+pub fn set_stage_quality_floor(floor: Option<u8>) {
+    STAGE_QUALITY_FLOOR.store(floor.unwrap_or(0), Ordering::Relaxed);
+}
+
+/// The floor, if one is set.
+pub fn stage_quality_floor() -> Option<u8> {
+    match STAGE_QUALITY_FLOOR.load(Ordering::Relaxed) {
+        0 => None,
+        floor => Some(floor),
+    }
+}
+
+#[cfg(test)]
+mod stage_quality_floor_tests {
+    use super::*;
+
+    #[test]
+    fn a_floor_of_zero_means_the_movie_decides() {
+        set_stage_quality_floor(None);
+        assert_eq!(stage_quality_floor(), None);
+        set_stage_quality_floor(Some(4));
+        assert_eq!(stage_quality_floor(), Some(4));
+        set_stage_quality_floor(None);
+    }
+}

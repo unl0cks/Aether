@@ -12,6 +12,7 @@ use crate::display_object::{
     StageDisplayState, TDisplayObject, TDisplayObjectContainer, TInteractiveObject,
 };
 use crate::string::{AvmString, WString};
+use ruffle_render::quality::StageQuality;
 use swf::Color;
 
 /// Implement `align`'s getter
@@ -410,7 +411,16 @@ pub fn set_quality<'gc>(
     args: &[Value<'gc>],
 ) -> Result<Value<'gc>, Error<'gc>> {
     // Invalid values result in no change.
-    if let Ok(quality) = args.get_string(activation, 0).parse() {
+    if let Ok(quality) = args.get_string(activation, 0).parse::<StageQuality>() {
+        // A movie that lowers the quality past what the player asked for is declined. AQW does
+        // this to itself whenever the frame rate dips; see `aether_compatibility`.
+        #[cfg(feature = "aether_compatibility")]
+        if let Some(floor) = crate::aether_compatibility::stage_quality_floor()
+            && quality.sample_count() < u32::from(floor)
+        {
+            return Ok(Value::Undefined);
+        }
+
         activation
             .context
             .stage

@@ -1,67 +1,58 @@
-A pre-release. AQW's own fonts are used for AQW's text, and small panels keep their corners.
+A pre-release. The thin text was AQW turning its own antialiasing off, and it no longer can.
 
-## The text is drawn in the wrong typeface
+## Why the text was thin
 
-AQW sets its interface in **Mini 7** and **Mini 7 Tight** -- pixel faces, drawn to be crisp at the
-sizes it uses them -- and it embeds both in the game: 218 glyphs each, with layout.
+AQW manages its own quality. `World.as` samples the frame rate and, on an average below twelve
+frames a second, steps `stage.quality` down a level:
 
-Aether never used them. Neither is a system font and neither was meant to be, so asking Windows for
-them found Tahoma for one and nothing at all for the other, and every panel of text was drawn in a
-typeface the author never chose. From the log of a normal session:
+    internal var arrQuality:Array = new Array("LOW","MEDIUM","HIGH");
+    ...
+    if (avgFps <  12 && idx > 0) stage.quality = arrQuality[idx - 1];
+    if (avgFps >= 12 && idx < 2) stage.quality = arrQuality[idx + 1];
 
-    Loading device font "Tahoma" for "Mini 7" via Tahoma
-    Unknown device font "Mini 7 Tight"
+`HIGH` is four times multisampling. `MEDIUM` is two. **`LOW` is none at all.** So a dip below twelve
+leaves every piece of vector art in the game -- which is all of the text -- drawn with no
+antialiasing whatsoever. It climbs back one level per five samples of twenty-four frames, so a
+moment of slowness costs hundreds of frames of soft, thin text well after the slowness has gone.
 
-That is what the thin, soft text was. Not resolution, not the cache, not antialiasing -- the shapes
-the game ships were sitting in its own library, unused, while a different face was substituted at
-the same nominal size.
+That is reasonable of AQW, which cannot know what it is running on. It is not reasonable here: the
+quality setting exists so the player can say what their card should be asked for, and a transient
+dip should not overrule them.
 
-A face the movie carries under the requested name is now preferred over one the system substitutes
-under a different one. It is guarded on the embedded font actually covering ordinary text, because a
-movie also embeds single-purpose subsets under names it shares with real fonts -- this build carries
-an `Arial` of nineteen glyphs, cut for one caption, alongside the genuine article. Preferring that
-over the system's Arial would empty out most of the interface.
+The stage is now held at the quality that was chosen. A movie asking for less is declined; asking
+for more is allowed. The setting is unchanged and still under Visuals & Performance, so `--quality
+low` still gets low.
 
-## Small panels keep their corners too
+This is also why the text looked worse at some moments than others, and why it could not be found
+in the font handling or the cache or the renderer's own antialiasing: none of those were wrong. The
+game had turned the antialiasing off.
 
-A shrinking axis was refused outright for three releases, on the theory that dividing a border by a
-scale below one magnifies the corner. It does enlarge the band in the object's own space -- which is
-exactly how the border arrives at its drawn size once the object's own scale is applied, the same as
-when growing.
+## What this does not fix
 
-The artefact that rule was written for turned out to be AQW's own cooldown overlay on the aura
-icons, which is supposed to look like that. What the rule actually did was leave every panel drawn
-smaller than its authored size with stretched corners, and a tooltip is sized to its text, so that
-is most of them -- including the aura tooltips.
+The frame rate dips that trigger it. Measured on a fresh nine-minute capture: the offscreen texture
+pool sits at its 512 MiB ceiling and evicts essentially every texture it is handed -- 1,375
+allocated against 1,341 evicted in one interval -- while resident texture memory peaks at **9.5 GB**
+against a p95 frame time of 161 ms. On a 10 GB card that costs frames. On the 2 GB card that
+reported coloured noise and a yellow band across the screen, it runs the card out of memory, which
+is what that looks like and why relogging cleared it. One fault, two symptoms, and still the
+outstanding one.
 
-Measured on a bordered box drawn with a 12 pixel border, at three sizes:
+The first hundred seconds of that capture are also slow -- 45 to 53 ms a frame -- with no texture
+churn at all and 99% pool reuse, so that is something else again.
 
-| | border, no grid | border, now |
-|---|---|---|
-| half size | 6 px | **12 px** |
-| 3x wide, 0.6x tall | 36 / 7 px | **12 / 12 px** |
-| 3x | 36 px | **12 px** |
+## Also still open
 
-The drawn size, whichever way it is scaled. The one case still refused is the only one that cannot
-be drawn: squeezed so far that the two borders alone would not fit.
+The drop-accept checkmark sits left of centre. AQW centres it by measuring another object, so it is
+a reported width rather than anything about drawing.
 
-## Not fixed in this build
-
-The skill icon in its grey button, the drop-accept checkmark and the text inside an aura tooltip all
-sit left of centre. AQW centres each by measuring another object -- `x = container.width / 2 -
-content.width / 2` -- so this is a reported width rather than anything about drawing, which is why
-changing how things are drawn has not moved it. Bounds match Flash on the three counts checked so
-far: filters excluded, invisible children included, stroke widths included.
-
-Frame rate still decays over a session: 127,487 offscreen texture allocations totalling 1.37 TB in
-one two-minute trace, everything past the forty-second mark evicted for budget as soon as it is
-made.
+`playerAuras.countDownAct` throws `Error #1009` continuously during combat, alongside definition
+lookup misses for the aura clips it is trying to advance.
 
 ## Downloads
 
-`Aether-Setup-0.6.13-win-x64.exe` for the installer, `Aether-Portable-0.6.13-win-x64.zip` if you
+`Aether-Setup-0.6.14-win-x64.exe` for the installer, `Aether-Portable-0.6.14-win-x64.zip` if you
 would rather not install anything.
 
-There may also be `Aether-Launcher-0.6.13-win-x64.exe`. It is the same installer at a few megabytes
+There may also be `Aether-Launcher-0.6.14-win-x64.exe`. It is the same installer at a few megabytes
 instead of a hundred, because it downloads Aether while it installs rather than carrying a copy. It
 needs a connection; the other two do not.

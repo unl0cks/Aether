@@ -469,6 +469,17 @@ pub fn apply_live_settings(
         aqw_mode && settings.always_show_aura_tooltips.value,
     );
 
+    // Hold the stage at the quality that was asked for, rather than the one AQW would rather have.
+    //
+    // `World.as` samples the frame rate and steps `stage.quality` down a level whenever the average
+    // falls below 12 fps, then back up one level per five samples of twenty-four frames. `LOW` is
+    // no multisampling at all, so a moment of slowness leaves every piece of vector art -- which is
+    // all of the text -- drawn without antialiasing for hundreds of frames after the slowness has
+    // passed. That is the thin, soft text.
+    ruffle_core::aether_compatibility::set_stage_quality_floor(
+        aqw_mode.then(|| settings.quality.value.sample_count().min(u32::from(u8::MAX)) as u8),
+    );
+
     // Quality is a property of the running stage, so it can change without a restart. MSAA and the
     // frame rate are read while the renderer and the player are built, and cannot.
     if let Some(player) = player {
