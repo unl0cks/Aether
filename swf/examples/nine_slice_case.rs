@@ -63,6 +63,9 @@ fn main() {
     // A non-art child inside the grid'd sprite: a nested sprite, which is what a caption, a stack
     // count or an icon amounts to. Slicing must decline when one is present.
     let label = rest.iter().any(|arg| arg == "label");
+    // A positioned child that reaches past the frame it sits in, which is what an oversized icon
+    // does to a toolbar button. It must not drag the measured edge out and move the bands.
+    let overflow = rest.iter().any(|arg| arg == "overflow");
     let origin = rest
         .iter()
         .find_map(|arg| arg.strip_prefix("offset:"))
@@ -210,8 +213,8 @@ fn main() {
             action: PlaceObjectAction::Place(CharacterId::from(4u16)),
             depth: 3,
             matrix: Some(Matrix::translate(
-                Twips::from_pixels(BORDER * 2.0 - origin),
-                Twips::from_pixels(BORDER * 2.0 - origin),
+                Twips::from_pixels(if overflow { BOX + 6.0 } else { BORDER * 2.0 } - origin),
+                Twips::from_pixels(if overflow { BOX + 6.0 } else { BORDER * 2.0 } - origin),
             )),
             color_transform: None,
             ratio: None,

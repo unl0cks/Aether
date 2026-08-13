@@ -35,19 +35,44 @@ fn main() {
     // Character 0 is the movie's own main timeline and would place the file inside itself.
     let mut exported: Vec<(CharacterId, String)> = Vec::new();
     for tag in &movie.tags {
-        if let Tag::SymbolClass(links) = tag {
-            for link in links {
-                if link.id != CharacterId::from(0u16) {
-                    exported.push((link.id, link.class_name.to_string_lossy(swf::UTF_8)));
+        match tag {
+            Tag::SymbolClass(links) => {
+                for link in links {
+                    if link.id != CharacterId::from(0u16) {
+                        exported.push((link.id, link.class_name.to_string_lossy(swf::UTF_8)));
+                    }
                 }
             }
+            // The game reaches most of its interface by `getDefinitionByName`, which resolves an
+            // export name rather than a class binding, so those have to be reachable here too.
+            Tag::ExportAssets(assets) => {
+                for asset in assets.iter() {
+                    if asset.id != CharacterId::from(0u16) {
+                        exported.push((asset.id, asset.name.to_string_lossy(swf::UTF_8)));
+                    }
+                }
+            }
+            _ => {}
         }
     }
 
-    let (id, name) = exported
-        .first()
-        .cloned()
-        .expect("this movie exports no symbol, so there is nothing for the game to instantiate");
+    let wanted = std::env::args().find_map(|arg| arg.strip_prefix("symbol:").map(str::to_owned));
+    let (id, name) = match &wanted {
+        Some(wanted) => exported
+            .iter()
+            .find(|(_, name)| name == wanted)
+            .cloned()
+            .unwrap_or_else(|| {
+                let mut names: Vec<&str> =
+                    exported.iter().map(|(_, name)| name.as_str()).collect();
+                names.sort_unstable();
+                panic!("no symbol named `{wanted}`; this movie exports {names:?}")
+            }),
+        None => exported
+            .first()
+            .cloned()
+            .expect("this movie exports no symbol, so there is nothing for the game to instantiate"),
+    };
 
     // Everything up to and including the definitions, then the placement. Dropping the original
     // frames avoids the file's own timeline moving or hiding what we just placed.

@@ -2171,6 +2171,49 @@ impl SliceAxis {
     }
 }
 
+/// The extent of the art a scaling grid describes, ignoring anything merely positioned on top.
+///
+/// The bands are worked out by measuring the grid against the object's edges, so the edges have to
+/// be the ones the grid was authored against -- which is the border art, and nothing else. Ordinary
+/// bounds are the union of every child, so an icon or a label that reaches past the frame it sits
+/// in drags the measured edge out with it and every band lands somewhere the artwork never
+/// intended. Two panels skinned by the same frame then slice differently depending on what is
+/// sitting on them, which is why some of the toolbar's buttons kept their corners and others did
+/// not.
+///
+/// Falls back to the object's own bounds when it holds no art at all, so a bare shape carrying a
+/// grid still measures itself.
+fn scaling_grid_art_bounds(this: DisplayObject<'_>) -> Rectangle<Twips> {
+    let Some(container) = this.as_container() else {
+        return this.bounds(BoundsMode::Engine);
+    };
+
+    let mut art: Option<Rectangle<Twips>> = None;
+    for child in container.iter_render_list() {
+        if !matches!(
+            child,
+            DisplayObject::Graphic(_) | DisplayObject::Bitmap(_) | DisplayObject::MorphShape(_)
+        ) {
+            continue;
+        }
+        let bounds = child.bounds_with_transform(&child.base().matrix(), BoundsMode::Engine);
+        art = Some(match art {
+            Some(art) => art.union(&bounds),
+            None => bounds,
+        });
+    }
+
+    // The object's own drawing counts as art too, and is already in its self bounds.
+    let own = this.self_bounds(BoundsMode::Engine);
+    let art = match (art, own.is_valid()) {
+        (Some(art), true) => art.union(&own),
+        (Some(art), false) => art,
+        (None, true) => own,
+        (None, false) => return this.bounds(BoundsMode::Engine),
+    };
+    art
+}
+
 /// Draw an object, in nine pieces if it has a scaling grid and is being scaled.
 ///
 /// `scale9Grid` was read from the file and answered to ActionScript but never reached the renderer,
@@ -2198,7 +2241,8 @@ fn draw_possibly_sliced<'gc, F>(
 {
     let grid = this.scaling_grid();
     if sliceable && grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
-        let bounds = this.bounds(BoundsMode::Engine);
+        // The art's own edges, not the union with whatever is sitting on it. See the function.
+        let bounds = scaling_grid_art_bounds(this);
         let matrix = this.base().matrix();
         // Only an object that has actually been resized, and only along its own axes.
         //
