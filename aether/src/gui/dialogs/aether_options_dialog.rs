@@ -28,7 +28,8 @@ use unic_langid::LanguageIdentifier;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OptionsTab {
-    Game,
+    Gameplay,
+    Visuals,
     Advanced,
 }
 
@@ -69,7 +70,7 @@ impl AetherOptionsDialog {
             settings,
             applied_at_open: preferences.aether_at_startup(),
             rebinding: false,
-            tab: OptionsTab::Game,
+            tab: OptionsTab::Gameplay,
             aqw_mode: preferences.aqw_mode(),
             preferences,
         }
@@ -105,13 +106,19 @@ impl AetherOptionsDialog {
             .resizable(false)
             .show(egui_ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.tab, OptionsTab::Game, "Game");
+                    ui.selectable_value(&mut self.tab, OptionsTab::Gameplay, "Gameplay");
+                    ui.selectable_value(
+                        &mut self.tab,
+                        OptionsTab::Visuals,
+                        "Visuals & Performance",
+                    );
                     ui.selectable_value(&mut self.tab, OptionsTab::Advanced, "Advanced");
                 });
                 ui.separator();
 
                 match self.tab {
-                    OptionsTab::Game => self.show_game_tab(ui),
+                    OptionsTab::Gameplay => self.show_gameplay_tab(ui),
+                    OptionsTab::Visuals => self.show_visuals_tab(ui),
                     OptionsTab::Advanced => self.show_advanced_tab(ui),
                 }
 
@@ -145,7 +152,8 @@ impl AetherOptionsDialog {
         keep_open && !should_close
     }
 
-    fn show_game_tab(&mut self, ui: &mut Ui) {
+    /// What the game does, as opposed to how it looks or how fast it runs.
+    fn show_gameplay_tab(&mut self, ui: &mut Ui) {
         ui.label("Numbers");
         toggle(
             ui,
@@ -184,6 +192,24 @@ impl AetherOptionsDialog {
         });
 
         ui.add_space(8.0);
+        ui.label("Tooltips");
+        toggle(
+            ui,
+            &mut self.settings.tooltips_follow_pointer,
+            self.resolved.tooltips_follow_pointer,
+            "Show tooltips above the pointer",
+            "AQW pins a skill's tooltip to the bottom-right corner, over the bag icon and away from the skill it describes. This puts it above whatever you are hovering instead. The account-safety warning is left where it is.",
+        );
+        toggle(
+            ui,
+            &mut self.settings.hide_skill_tooltips,
+            self.resolved.hide_skill_tooltips,
+            "Hide skill tooltips",
+            "Stops a skill's tooltip appearing at all, which is what covers the screen and gets clicked through during a fight. Tooltips for buffs and auras still appear, so you can still read what is on you.",
+        );
+    }
+
+    fn show_visuals_tab(&mut self, ui: &mut Ui) {
         ui.label("Display");
         Grid::new("aether-options-display")
             .num_columns(2)

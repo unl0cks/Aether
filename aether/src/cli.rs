@@ -211,6 +211,14 @@ pub struct Opt {
     #[clap(long = "no-tooltips-follow-pointer", conflicts_with = "aether_tooltips_follow_pointer")]
     pub no_aether_tooltips_follow_pointer: bool,
 
+    /// Hide the tooltip a skill shows, keeping the ones buffs and auras show.
+    #[clap(long = "hide-skill-tooltips", conflicts_with = "no_aether_hide_skill_tooltips")]
+    pub aether_hide_skill_tooltips: bool,
+
+    /// Show the tooltip a skill shows.
+    #[clap(long = "no-hide-skill-tooltips", conflicts_with = "aether_hide_skill_tooltips")]
+    pub no_aether_hide_skill_tooltips: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(

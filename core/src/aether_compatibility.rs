@@ -2394,11 +2394,22 @@ mod number_separator_tests {
 /// AQW's own stage, which every position `ToolTipMC` writes is measured against.
 const AQW_TOOLTIP_STAGE_WIDTH: f64 = 960.0;
 
+/// The other half of the same figure, used by the corner AQW pins skill tooltips to.
+const AQW_TOOLTIP_STAGE_HEIGHT: f64 = 480.0;
+
 /// How far above the pointer the tooltip sits, matching AQW's own figure for its cursor-following
 /// tooltips so the two look the same.
 const AQW_TOOLTIP_POINTER_GAP: f64 = 15.0;
 
 static TOOLTIP_FOLLOWS_POINTER: AtomicBool = AtomicBool::new(false);
+static SKILL_TOOLTIPS_HIDDEN: AtomicBool = AtomicBool::new(false);
+
+/// Whether the tooltip on screen right now is a skill's, remembered from the frame it opened on.
+///
+/// AQW writes a tooltip's position once, in `open`, so where it sits is only a reliable answer to
+/// "what kind of tooltip is this" before anything here has moved it.
+static TOOLTIP_WAS_SHOWING: AtomicBool = AtomicBool::new(false);
+static TOOLTIP_IS_A_SKILL: AtomicBool = AtomicBool::new(false);
 
 pub fn set_tooltip_follows_pointer_enabled(enabled: bool) {
     TOOLTIP_FOLLOWS_POINTER.store(enabled, Ordering::Relaxed);
@@ -2406,6 +2417,25 @@ pub fn set_tooltip_follows_pointer_enabled(enabled: bool) {
 
 pub fn tooltip_follows_pointer_enabled() -> bool {
     TOOLTIP_FOLLOWS_POINTER.load(Ordering::Relaxed)
+}
+
+pub fn set_skill_tooltips_hidden(hidden: bool) {
+    SKILL_TOOLTIPS_HIDDEN.store(hidden, Ordering::Relaxed);
+}
+
+pub fn skill_tooltips_hidden() -> bool {
+    SKILL_TOOLTIPS_HIDDEN.load(Ordering::Relaxed)
+}
+
+/// Whether a tooltip was placed by AQW's "pin it to the bottom right" branch.
+///
+/// That branch is what a skill's tooltip uses, and nothing a player hovers in combat uses any
+/// other. Buffs and auras take the cursor-following branch instead, which is why they can be kept
+/// while skills are hidden: the two are already distinguishable by where AQW put them.
+fn was_pinned_to_the_corner(x: f64, y: f64, width: f64, height: f64) -> bool {
+    let corner_x = AQW_TOOLTIP_STAGE_WIDTH - width - 4.0;
+    let corner_y = AQW_TOOLTIP_STAGE_HEIGHT - height - 4.0;
+    (x - corner_x).abs() < 1.5 && (y - corner_y).abs() < 1.5
 }
 
 /// Whether this tooltip is the account-safety warning rather than something being hovered.
@@ -2473,10 +2503,13 @@ fn open_aqw_tooltip<'gc>(context: &mut UpdateContext<'gc>) -> Option<DisplayObje
 /// point -- its cursor-following tooltips do exactly that -- so this puts every tooltip there,
 /// using AQW's own offset so they match.
 pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
-    if !tooltip_follows_pointer_enabled() {
+    let hide_skills = skill_tooltips_hidden();
+    if !tooltip_follows_pointer_enabled() && !hide_skills {
+        TOOLTIP_WAS_SHOWING.store(false, Ordering::Relaxed);
         return;
     }
     let Some(tooltip) = open_aqw_tooltip(context) else {
+        TOOLTIP_WAS_SHOWING.store(false, Ordering::Relaxed);
         return;
     };
     if is_the_account_safety_warning(tooltip) {
@@ -2486,11 +2519,35 @@ pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
         return;
     };
 
-    // x and y are read in the parent's space, so the pointer has to be too.
-    let pointer = parent.local_mouse_position(context);
     let width = tooltip.width();
     let height = tooltip.height();
 
+    // Classified on the frame it opens, before anything here has moved it.
+    if !TOOLTIP_WAS_SHOWING.swap(true, Ordering::Relaxed) {
+        let pinned = was_pinned_to_the_corner(
+            tooltip.x().to_pixels(),
+            tooltip.y().to_pixels(),
+            width,
+            height,
+        );
+        TOOLTIP_IS_A_SKILL.store(pinned, Ordering::Relaxed);
+    }
+    let is_a_skill = TOOLTIP_IS_A_SKILL.load(Ordering::Relaxed);
+
+    if hide_skills && is_a_skill {
+        // Hidden rather than closed: AQW owns when it opens and closes, and taking that over would
+        // leave a tooltip that never comes back once the setting is turned off again.
+        tooltip.set_visible(context, false);
+        return;
+    }
+    tooltip.set_visible(context, true);
+
+    if !tooltip_follows_pointer_enabled() {
+        return;
+    }
+
+    // x and y are read in the parent's space, so the pointer has to be too.
+    let pointer = parent.local_mouse_position(context);
     let mut x = pointer.x.to_pixels() - width / 2.0;
     let mut y = pointer.y.to_pixels() - height - AQW_TOOLTIP_POINTER_GAP;
 
