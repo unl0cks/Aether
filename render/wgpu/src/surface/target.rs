@@ -5,7 +5,7 @@ use crate::descriptors::Descriptors;
 use crate::globals::Globals;
 use crate::utils::create_buffer_with_data;
 use crate::utils::run_copy_pipeline;
-use std::cell::OnceCell;
+use std::cell::{Cell, OnceCell};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -207,6 +207,42 @@ pub struct CommandTarget {
     whole_frame_bind_group: OnceCell<(wgpu::Buffer, wgpu::BindGroup)>,
     color_needs_clear: OnceCell<bool>,
     render_target_mode: RenderTargetMode,
+    /// Whether this target resolves multisampling when someone reads it rather than at the end of
+    /// every pass.
+    ///
+    /// A resolve attachment costs a full read of the multisampled buffer and a full write of the
+    /// resolved one, and it is attached to *every* pass. That is fine for a target drawn in one
+    /// pass, and ruinous for the stage: a crowded AQW map splits it into hundreds of passes,
+    /// because every complex blend both interrupts the run of draws and composites back over it.
+    /// Only a blend reading the parent back, and the frame's final consumer, ever look at the
+    /// resolved texture, so the passes in between are resolving for nobody.
+    ///
+    /// Filters keep the eager behaviour: they hand their targets straight to each other and to the
+    /// backend, so there is no single point that owns "this target is finished".
+    deferred_resolve: bool,
+    resolve_state: ResolveState,
+}
+
+/// Whether a deferred target's resolved texture has fallen behind its multisampled one.
+///
+/// Split out from `CommandTarget` because getting it wrong fails in opposite directions and only
+/// one of them is visible: too many resolves is the cost this exists to remove, while too few
+/// leaves a blend compositing against a stale backdrop.
+#[derive(Debug, Default)]
+struct ResolveState {
+    dirty: Cell<bool>,
+}
+
+impl ResolveState {
+    /// A pass has been encoded against the multisampled buffer without resolving it.
+    fn note_pass(&self) {
+        self.dirty.set(true);
+    }
+
+    /// Whether a resolve is owed, claiming it if so.
+    fn take(&self) -> bool {
+        self.dirty.replace(false)
+    }
 }
 
 impl CommandTarget {
@@ -222,7 +258,7 @@ impl CommandTarget {
         render_target_mode: RenderTargetMode,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Self {
-        Self::new_at(
+        let target = Self::new_at(
             (0, 0),
             descriptors,
             pool,
@@ -231,7 +267,14 @@ impl CommandTarget {
             sample_count,
             render_target_mode,
             encoder,
-        )
+        );
+        // Filters pass targets between themselves and to the backend with no "finished" point that
+        // could own a deferred resolve, so they keep resolving at the end of every pass. They draw
+        // one or two passes per target, which is what an attached resolve is priced for.
+        Self {
+            deferred_resolve: false,
+            ..target
+        }
     }
 
     /// A target covering only `size` pixels starting at `origin` within that space. Used by blends,
@@ -348,7 +391,46 @@ impl CommandTarget {
             whole_frame_bind_group,
             color_needs_clear: OnceCell::new(),
             render_target_mode,
+            deferred_resolve: true,
+            // `FreshWithTexture` seeds both buffers from the same texture above, and every other
+            // mode starts empty, so the resolved side begins in step with the multisampled one.
+            resolve_state: ResolveState::default(),
         }
+    }
+
+    /// Bring the resolved texture up to date with the multisampled one, if it is behind.
+    ///
+    /// Only meaningful for a deferred target: an eager one resolves as each pass ends and is never
+    /// dirty. Called before anything reads the resolved side, which is a blend reading its parent
+    /// back and the point where the target is finished.
+    pub fn resolve_now(&self, encoder: &mut wgpu::CommandEncoder) {
+        if !self.resolve_state.take() {
+            return;
+        }
+        let Some(resolve_buffer) = &self.resolve_buffer else {
+            return;
+        };
+
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_msaa_resolve(
+            u64::from(self.size.width) * u64::from(self.size.height),
+        );
+
+        // An empty pass whose only job is its resolve attachment. `Load`/`Store` keeps the
+        // multisampled buffer exactly as it was, so drawing can carry on into it afterwards.
+        encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: create_debug_label!("Deferred multisample resolve").as_deref(),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: self.frame_buffer.view(),
+                resolve_target: Some(resolve_buffer.view()),
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            ..Default::default()
+        });
     }
 
     pub fn width(&self) -> u32 {
@@ -416,9 +498,7 @@ impl CommandTarget {
         descriptors: &Descriptors,
         region: (u32, u32, u32, u32),
         child_texture: wgpu::Extent3d,
-    ) -> wgpu::BindGroup {
-        #[cfg(feature = "aether_metrics")]
-        crate::aether_metrics::record_bind_group_created();
+    ) -> std::sync::Arc<wgpu::BindGroup> {
         let (rx, ry, rw, rh) = region;
         let (local_x, local_y) = (
             rx.saturating_sub(self.origin.0) as f32,
@@ -436,36 +516,14 @@ impl CommandTarget {
             child_texture.height.max(1) as f32,
         );
 
-        let transform = Transforms {
-            world_matrix: [
-                [rw, 0.0, 0.0, 0.0],
-                [0.0, rh, 0.0, 0.0],
-                [0.0, 0.0, 1.0, 0.0],
-                [rx as f32, ry as f32, 0.0, 1.0],
-            ],
-            mult_color: [1.0, 1.0, 1.0, 1.0],
-            add_color: [0.0, 0.0, 0.0, 0.0],
-            // Divided by the child's texture rather than by the region, so the region's left edge
-            // lands on 0 and its right edge on `rw / cw` -- where the drawn content actually ends --
-            // instead of on 1, which is where the padding ends.
-            bitmap_uv_scale: [tw / cw, th / ch, -local_x / cw, -local_y / ch],
-        };
-        let buffer = create_buffer_with_data(
-            &descriptors.device,
-            bytemuck::cast_slice(&[transform]),
-            wgpu::BufferUsages::UNIFORM,
-            create_debug_label!("Region-frame transforms buffer"),
-        );
-        descriptors
-            .device
-            .create_bind_group(&wgpu::BindGroupDescriptor {
-                layout: &descriptors.bind_layouts.transforms,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: buffer.as_entire_binding(),
-                }],
-                label: create_debug_label!("Region-frame transforms bind group").as_deref(),
-            })
+        // Divided by the child's texture rather than by the region, so the region's left edge lands
+        // on 0 and its right edge on `rw / cw` -- where the drawn content actually ends -- instead
+        // of on 1, which is where the padding ends.
+        descriptors.region_frame_bind_group(
+            [rw, rh],
+            [rx as f32, ry as f32],
+            [tw / cw, th / ch, -local_x / cw, -local_y / ch],
+        )
     }
 
     pub fn color_attachments(&self) -> Option<wgpu::RenderPassColorAttachment<'_>> {
@@ -475,9 +533,18 @@ impl CommandTarget {
         {
             load = wgpu::LoadOp::Clear(clear_color);
         }
+        // A deferred target carries no resolve attachment; it notes that the resolved texture has
+        // fallen behind and catches up in `resolve_now` when something is about to read it.
+        let resolve_target = match (&self.resolve_buffer, self.deferred_resolve) {
+            (Some(_), true) => {
+                self.resolve_state.note_pass();
+                None
+            }
+            (buffer, _) => buffer.as_ref().map(|b| b.view()),
+        };
         Some(wgpu::RenderPassColorAttachment {
             view: self.frame_buffer.view(),
-            resolve_target: self.resolve_buffer.as_ref().map(|b| b.view()),
+            resolve_target,
             ops: wgpu::Operations {
                 load,
                 store: wgpu::StoreOp::Store,
@@ -537,6 +604,9 @@ impl CommandTarget {
             )
         });
         self.ensure_cleared(encoder);
+        // The copy below reads the resolved texture, so this is one of the two points a deferred
+        // target has to catch up.
+        self.resolve_now(encoder);
         if let Some((origin, extent)) =
             blend_buffer_copy_region(self.origin, self.frame_buffer.size(), region)
         {
@@ -727,4 +797,47 @@ fn get_whole_frame_bind_group<'a>(
             (transforms_buffer, whole_frame_bind_group)
         })
         .1
+}
+
+#[cfg(test)]
+mod resolve_state_tests {
+    use super::ResolveState;
+
+    #[test]
+    fn a_target_nothing_has_drawn_into_owes_no_resolve() {
+        // The pooled resolve texture holds whatever the last user left in it, so resolving a target
+        // that was never drawn into would publish that garbage rather than avoid it.
+        let state = ResolveState::default();
+        assert!(!state.take());
+    }
+
+    #[test]
+    fn a_pass_owes_exactly_one_resolve() {
+        let state = ResolveState::default();
+        state.note_pass();
+        assert!(state.take());
+        // Nothing has drawn since, so the resolved texture is already current.
+        assert!(!state.take());
+    }
+
+    #[test]
+    fn a_run_of_passes_still_owes_only_one_resolve() {
+        // This is the whole saving: the stage is split into hundreds of passes and only the reads
+        // between them need the resolved texture to be current.
+        let state = ResolveState::default();
+        for _ in 0..64 {
+            state.note_pass();
+        }
+        assert!(state.take());
+        assert!(!state.take());
+    }
+
+    #[test]
+    fn drawing_after_a_resolve_owes_another_one() {
+        let state = ResolveState::default();
+        state.note_pass();
+        assert!(state.take());
+        state.note_pass();
+        assert!(state.take());
+    }
 }

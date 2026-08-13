@@ -4,7 +4,7 @@ use crate::layouts::BindLayouts;
 use crate::pipelines::VERTEX_BUFFERS_DESCRIPTION_POS;
 use crate::shaders::Shaders;
 use crate::{
-    BitmapSamplers, Pipelines, PosColorVertex, PosVertex, TextureTransforms,
+    BitmapSamplers, Pipelines, PosColorVertex, PosVertex, TextureTransforms, Transforms,
     create_buffer_with_data,
 };
 use fnv::FnvHashMap;
@@ -25,6 +25,15 @@ pub struct Descriptors {
     copy_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
+    /// Transform bind groups for a blend that covers part of its target, kept by the four numbers
+    /// that decide their contents.
+    ///
+    /// Each one used to be a fresh uniform buffer *and* a fresh bind group, built again on every
+    /// frame for every blend -- measured at 448 blends in one frame of a crowded room, so 448 of
+    /// each, per frame. Both are among the more expensive things wgpu is asked to do, and neither
+    /// depends on anything but the region and the texture behind it. Avatars repeat a handful of
+    /// sizes between them, so the same few groups serve nearly all of them.
+    region_frame_bind_groups: Mutex<FnvHashMap<[u32; 8], Arc<wgpu::BindGroup>>>,
     pub filters: Filters,
     /// Records the first fatal GPU fault so callers can shut down cleanly.
     pub device_status: DeviceStatus,
@@ -98,9 +107,81 @@ impl Descriptors {
             copy_pipeline: Default::default(),
             shaders,
             pipelines: Default::default(),
+            region_frame_bind_groups: Default::default(),
             filters,
             device_status,
         }
+    }
+
+    /// A transform bind group for a partial-region blend, built once per distinct shape.
+    ///
+    /// Keyed on every number that reaches the buffer -- the region's size and corner, and the four
+    /// UV terms -- because all of them vary per blend. Keyed on the bits rather than the floats
+    /// because floats are not `Hash`; each one is derived from an integer pixel count, so equal
+    /// regions always produce an identical key.
+    ///
+    /// Blend regions are snapped to a grid, so an avatar that moves a few pixels keeps the same
+    /// region for several frames and keeps hitting this.
+    pub fn region_frame_bind_group(
+        &self,
+        world_size: [f32; 2],
+        world_corner: [f32; 2],
+        uv_scale: [f32; 4],
+    ) -> Arc<wgpu::BindGroup> {
+        let key = [
+            world_size[0].to_bits(),
+            world_size[1].to_bits(),
+            world_corner[0].to_bits(),
+            world_corner[1].to_bits(),
+            uv_scale[0].to_bits(),
+            uv_scale[1].to_bits(),
+            uv_scale[2].to_bits(),
+            uv_scale[3].to_bits(),
+        ];
+        if let Some(group) = self.region_frame_bind_groups.lock().unwrap().get(&key) {
+            return group.clone();
+        }
+
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_bind_group_created();
+
+        let transform = Transforms {
+            world_matrix: [
+                [world_size[0], 0.0, 0.0, 0.0],
+                [0.0, world_size[1], 0.0, 0.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [world_corner[0], world_corner[1], 0.0, 1.0],
+            ],
+            mult_color: [1.0, 1.0, 1.0, 1.0],
+            add_color: [0.0, 0.0, 0.0, 0.0],
+            bitmap_uv_scale: uv_scale,
+        };
+
+        let buffer = create_buffer_with_data(
+            &self.device,
+            bytemuck::cast_slice(&[transform]),
+            wgpu::BufferUsages::UNIFORM,
+            create_debug_label!("Region-frame transforms buffer"),
+        );
+        let group = Arc::new(self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            layout: &self.bind_layouts.transforms,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: buffer.as_entire_binding(),
+            }],
+            label: create_debug_label!("Region-frame transforms bind group").as_deref(),
+        }));
+
+        // A crowded room settles on a few hundred distinct regions. This only bounds a
+        // pathological case; starting over is cheaper than tracking use counts for something this
+        // small, and the groups rebuild in a frame.
+        const MAX_CACHED: usize = 4096;
+        let mut cache = self.region_frame_bind_groups.lock().unwrap();
+        if cache.len() >= MAX_CACHED {
+            cache.clear();
+        }
+        cache.insert(key, group.clone());
+        group
     }
 
     pub fn copy_pipeline(

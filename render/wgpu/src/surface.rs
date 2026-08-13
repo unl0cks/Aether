@@ -95,7 +95,18 @@ impl Surface {
             backend_sample_count_for_target(quality, width, height, backend_msaa_override()),
             frame_buffer_format,
         );
+        // The sample count is what decides whether a resolve is attached to a pass at all, and it is
+        // reached by two different routes -- `StageQuality`, which AQW changes at runtime, and the
+        // `--msaa` override. Reading it back from the surface itself is the only way to tell which
+        // one won, and a perf capture is not interpretable without it.
         let pipelines = descriptors.pipelines(sample_count, frame_buffer_format);
+        tracing::info!(
+            "Surface {}x{} at quality {} using {}x MSAA",
+            width,
+            height,
+            quality,
+            sample_count,
+        );
         Self {
             size,
             quality,
@@ -527,7 +538,7 @@ impl Surface {
                         render_pass.set_bind_group(
                             1,
                             region_bind_group
-                                .as_ref()
+                                .as_deref()
                                 .unwrap_or_else(|| target.whole_frame_bind_group(descriptors)),
                             &[0],
                         );
@@ -550,6 +561,12 @@ impl Surface {
 
         // If nothing happened, ensure it's cleared so we don't operate on garbage data
         target.ensure_cleared(draw_encoder);
+
+        // The target is finished, and every caller reads it through the resolved texture: the frame
+        // copy, a blend or mask taking it as a child, the backend handing it to a BitmapData. This
+        // is the one place that knows drawing has stopped, which is what makes the resolve
+        // deferrable at all -- see `CommandTarget::deferred_resolve`.
+        target.resolve_now(draw_encoder);
 
         target
     }

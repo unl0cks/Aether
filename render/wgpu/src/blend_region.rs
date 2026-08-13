@@ -135,6 +135,26 @@ pub fn plan_blend_region(
 /// that was going to be drawn gets clipped. The origin rounds DOWN and the far edge rounds UP, then
 /// both are clamped back inside the parent -- which is why edge-touching regions can still land off
 /// the grid, and why that is fine.
+/// The grid a region of this size should be snapped to.
+///
+/// A flat grid is the wrong shape for this. Snapping moves both edges outward, so a 128 pixel grid
+/// turns a 60x90 avatar layer that happens to straddle a boundary into 128x256 -- twelve times the
+/// pixels it needs, shaded every frame and held in a texture of its own. AQW draws an avatar as
+/// dozens of separately blended parts, and a crowded room measured 304 blends in a single frame,
+/// so that waste is multiplied by everyone on screen.
+///
+/// A grid proportional to the region keeps the clustering that makes the pool reuse textures --
+/// which is what takes the general pool to 99.8% -- while costing a small region far less. Large
+/// regions keep the old grid, because there the relative waste was already small.
+pub fn blend_region_grid(width: u32, height: u32) -> u32 {
+    const MIN_GRID: u32 = 32;
+    const MAX_GRID: u32 = 128;
+    const STEPS: u32 = 8;
+
+    let extent = width.max(height).max(1);
+    (extent.next_power_of_two() / STEPS).clamp(MIN_GRID, MAX_GRID)
+}
+
 pub fn quantise_region(
     region: BlendRegion,
     parent_origin: (u32, u32),
@@ -163,6 +183,39 @@ pub fn quantise_region(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A small blended layer -- which is what an avatar is made of -- must not be rounded out to a
+    /// target many times its size.
+    #[test]
+    fn a_small_region_gets_a_finer_grid_than_a_large_one() {
+        assert_eq!(blend_region_grid(60, 90), 32);
+        assert_eq!(blend_region_grid(40, 40), 32);
+
+        // Large regions keep the grid they always had.
+        assert_eq!(blend_region_grid(1300, 1300), 128);
+        assert_eq!(blend_region_grid(2560, 1440), 128);
+    }
+
+    /// The saving, on the shape an avatar layer actually takes.
+    #[test]
+    fn a_small_layer_costs_far_fewer_pixels_than_it_did() {
+        let region = BlendRegion { x: 100, y: 100, width: 60, height: 90 };
+        let fine = quantise_region(region, (0, 0), 2560, 1440, blend_region_grid(60, 90));
+        let coarse = quantise_region(region, (0, 0), 2560, 1440, 128);
+
+        let fine_pixels = fine.width * fine.height;
+        let coarse_pixels = coarse.width * coarse.height;
+        assert!(
+            fine_pixels * 2 <= coarse_pixels,
+            "fine {fine_pixels} vs coarse {coarse_pixels} pixels"
+        );
+
+        // It still covers everything it must.
+        assert!(fine.x <= region.x && fine.y <= region.y);
+        assert!(fine.x + fine.width >= region.x + region.width);
+        assert!(fine.y + fine.height >= region.y + region.height);
+    }
+
 
     fn rect(x_min: f64, y_min: f64, x_max: f64, y_max: f64) -> Rectangle<Twips> {
         Rectangle {

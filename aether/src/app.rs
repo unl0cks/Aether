@@ -229,6 +229,7 @@ impl MainWindow {
 
                 use ruffle_core::events::MouseButton as RuffleMouseButton;
                 use winit::event::MouseButton;
+
                 let (x, y) = self.gui.window_to_movie_position(self.mouse_pos);
                 #[cfg(feature = "metrics")]
                 let button_name = match button {

@@ -28,6 +28,8 @@ pub struct MouseMotionCoalescer<T> {
     enabled: bool,
     pending: Option<T>,
     next_dispatch_at: Option<Instant>,
+    /// When a position was last handed on, so the first motion after a still pointer need not wait.
+    last_dispatch_at: Option<Instant>,
 }
 
 impl<T> MouseMotionCoalescer<T> {
@@ -36,6 +38,7 @@ impl<T> MouseMotionCoalescer<T> {
             enabled,
             pending: None,
             next_dispatch_at: None,
+            last_dispatch_at: None,
         }
     }
 
@@ -44,9 +47,30 @@ impl<T> MouseMotionCoalescer<T> {
             return MouseMotionDecision::dispatch(position, false);
         }
 
+        // The first motion after a still pointer goes straight out.
+        //
+        // This used to queue every position without exception, so even a single move made after a
+        // second of stillness waited out the whole interval before the movie heard about it. The
+        // coalescer is here to stop a 1000Hz mouse flooding a busy map, which is a question of
+        // *rate*; making the pointer feel a frame behind is not part of that job. Limiting from the
+        // leading edge holds the same rate and answers the start of a movement at once.
+        let idle = self
+            .last_dispatch_at
+            .is_none_or(|last| now.saturating_duration_since(last) >= MOUSE_MOTION_INTERVAL);
+        if idle && self.pending.is_none() {
+            self.last_dispatch_at = Some(now);
+            self.next_dispatch_at = None;
+            return MouseMotionDecision::dispatch(position, false);
+        }
+
         let coalesced = self.pending.replace(position).is_some();
         if !coalesced {
-            self.next_dispatch_at = Some(now + MOUSE_MOTION_INTERVAL);
+            // One interval on from the last position that went out, not from this one, so the rate
+            // stays at the interval rather than drifting a little slower with every burst.
+            self.next_dispatch_at = Some(
+                self.last_dispatch_at
+                    .map_or(now + MOUSE_MOTION_INTERVAL, |last| last + MOUSE_MOTION_INTERVAL),
+            );
         }
         MouseMotionDecision::queued(coalesced)
     }
@@ -58,17 +82,23 @@ impl<T> MouseMotionCoalescer<T> {
         }
 
         self.next_dispatch_at = None;
+        self.last_dispatch_at = Some(now);
         self.pending.take()
     }
 
-    pub fn take_for_render(&mut self, _now: Instant) -> Option<T> {
+    pub fn take_for_render(&mut self, now: Instant) -> Option<T> {
         self.next_dispatch_at = None;
-        self.pending.take()
+        let position = self.pending.take();
+        if position.is_some() {
+            self.last_dispatch_at = Some(now);
+        }
+        position
     }
 
-    pub fn flush(&mut self, _now: Instant) -> Option<T> {
+    pub fn flush(&mut self, now: Instant) -> Option<T> {
         let position = self.pending.take()?;
         self.next_dispatch_at = None;
+        self.last_dispatch_at = Some(now);
         Some(position)
     }
 
@@ -95,20 +125,43 @@ mod tests {
         assert_eq!(policy.next_deadline(), None);
     }
 
+    /// The point of the change: a pointer that has been still does not wait.
     #[test]
-    fn enabled_policy_queues_motion_and_idle_fallback_keeps_latest() {
+    fn the_first_motion_after_stillness_is_dispatched_at_once() {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
+        assert_eq!(policy.push(1, start), MouseMotionDecision::dispatch(1, false));
+
+        // Within the interval the rate limit still applies, so the rest are held.
         assert_eq!(
             policy.push(2, start + Duration::from_millis(1)),
-            MouseMotionDecision::queued(true)
+            MouseMotionDecision::queued(false)
         );
         assert_eq!(
             policy.push(3, start + Duration::from_millis(2)),
             MouseMotionDecision::queued(true)
         );
+
+        // And once the interval has passed, the newest one goes.
+        assert_eq!(policy.take_due(start + MOUSE_MOTION_INTERVAL), Some(3));
+
+        // Still again for a full interval, so the next movement is immediate once more.
+        assert_eq!(
+            policy.push(4, start + MOUSE_MOTION_INTERVAL * 2),
+            MouseMotionDecision::dispatch(4, false)
+        );
+    }
+
+    #[test]
+    fn motion_within_the_interval_is_held_until_it_is_due() {
+        let start = Instant::now();
+        let mut policy = MouseMotionCoalescer::new(true);
+
+        policy.push(1, start);
+        policy.push(2, start + Duration::from_millis(1));
+        policy.push(3, start + Duration::from_millis(2));
+
         assert_eq!(
             policy.take_due(start + MOUSE_MOTION_INTERVAL - Duration::from_nanos(1)),
             None
@@ -118,28 +171,11 @@ mod tests {
     }
 
     #[test]
-    fn a_new_position_at_the_idle_deadline_replaces_the_pending_position() {
-        let start = Instant::now();
-        let mut policy = MouseMotionCoalescer::new(true);
-
-        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
-        assert_eq!(
-            policy.push(2, start + Duration::from_millis(1)),
-            MouseMotionDecision::queued(true)
-        );
-        assert_eq!(
-            policy.push(3, start + MOUSE_MOTION_INTERVAL),
-            MouseMotionDecision::queued(true)
-        );
-        assert_eq!(policy.take_due(start + MOUSE_MOTION_INTERVAL), Some(3));
-    }
-
-    #[test]
     fn flush_preserves_the_latest_position_before_a_discrete_event() {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
+        policy.push(1, start);
         policy.push(2, start + Duration::from_millis(1));
         policy.push(3, start + Duration::from_millis(2));
 
@@ -152,11 +188,8 @@ mod tests {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start), MouseMotionDecision::queued(false));
-        assert_eq!(
-            policy.push(2, start + Duration::from_millis(1)),
-            MouseMotionDecision::queued(true)
-        );
+        policy.push(1, start);
+        policy.push(2, start + Duration::from_millis(1));
 
         assert_eq!(
             policy.take_for_render(start + Duration::from_millis(2)),

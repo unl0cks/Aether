@@ -173,6 +173,16 @@ impl<'a> PreferencesWriter<'a> {
                     "idle_gpu_upload_eviction",
                     settings.idle_gpu_upload_eviction,
                 ),
+                ("low_vram", settings.low_vram),
+                (
+                    "tooltips_follow_pointer",
+                    settings.tooltips_follow_pointer,
+                ),
+                ("hide_skill_tooltips", settings.hide_skill_tooltips),
+                (
+                    "always_show_aura_tooltips",
+                    settings.always_show_aura_tooltips,
+                ),
                 ("crash_report", settings.crash_report),
             ] {
                 table[key] = value(field);
@@ -406,6 +416,7 @@ mod tests {
     }
 
     #[test]
+    #[test]
     fn set_aether_settings() {
         test(
             "",
@@ -428,11 +439,36 @@ mouse_motion_coalescing = true
 bounded_offscreen_pool = true
 cache_texture_grid = false
 idle_gpu_upload_eviction = true
+low_vram = false
+tooltips_follow_pointer = false
+hide_skill_tooltips = false
+always_show_aura_tooltips = true
 crash_report = true
 quality = \"high\"
 max_fps = 60.0
 ",
         );
+    }
+
+    /// The four settings that were in the options window but in neither the reader nor the
+    /// writer, so they were discarded on exit and came back as their defaults every launch.
+    #[test]
+    fn the_tooltip_and_vram_settings_are_read_back() {
+        let saved = read_preferences(
+            "[aether]
+low_vram = true
+tooltips_follow_pointer = true
+hide_skill_tooltips = true
+always_show_aura_tooltips = false
+",
+        )
+        .result
+        .aether;
+
+        assert!(saved.low_vram);
+        assert!(saved.tooltips_follow_pointer);
+        assert!(saved.hide_skill_tooltips);
+        assert!(!saved.always_show_aura_tooltips);
     }
 
     /// The two settings that can be unset have to survive being unset.
@@ -467,6 +503,10 @@ mouse_motion_coalescing = true
 bounded_offscreen_pool = true
 cache_texture_grid = true
 idle_gpu_upload_eviction = true
+low_vram = false
+tooltips_follow_pointer = false
+hide_skill_tooltips = false
+always_show_aura_tooltips = true
 crash_report = true
 quality = \"high\"
 ",

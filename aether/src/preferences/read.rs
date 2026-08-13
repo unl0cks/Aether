@@ -122,6 +122,16 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
                 "idle_gpu_upload_eviction",
                 &mut settings.idle_gpu_upload_eviction,
             ),
+            ("low_vram", &mut settings.low_vram),
+            (
+                "tooltips_follow_pointer",
+                &mut settings.tooltips_follow_pointer,
+            ),
+            ("hide_skill_tooltips", &mut settings.hide_skill_tooltips),
+            (
+                "always_show_aura_tooltips",
+                &mut settings.always_show_aura_tooltips,
+            ),
             ("crash_report", &mut settings.crash_report),
         ] {
             if let Some(value) = aether.get_bool(cx, key) {

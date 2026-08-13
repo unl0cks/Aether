@@ -63,6 +63,14 @@ pub struct WgpuMetricsSnapshot {
     pub draw_commands: u64,
     pub blend_chunks: u64,
     pub bind_groups: u64,
+    /// Multisample resolves, and the pixels they covered.
+    ///
+    /// A resolve reads every sample of a target and writes one texel per pixel, so its cost is the
+    /// pixel count times the sample count and has nothing to do with what was drawn. Attached to
+    /// every pass it tracked `render_passes`; deferred to the reads that need it, the gap between
+    /// these two counters is the work that stopped happening.
+    pub msaa_resolves: u64,
+    pub msaa_resolve_pixels: u64,
     /// How many times a frame's commands were handed over part-way through. Zero means every frame
     /// reached the driver in one piece, which is the state the device was lost in.
     pub submission_splits: u64,
@@ -324,6 +332,14 @@ static SUBMISSION_SPLITS: AtomicU64 = AtomicU64::new(0);
 static DRAW_COMMANDS: AtomicU64 = AtomicU64::new(0);
 static BLEND_CHUNKS: AtomicU64 = AtomicU64::new(0);
 static BIND_GROUPS: AtomicU64 = AtomicU64::new(0);
+static MSAA_RESOLVES: AtomicU64 = AtomicU64::new(0);
+static MSAA_RESOLVE_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one multisample resolve over `pixels` pixels of a target.
+pub fn record_msaa_resolve(pixels: u64) {
+    saturating_atomic_add(&MSAA_RESOLVES, 1);
+    saturating_atomic_add(&MSAA_RESOLVE_PIXELS, pixels);
+}
 
 /// Record one chunk of encoded work: a render pass, and either the draws it carries or the fact
 /// that it is a blend needing its own target.
@@ -355,6 +371,8 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         cache_entry_nanos: CACHE_ENTRY_NANOS.swap(0, Ordering::Relaxed),
         cache_entries: CACHE_ENTRIES.swap(0, Ordering::Relaxed),
         queue_nanos: QUEUE_NANOS.swap(0, Ordering::Relaxed),
+        msaa_resolves: MSAA_RESOLVES.swap(0, Ordering::Relaxed),
+        msaa_resolve_pixels: MSAA_RESOLVE_PIXELS.swap(0, Ordering::Relaxed),
         render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
         submission_splits: SUBMISSION_SPLITS.swap(0, Ordering::Relaxed),
         complex_blends: std::array::from_fn(|i| COMPLEX_BLENDS[i].swap(0, Ordering::Relaxed)),

@@ -125,6 +125,12 @@ pub struct BitmapCache {
     /// The current contents of the cache, if any. Values are post-filters.
     bitmap: Option<BitmapInfo>,
 
+    /// Whether the last rebuild was confined to the visible part of the object.
+    ///
+    /// A clipped cache holds only what was on screen when it was drawn, so unlike an ordinary one
+    /// it stops being valid when the object moves: a pan brings a different part of it into view.
+    viewport_clipped: bool,
+
     /// Whether we warned that this bitmap was too large to be cached
     warned_for_oversize: bool,
 
@@ -437,6 +443,7 @@ impl BitmapCache {
         source_width: u32,
         source_height: u32,
         stage_matrix: &Matrix,
+        bounds_offset: Point<Twips>,
     ) -> Option<&'static str> {
         if self.bitmap.is_none() {
             Some("missing_bitmap")
@@ -453,6 +460,10 @@ impl BitmapCache {
         } else {
             if self.source_width != source_width || self.source_height != source_height {
                 Some("size_change")
+            } else if self.viewport_clipped && self.bounds_offset != bounds_offset {
+                // Only a clipped cache cares where it is. Translation never invalidates an
+                // ordinary one, and must not start doing so here.
+                Some("clipped_pan")
             } else {
                 None
             }
@@ -480,7 +491,9 @@ impl BitmapCache {
         stage_scale_d: f32,
         swf_version: u8,
         texture_policy: BitmapCacheTexturePolicy,
+        viewport_clipped: bool,
     ) {
+        self.viewport_clipped = viewport_clipped;
         self.matrix_a = matrix.a;
         self.matrix_b = matrix.b;
         self.matrix_c = matrix.c;
@@ -1495,6 +1508,71 @@ struct DrawCacheInfo {
     filters: Vec<Filter>,
 }
 
+/// How far past the viewport a clipped cache still draws, in device pixels.
+///
+/// A margin costs pixels and buys stillness: a cache clipped to exactly the viewport has to be
+/// rebuilt the moment the camera moves a pixel, because a different part of it becomes visible.
+const CACHE_VIEWPORT_MARGIN: f64 = 128.0;
+
+/// How much larger than the viewport a cache must be before it is worth clipping.
+///
+/// Below this the saving does not pay for the rebuild that a camera pan now costs.
+const CACHE_VIEWPORT_CLIP_RATIO: f64 = 2.0;
+
+/// Confine an enormous cache to the part of it that can actually be seen.
+///
+/// A `cacheAsBitmap` object is otherwise rendered offscreen at its full size however little of it
+/// is on screen. Measured on a live session: AQW's map layers cache at up to 6334x2269 device
+/// pixels -- far wider than any window -- and, because their contents animate, they are invalidated
+/// and redrawn in full every frame. That one habit accounted for **352 gigapixels** of offscreen
+/// drawing in nine minutes, 627 megapixels a second.
+///
+/// Only objects several times the viewport are clipped, because clipping trades one cost for
+/// another: the visible region changes when the camera moves, so a clipped cache must be rebuilt on
+/// a pan where an unclipped one need not be. That trade is worth making when the object is mostly
+/// off screen and not otherwise.
+///
+/// Returns `None` when the object is small enough to leave alone.
+fn clip_cache_bounds_to_viewport(
+    bounds: Rectangle<Twips>,
+    viewport_width: u32,
+    viewport_height: u32,
+) -> Option<Rectangle<Twips>> {
+    if !bounds.is_valid() || viewport_width == 0 || viewport_height == 0 {
+        return None;
+    }
+
+    let viewport_area = f64::from(viewport_width) * f64::from(viewport_height);
+    let bounds_area = bounds.width().to_pixels() * bounds.height().to_pixels();
+    if bounds_area <= viewport_area * CACHE_VIEWPORT_CLIP_RATIO {
+        return None;
+    }
+
+    let visible = Rectangle {
+        x_min: Twips::from_pixels(-CACHE_VIEWPORT_MARGIN),
+        y_min: Twips::from_pixels(-CACHE_VIEWPORT_MARGIN),
+        x_max: Twips::from_pixels(f64::from(viewport_width) + CACHE_VIEWPORT_MARGIN),
+        y_max: Twips::from_pixels(f64::from(viewport_height) + CACHE_VIEWPORT_MARGIN),
+    };
+
+    let clipped = Rectangle {
+        x_min: bounds.x_min.max(visible.x_min),
+        y_min: bounds.y_min.max(visible.y_min),
+        x_max: bounds.x_max.min(visible.x_max),
+        y_max: bounds.y_max.min(visible.y_max),
+    };
+
+    // Entirely off screen, or nothing left to draw. The existing viewport cull deals with that
+    // case; shrinking to an empty rectangle here would only confuse it.
+    if clipped.x_max <= clipped.x_min || clipped.y_max <= clipped.y_min {
+        return None;
+    }
+
+    // No saving worth the pan rebuilds it introduces.
+    let clipped_area = clipped.width().to_pixels() * clipped.height().to_pixels();
+    (clipped_area < bounds_area * 0.9).then_some(clipped)
+}
+
 fn bitmap_cache_output_intersects_viewport(
     bounds: Rectangle<Twips>,
     filter_rect: Rectangle<i32>,
@@ -1721,6 +1799,17 @@ pub fn render_base<'gc>(
                 false, // we want to do the filter growth for this object ourselves, to know the offsets
                 &stage_matrix,
             );
+
+            // An object far larger than the window is cached only where it can be seen. See
+            // `clip_cache_bounds_to_viewport`; AQW's map layers are several times the viewport and
+            // are redrawn in full every frame without this.
+            let viewport = context.renderer.viewport_dimensions();
+            let clipped_bounds = (!context.is_offscreen)
+                .then(|| clip_cache_bounds_to_viewport(bounds, viewport.width, viewport.height))
+                .flatten();
+            let viewport_clipped = clipped_bounds.is_some();
+            let bounds = clipped_bounds.unwrap_or(bounds);
+
             let bounds_offset = Point::new(
                 bounds.x_min - base_transform.matrix.tx,
                 bounds.y_min - base_transform.matrix.ty,
@@ -1802,7 +1891,13 @@ pub fn render_base<'gc>(
                         cache.clear();
                         cache_info = None;
                     } else if let Some(invalidation_reason) =
-                        cache.dirty_reason(&base_transform.matrix, width, height, &stage_matrix)
+                        cache.dirty_reason(
+                            &base_transform.matrix,
+                            width,
+                            height,
+                            &stage_matrix,
+                            bounds_offset,
+                        )
                     {
                         let filterless_output_pixels =
                             u64::from(texture_width) * u64::from(texture_height);
@@ -1858,6 +1953,7 @@ pub fn render_base<'gc>(
                                 } else {
                                     BitmapCacheTexturePolicy::Exact
                                 },
+                                viewport_clipped,
                             );
                             #[cfg(feature = "aether_diagnostics")]
                             crate::aether_diagnostics::record_cache_update(
@@ -4614,7 +4710,7 @@ mod avm2_lifecycle_dirty_tests {
 
         // Same transform, larger content.
         assert_eq!(
-            cache.dirty_reason(&matrix, 168, 40, &stage),
+            cache.dirty_reason(&matrix, 168, 40, &stage, cache.bounds_offset),
             Some("size_change"),
             "the full path must rebuild when the content grew"
         );
@@ -5336,6 +5432,57 @@ impl<'gc> DisplayObjectWeak<'gc> {
             DisplayObjectWeak::LoaderDisplay(ld) => ld.upgrade(mc).map(|ld| ld.into()),
             DisplayObjectWeak::Bitmap(b) => b.upgrade(mc).map(|ld| ld.into()),
         }
+    }
+}
+
+#[cfg(test)]
+mod cache_viewport_clip_tests {
+    use super::*;
+
+    fn rect(x: f64, y: f64, w: f64, h: f64) -> Rectangle<Twips> {
+        Rectangle {
+            x_min: Twips::from_pixels(x),
+            y_min: Twips::from_pixels(y),
+            x_max: Twips::from_pixels(x + w),
+            y_max: Twips::from_pixels(y + h),
+        }
+    }
+
+    /// The map layer that made this necessary, measured from a live session.
+    #[test]
+    fn a_map_several_times_the_window_is_cut_down_to_it() {
+        let clipped = clip_cache_bounds_to_viewport(rect(-1900.0, -400.0, 6334.0, 2269.0), 2560, 1440)
+            .expect("a map this size is worth clipping");
+
+        // Never wider than the window plus its margin on each side.
+        assert!(clipped.width().to_pixels() <= 2560.0 + CACHE_VIEWPORT_MARGIN * 2.0);
+        assert!(clipped.height().to_pixels() <= 1440.0 + CACHE_VIEWPORT_MARGIN * 2.0);
+
+        let before = 6334.0 * 2269.0;
+        let after = clipped.width().to_pixels() * clipped.height().to_pixels();
+        assert!(
+            after < before * 0.4,
+            "clipping saved only {:.0}% of {before:.0} pixels",
+            100.0 * (1.0 - after / before)
+        );
+    }
+
+    /// Anything that already fits is left exactly as it was, because clipping would buy nothing
+    /// and would make a camera pan invalidate a cache that is currently untroubled by one.
+    #[test]
+    fn an_object_that_fits_the_window_is_left_alone() {
+        assert!(clip_cache_bounds_to_viewport(rect(0.0, 0.0, 400.0, 300.0), 2560, 1440).is_none());
+        // Large, but not enough of it off screen to pay for the pan rebuilds.
+        assert!(clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2600.0, 1500.0), 2560, 1440).is_none());
+    }
+
+    /// Entirely off screen is the viewport cull's business, not this one's.
+    #[test]
+    fn something_completely_off_screen_is_declined() {
+        assert!(
+            clip_cache_bounds_to_viewport(rect(9000.0, 9000.0, 8000.0, 8000.0), 2560, 1440)
+                .is_none()
+        );
     }
 }
 

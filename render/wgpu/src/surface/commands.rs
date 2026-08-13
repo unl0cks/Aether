@@ -1,7 +1,7 @@
 use crate::backend::RenderTargetMode;
 use crate::blend::TrivialBlend;
 use crate::blend::{BlendType, ComplexBlend};
-use crate::blend_region::{BlendRegion, plan_blend_region, quantise_region};
+use crate::blend_region::{BlendRegion, blend_region_grid, plan_blend_region, quantise_region};
 use crate::buffer_builder::BufferBuilder;
 use crate::buffer_pool::TexturePool;
 use crate::dynamic_transforms::DynamicTransforms;
@@ -822,47 +822,6 @@ pub(crate) fn blend_regions_overlap(
         && by < ay.saturating_add(ah)
 }
 
-/// What a complex blend costs, measured on a crowded AQW map.
-///
-/// Frame time here is render *passes*, not draws: 92.5 us per pass on a 6800 XT, near enough flat
-/// whether the frame is fast or slow. Fitting a second's worth of perf lines over a four minute
-/// session gives
-///
-/// ```text
-///     passes ~= 3.06 * complex_blends + 69        (r = +0.948, n = 260)
-/// ```
-///
-/// so a slow frame is 490 passes over 121 blends and 45.3 ms. The three passes are the sub-target
-/// draw, the composite, and the parent's draw stream splitting in two around them. The blend buffer
-/// copy is a `copy_texture_to_texture` and does not add a pass.
-///
-/// Two modes are effectively all of it: multiply 49.4% and overlay 48.5% of every blend recorded.
-/// That matters because it means consecutive blends usually share a mode, which is what makes them
-/// batchable: a run of same-mode blends whose regions do not overlap can take one blend-buffer
-/// snapshot and one composite pass between them, since none of them reads what the others wrote.
-/// Non-overlapping children could also share one sub-target texture.
-///
-/// The payoff, holding 121 blends and 92.5 us per pass:
-///
-/// ```text
-///     passes/blend   passes   frame     fps
-///        3.06 (now)     440   40.7 ms   ~25
-///        2.00           312   28.8 ms   ~35
-///        1.50           251   23.2 ms   ~43
-/// ```
-///
-/// Halving it roughly doubles the frame rate in exactly the situation players complain about, and
-/// cuts offscreen texture demand by the same factor, which is the other half of the AMD device
-/// loss. The overlap test is the part to get right: composite a blend against a stale snapshot and
-/// it is silently wrong, so verify with the exporter harness in `_evidence/filtercheck`.
-///
-/// Grid that blend and mask sub-target regions snap out to.
-///
-/// The pool keys buckets on exact dimensions, so content that drifts a pixel or two per frame while
-/// it animates mints a fresh bucket every frame -- one census showed 512 distinct sizes, with pairs
-/// like 2209x931 next to 2209x853. 128 keeps the wasted area small (a target is at most 127 px
-/// wider and taller than it needs) while collapsing that spread to a handful of reusable sizes.
-const BLEND_TARGET_SIZE_GRID: u32 = 128;
 
 /// Whether blends and alpha masks render into targets sized to their contents rather than to the
 /// whole surface.
@@ -986,7 +945,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                         self.origin,
                         self.width,
                         self.height,
-                        BLEND_TARGET_SIZE_GRID,
+                        blend_region_grid(region.width, region.height),
                     ),
                     // None of it lands on the surface, so none of it can be seen. Drawing it would
                     // cost a target, a render pass and a composite to produce nothing.
@@ -1277,7 +1236,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                     self.origin,
                     self.width,
                     self.height,
-                    BLEND_TARGET_SIZE_GRID,
+                    blend_region_grid(region.width, region.height),
                 ),
                 // Nothing of the maskee lands on the surface, so nothing of the masked result can.
                 None => return,

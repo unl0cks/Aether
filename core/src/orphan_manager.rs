@@ -4,6 +4,7 @@ use crate::context::UpdateContext;
 use crate::display_object::{
     Avm2LifecycleTraversal, DisplayObject, DisplayObjectWeak, TDisplayObject,
 };
+use fnv::FnvHashSet;
 use gc_arena::{Collect, Mutation};
 use std::rc::Rc;
 
@@ -20,6 +21,18 @@ use std::rc::Rc;
 #[collect(no_drop)]
 pub struct OrphanManager<'gc> {
     orphans: Rc<Vec<DisplayObjectWeak<'gc>>>,
+
+    /// Addresses of everything in `orphans`, so membership is a lookup rather than a walk.
+    ///
+    /// Adding an orphan used to scan the whole list to see whether it was already there, which is
+    /// quadratic in a movie that orphans a lot of objects -- and AQW orphans one for every piece of
+    /// every avatar it loads, continuously. The list is still what gets iterated, because order is
+    /// observable; this only answers "is it in there already".
+    ///
+    /// Keyed by address, exactly as the walk it replaces was. That is sound for the same reason:
+    /// a `GcWeak` keeps its allocation alive, so no two live entries can share an address.
+    #[collect(require_static)]
+    present: FnvHashSet<usize>,
 }
 
 impl<'gc> OrphanManager<'gc> {
@@ -42,11 +55,7 @@ impl<'gc> OrphanManager<'gc> {
 
         // Note: comparing pointers is correct because GcWeak keeps its allocation alive,
         // so the pointers can't overlap by accident.
-        if self
-            .orphans
-            .iter()
-            .all(|d| !std::ptr::eq(d.as_ptr(), dobj.as_ptr()))
-        {
+        if self.present.insert(dobj.as_ptr() as usize) {
             self.orphans_mut().push(dobj.downgrade());
         }
     }
@@ -57,10 +66,12 @@ impl<'gc> OrphanManager<'gc> {
     /// advancing after its loader has released it. Other objects detached by
     /// ActionScript retain Flash's normal orphan behavior.
     pub fn remove_orphan_obj(&mut self, dobj: DisplayObject<'gc>) -> bool {
-        let previous_len = self.orphans.len();
+        if !self.present.remove(&(dobj.as_ptr() as usize)) {
+            return false;
+        }
         self.orphans_mut()
             .retain(|orphan| !std::ptr::eq(orphan.as_ptr(), dobj.as_ptr()));
-        self.orphans.len() != previous_len
+        true
     }
 
     pub fn each_orphan_obj(
@@ -84,42 +95,48 @@ impl<'gc> OrphanManager<'gc> {
     /// that have been garbage collected, or are no longer orphans
     /// (they've since acquired a parent).
     pub fn cleanup_dead_orphans(&mut self, mc: &Mutation<'gc>) {
-        self.orphans_mut().retain(|d| {
-            if let Some(dobj) = valid_orphan(*d, mc) {
-                // All clips that become orphaned (have their parent removed, or start out with no parent)
-                // get added to the orphan list. However, there's a distinction between clips
-                // that are removed from a RemoveObject tag, and clips that are removed from ActionScript.
-                //
-                // Clips removed from a RemoveObject tag only stay on the orphan list until the end
-                // of the frame - this lets them run a framescript (with 'this.parent == null')
-                // before they're removed. After that, they're removed from the orphan list,
-                // and will not be run in any way.
-                //
-                // Clips removed from ActionScript stay on the orphan list, and will be run
-                // indefinitely (if there are no remaining strong references, they will eventually
-                // be garbage collected).
-                //
-                // To detect this, we check 'placed_by_avm2_script'. This flag get set to 'true'
-                // for objects constructed from ActionScript, and for objects moved around
-                // in the timeline (add/remove child, swap depths) by ActionScript. A
-                // RemoveObject tag will only affect objects instantiated by the timeline,
-                // which have not been moved in the displaylist by ActionScript. Therefore,
-                // any orphan we see that has 'placed_by_avm2_script()' should stay on the orphan
-                // list, because it was not removed by a RemoveObject tag.
-                dobj.placed_by_avm2_script()
-            } else {
-                false
+        let present = &mut self.present;
+        Rc::make_mut(&mut self.orphans).retain(|d| {
+            let keep = orphan_survives(*d, mc);
+            if !keep {
+                present.remove(&(d.as_ptr() as usize));
             }
+            keep
         });
     }
+
 }
 
 impl<'gc> Default for OrphanManager<'gc> {
     fn default() -> Self {
         Self {
             orphans: Rc::new(Vec::new()),
+            present: FnvHashSet::default(),
         }
     }
+}
+
+/// Whether an orphan should stay on the list for another frame.
+///
+/// All clips that become orphaned (have their parent removed, or start out with no parent) get
+/// added to the orphan list. However, there's a distinction between clips that are removed from a
+/// RemoveObject tag, and clips that are removed from ActionScript.
+///
+/// Clips removed from a RemoveObject tag only stay on the orphan list until the end of the frame -
+/// this lets them run a framescript (with 'this.parent == null') before they're removed. After
+/// that, they're removed from the orphan list, and will not be run in any way.
+///
+/// Clips removed from ActionScript stay on the orphan list, and will be run indefinitely (if there
+/// are no remaining strong references, they will eventually be garbage collected).
+///
+/// To detect this, we check 'placed_by_avm2_script'. This flag gets set to 'true' for objects
+/// constructed from ActionScript, and for objects moved around in the timeline (add/remove child,
+/// swap depths) by ActionScript. A RemoveObject tag will only affect objects instantiated by the
+/// timeline, which have not been moved in the displaylist by ActionScript. Therefore, any orphan we
+/// see that has 'placed_by_avm2_script()' should stay on the orphan list, because it was not
+/// removed by a RemoveObject tag.
+fn orphan_survives<'gc>(dobj: DisplayObjectWeak<'gc>, mc: &Mutation<'gc>) -> bool {
+    valid_orphan(dobj, mc).is_some_and(|dobj| dobj.placed_by_avm2_script())
 }
 
 /// If the provided `DisplayObjectWeak` should have frames run, returns
@@ -153,6 +170,36 @@ mod tests {
             assert!(manager.remove_orphan_obj(content));
             assert!(manager.orphans.is_empty());
             assert!(!manager.remove_orphan_obj(content));
+        });
+    }
+
+    /// Adding the same object twice still adds it once, now that a set answers the question
+    /// instead of a walk over everything already listed.
+    #[test]
+    fn an_object_is_listed_once_however_often_it_is_offered() {
+        rootless_mutate(|mc| {
+            let movie = Arc::new(SwfMovie::empty(10, None));
+            let content: DisplayObject<'_> = MovieClip::new(movie.clone(), mc).into();
+            let other: DisplayObject<'_> = MovieClip::new(movie, mc).into();
+            let mut manager = OrphanManager::default();
+
+            manager.add_orphan_obj(content);
+            manager.add_orphan_obj(content);
+            manager.add_orphan_obj(content);
+            assert_eq!(manager.orphans.len(), 1);
+            assert_eq!(manager.present.len(), 1);
+
+            manager.add_orphan_obj(other);
+            assert_eq!(manager.orphans.len(), 2);
+
+            // Removing one leaves the other, and the set agrees with the list.
+            assert!(manager.remove_orphan_obj(content));
+            assert_eq!(manager.orphans.len(), 1);
+            assert_eq!(manager.present.len(), 1);
+
+            // And it can be added back, which a stale set entry would prevent.
+            manager.add_orphan_obj(content);
+            assert_eq!(manager.orphans.len(), 2);
         });
     }
 }

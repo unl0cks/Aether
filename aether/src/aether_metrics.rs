@@ -492,6 +492,10 @@ struct WgpuTexturePoolTotals {
     draw_commands: u64,
     blend_chunks: u64,
     bind_groups: u64,
+    /// Multisample resolves and the pixels they covered. A resolve costs the target's pixel count
+    /// regardless of what was drawn, so this is the one encoding counter that is not about volume.
+    msaa_resolves: u64,
+    msaa_resolve_pixels: u64,
     /// How many times a frame was handed to the driver part-way through. Zero means the splitter
     /// never engaged, which is worth being able to tell apart from it engaging and not helping.
     submission_splits: u64,
@@ -523,6 +527,10 @@ impl WgpuTexturePoolTotals {
         self.draw_commands = self.draw_commands.saturating_add(sample.draw_commands);
         self.blend_chunks = self.blend_chunks.saturating_add(sample.blend_chunks);
         self.bind_groups = self.bind_groups.saturating_add(sample.bind_groups);
+        self.msaa_resolves = self.msaa_resolves.saturating_add(sample.msaa_resolves);
+        self.msaa_resolve_pixels = self
+            .msaa_resolve_pixels
+            .saturating_add(sample.msaa_resolve_pixels);
     }
 
     fn take(&mut self) -> Self {
@@ -1093,7 +1101,8 @@ fn perf_summary_line(
     format!(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
          present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries, \
-         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0}          binds {:.0} queue {:.1} ms per frame{}",
+         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0} \
+         resolves {:.0}/{:.1} MPx binds {:.0} queue {:.1} ms per frame{}",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -1112,6 +1121,8 @@ fn perf_summary_line(
         encoding.render_passes as f64 / rendered_frames,
         encoding.draw_commands as f64 / rendered_frames,
         encoding.blend_chunks as f64 / rendered_frames,
+        encoding.msaa_resolves as f64 / rendered_frames,
+        encoding.msaa_resolve_pixels as f64 / 1_000_000.0 / rendered_frames,
         encoding.bind_groups as f64 / rendered_frames,
         encoding.queue_nanos as f64 / 1_000_000.0 / rendered_frames,
         complex_blend_breakdown(&encoding.complex_blends, rendered_frames),
