@@ -1535,6 +1535,7 @@ pub fn draw<'gc>(
         library: context.library,
         transform_stack: &mut transform_stack,
         is_offscreen: true,
+        slice_pass: Default::default(),
         use_bitmap_cache: false,
         filterless_direct_subtree_safe: false,
         stage: context.stage,

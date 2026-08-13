@@ -6,7 +6,7 @@ use crate::avm2::{
     Multiname as Avm2Multiname, Object as Avm2Object, StageObject as Avm2StageObject, TObject as _,
     Value as Avm2Value,
 };
-use crate::context::{RenderContext, UpdateContext};
+use crate::context::{RenderContext, SlicePass, UpdateContext};
 use crate::drawing::Drawing;
 use crate::prelude::*;
 use crate::string::{AvmString, WString};
@@ -1969,6 +1969,7 @@ pub fn render_base<'gc>(
                 library: context.library,
                 transform_stack: &mut transform_stack,
                 is_offscreen: true,
+                slice_pass: Default::default(),
                 use_bitmap_cache: true,
                 filterless_direct_subtree_safe: false,
                 stage: context.stage,
@@ -2170,31 +2171,6 @@ impl SliceAxis {
     }
 }
 
-/// Whether an object is nothing but the art a scaling grid exists to protect.
-///
-/// Counted on the live build with `cargo run -p swf --example scaling_grid_census`: of its 80
-/// scaling grids, 79 sit over a single shape and nothing else. They are panel backgrounds and
-/// Flash's own component skins -- `CellRenderer_upSkin`, `TextInput_upSkin`, `List_skin` -- and
-/// slicing those cannot move anything, because there is nothing in them to move.
-///
-/// The exception is the case that keeps going wrong. Slicing redraws each band under its own
-/// transform, which is right for art that was *drawn* and wrong for anything that was *positioned*:
-/// a caption, a stack count, an icon or a button sitting in a border band gets redrawn at its
-/// authored size anchored to the object's edge, which is to say moved up and to the left of where
-/// it belongs.
-fn slicing_would_only_touch_art(this: DisplayObject<'_>) -> bool {
-    let Some(container) = this.as_container() else {
-        // Not a container at all, so it is its own drawing and nothing else.
-        return true;
-    };
-    container.iter_render_list().all(|child| {
-        matches!(
-            child,
-            DisplayObject::Graphic(_) | DisplayObject::Bitmap(_) | DisplayObject::MorphShape(_)
-        )
-    })
-}
-
 /// Draw an object, in nine pieces if it has a scaling grid and is being scaled.
 ///
 /// `scale9Grid` was read from the file and answered to ActionScript but never reached the renderer,
@@ -2249,7 +2225,6 @@ fn draw_possibly_sliced<'gc, F>(
         if upright
             && resized
             && grown
-            && slicing_would_only_touch_art(this)
             && bounds.is_valid()
             && let Some(horizontal) = SliceAxis::plan(
                 bounds.x_min.to_pixels(),
@@ -2326,13 +2301,25 @@ fn draw_possibly_sliced<'gc, F>(
                         color_transform: Default::default(),
                         perspective_projection: None,
                     });
+                    context.slice_pass = SlicePass::ArtOnly;
                     draw(context);
+                    context.slice_pass = SlicePass::Everything;
                     context.transform_stack.pop();
 
                     context.commands.deactivate_mask();
                     context.commands.draw_rect(Color::WHITE, clip);
                     context.commands.pop_mask();
                 }
+            }
+
+            // Everything that was positioned rather than drawn, once, under the object's ordinary
+            // transform and no cell mask -- which is to say exactly where it would have been had
+            // none of this happened. A caption keeps its place while the border behind it keeps its
+            // thickness, which is the whole point and is what the two passes are for.
+            if this.as_container().is_some() {
+                context.slice_pass = SlicePass::ContentOnly;
+                draw(context);
+                context.slice_pass = SlicePass::Everything;
             }
             return;
         }

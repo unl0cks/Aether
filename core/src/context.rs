@@ -559,6 +559,45 @@ impl Default for ActionQueue<'_> {
 ///
 /// As a convenience, this type can be deref-coerced to `Mutation<'gc>`, but note that explicitly
 /// writing `context.gc()` can be sometimes necessary to satisfy the borrow checker.
+/// Which half of a nine-sliced object is being drawn.
+///
+/// A scaling grid protects an object's border art by drawing it in nine pieces, each under its own
+/// transform. That is right for art, which was *drawn*, and wrong for a caption, a stack count, an
+/// icon or a button, which were *positioned*: one sitting in a border band would be redrawn at its
+/// authored size anchored to the object's edge, and so moved up and to the left.
+///
+/// So the two are drawn separately. The art is sliced; everything else is drawn once, exactly where
+/// it would have been had the object never been sliced at all.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SlicePass {
+    /// Not slicing, or not a container: draw the lot.
+    #[default]
+    Everything,
+    /// Shapes, bitmaps and morphs -- the art the grid exists to protect.
+    ArtOnly,
+    /// Anything that was positioned rather than drawn.
+    ContentOnly,
+}
+
+impl SlicePass {
+    /// Whether a child belongs to this pass.
+    ///
+    /// A child acting as a mask belongs to both. Skipping one would leave whatever it clips to
+    /// render unclipped, which is a far worse fault than the one this is avoiding.
+    pub fn includes(self, child: crate::display_object::DisplayObject<'_>) -> bool {
+        use crate::display_object::{DisplayObject, TDisplayObject};
+
+        if self == SlicePass::Everything || child.clip_depth() > 0 {
+            return true;
+        }
+        let is_art = matches!(
+            child,
+            DisplayObject::Graphic(_) | DisplayObject::Bitmap(_) | DisplayObject::MorphShape(_)
+        );
+        (self == SlicePass::ArtOnly) == is_art
+    }
+}
+
 pub struct RenderContext<'a, 'gc> {
     /// The renderer, used by the display objects to register themselves.
     pub renderer: &'a mut dyn RenderBackend,
@@ -580,6 +619,9 @@ pub struct RenderContext<'a, 'gc> {
 
     /// Whether we're rendering offscreen. This can disable some logic like Ruffle-side render culling
     pub is_offscreen: bool,
+
+    /// Which half of a nine-sliced object is being drawn, if one is.
+    pub slice_pass: SlicePass,
 
     /// Whether to use cacheAsBitmap, vs drawing everything explicitly
     pub use_bitmap_cache: bool,

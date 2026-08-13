@@ -2837,7 +2837,11 @@ impl<'gc> TDisplayObject<'gc> for MovieClip<'gc> {
     }
 
     fn render_self(self, context: &mut RenderContext<'_, 'gc>) {
-        if let Some(drawing) = self.drawing() {
+        // A script-drawn shape is art, so it belongs to the sliced pass rather than the other one.
+        // Read before `render_children`, which takes the pass.
+        if context.slice_pass != crate::context::SlicePass::ContentOnly
+            && let Some(drawing) = self.drawing()
+        {
             drawing.render(context);
         }
         self.render_children(context);

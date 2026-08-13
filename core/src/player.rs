@@ -2345,6 +2345,7 @@ impl Player {
                 library: &gc_root.library,
                 transform_stack: &mut this.transform_stack,
                 is_offscreen: false,
+                slice_pass: Default::default(),
                 use_bitmap_cache: true,
                 filterless_direct_subtree_safe: false,
                 stage,

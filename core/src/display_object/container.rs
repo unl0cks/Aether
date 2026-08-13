@@ -551,9 +551,15 @@ pub trait TDisplayObjectContainer<'gc>:
     /// Renders the children of this container in render list order.
     #[no_dynamic]
     fn render_children(self, context: &mut RenderContext<'_, 'gc>) {
+        // Taken rather than read: the split between art and content applies to this object's own
+        // render list, not to everything beneath it, so each child renders whole.
+        let slice_pass = std::mem::take(&mut context.slice_pass);
         let mut clip_depth = 0;
         let mut clip_depth_stack: Vec<(Depth, DisplayObject<'_>)> = vec![];
         for child in self.iter_render_list() {
+            if !slice_pass.includes(child) {
+                continue;
+            }
             #[cfg(feature = "aether_metrics")]
             crate::aether_metrics::container_child_visited();
 

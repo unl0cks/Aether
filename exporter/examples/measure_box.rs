@@ -14,6 +14,8 @@ use image::GenericImageView;
 enum Part {
     Frame,
     Middle,
+    /// The positioned child: it must not move when the art around it is sliced.
+    Marker,
     Stage,
 }
 
@@ -21,6 +23,8 @@ fn part_of(pixel: [u8; 3]) -> Part {
     let [r, g, b] = pixel;
     if r > 150 && g < 110 && b < 110 {
         Part::Frame
+    } else if g > 150 && r < 110 && b < 110 {
+        Part::Marker
     } else if b > 150 && r < 110 {
         Part::Middle
     } else {
@@ -37,7 +41,7 @@ fn main() {
 
     println!(
         "{:<38} {:>5} {:>5} {:>6} {:>6} {:>8} {:>8} {:>10} {:>9}",
-        "image", "left", "top", "width", "height", "border-l", "border-t", "middle-at", "frame-px"
+        "image", "left", "top", "width", "height", "border-l", "border-t", "middle-at", "marker-at"
     );
 
     for path in paths {
@@ -81,6 +85,7 @@ fn main() {
         // Where the middle actually starts, and how much frame survived. Between them these say
         // whether the contents moved and whether the border art is still being drawn at all.
         let (mut middle_left, mut middle_top) = (u32::MAX, u32::MAX);
+        let (mut marker_left, mut marker_top) = (u32::MAX, u32::MAX);
         let mut frame_pixels = 0usize;
         for y in 0..height {
             for x in 0..width {
@@ -90,13 +95,17 @@ fn main() {
                         middle_top = middle_top.min(y);
                     }
                     Part::Frame => frame_pixels += 1,
+                    Part::Marker => {
+                        marker_left = marker_left.min(x);
+                        marker_top = marker_top.min(y);
+                    }
                     Part::Stage => {}
                 }
             }
         }
 
         println!(
-            "{:<38} {left:>5} {top:>5} {:>6} {:>6} {border_left:>8} {border_top:>8} {:>10} {frame_pixels:>9}",
+            "{:<38} {left:>5} {top:>5} {:>6} {:>6} {border_left:>8} {border_top:>8} {:>10} {:>9}",
             path,
             right - left + 1,
             bottom - top + 1,
@@ -105,6 +114,12 @@ fn main() {
             } else {
                 format!("{middle_left},{middle_top}")
             },
+            if marker_left == u32::MAX {
+                "none".to_string()
+            } else {
+                format!("{marker_left},{marker_top}")
+            },
         );
+        let _ = frame_pixels;
     }
 }
