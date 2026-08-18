@@ -95,18 +95,7 @@ impl Surface {
             backend_sample_count_for_target(quality, width, height, backend_msaa_override()),
             frame_buffer_format,
         );
-        // The sample count is what decides whether a resolve is attached to a pass at all, and it is
-        // reached by two different routes -- `StageQuality`, which AQW changes at runtime, and the
-        // `--msaa` override. Reading it back from the surface itself is the only way to tell which
-        // one won, and a perf capture is not interpretable without it.
         let pipelines = descriptors.pipelines(sample_count, frame_buffer_format);
-        tracing::info!(
-            "Surface {}x{} at quality {} using {}x MSAA",
-            width,
-            height,
-            quality,
-            sample_count,
-        );
         Self {
             size,
             quality,

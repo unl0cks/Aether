@@ -13,7 +13,7 @@ use crate::locale::get_current_date_time;
 use crate::string::{AvmString, WStr};
 use swf::Twips;
 use crate::timer::TimerCallback;
-use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
 
 static TIMELINE_CHILD_REBIND_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -546,6 +546,336 @@ pub(crate) fn repair_aqw_aura_countdown_mask<'gc>(
     }
 
     Ok(repaired)
+}
+
+/// Tint the Focus aura icon red so a taunt can be timed at a glance.
+///
+/// Taunt applies Focus and Reckless together and AQW draws both as the same white skull, so the
+/// only thing separating them is that Focus runs six seconds and Reckless ten. Loop taunting in an
+/// ultra means reading which of two identical icons is the shorter one, mid-fight, every cycle.
+///
+/// Matched on the aura's name rather than the class that cast it, which is what makes one rule
+/// cover Chaos Avenger, King's Echo, Paladin Slayer, DeathKnight Lord, the Naval Commander and
+/// ShadowStalker/ShadowWeaver of Time and Chrono variants, Blood Titan, Dragon Slayer General,
+/// Defender, Legion Paladin, Frostval Barbarian, Legendary Hero, Royal Battlemage and the rest:
+/// they all name the taunt `Focus`.
+///
+/// The name is not in the movie -- auras are server-defined and arrive by name -- so this reads
+/// `auraName` off AQW's own icon holder, measured as class `ib3` on the live build.
+///
+/// Runs off the countdown event, so it re-applies for as long as the aura is up and needs no undo:
+/// the icon is destroyed with the aura.
+pub(crate) fn recolour_aqw_focus_aura_icon<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    event: Avm2Value<'gc>,
+) -> Result<bool, crate::avm2::Error<'gc>> {
+    if !focus_aura_recoloured() {
+        return Ok(false);
+    }
+    let Some(event_object) = event.as_object() else {
+        return Ok(false);
+    };
+    let Some(target) = event_object.as_event().and_then(|event| event.target()) else {
+        return Ok(false);
+    };
+
+    let target_value = Avm2Value::from(target);
+    let aura_name = aqw_aura_icon_name(activation, target_value)?;
+    report_focus_icon_shape(activation, target_value, aura_name);
+    let Some(aura_name) = aura_name else {
+        return Ok(false);
+    };
+    if !aura_name.as_wstr().eq_ignore_case(WStr::from_units(b"Focus")) {
+        return Ok(false);
+    }
+
+    // Tint the icon holder, not a layer inside it.
+    //
+    // Tinting `icon2` -- the only art layer this build exposes -- left the icon its original colour
+    // on screen, so whatever `icon2` is, it is not what gets drawn. The holder is what visibly
+    // works. It takes the square's border and the stack count with it, which is not ideal, and is
+    // far better than an icon that does not mark itself at all.
+    let Some(holder) = target.as_display_object() else {
+        return Ok(false);
+    };
+    holder.set_color_transform(focus_tint());
+
+    Ok(true)
+}
+
+/// The aura's name, from whichever field this build of AQW put it in.
+///
+/// `auraName` is the name the icon carries directly; `aura` is the aura object, whose own name is
+/// `nam`, the field Spider sends. None of the three is a declared trait, so all three are tried
+/// rather than assumed.
+fn aqw_aura_icon_name<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    icon: Avm2Value<'gc>,
+) -> Result<Option<AvmString<'gc>>, crate::avm2::Error<'gc>> {
+    for direct in ["auraName", "nam"] {
+        let value =
+            icon.get_public_property(AvmString::new_utf8(activation.gc(), direct), activation)?;
+        if let Avm2Value::String(name) = value
+            && !name.is_empty()
+        {
+            return Ok(Some(name));
+        }
+    }
+
+    let aura = icon.get_public_property(AvmString::new_utf8(activation.gc(), "aura"), activation)?;
+    if aura.as_object().is_some() {
+        let value =
+            aura.get_public_property(AvmString::new_utf8(activation.gc(), "nam"), activation)?;
+        if let Avm2Value::String(name) = value
+            && !name.is_empty()
+        {
+            return Ok(Some(name));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Note that AQW's aura countdown was intercepted, and with how many arguments.
+///
+/// The hook only takes the countdown event when there is an argument to take, so a countdown
+/// invoked directly rather than as a listener matches and then yields nothing -- indistinguishable,
+/// from the outside, from not matching at all. This separates the two, which is the difference
+/// between the method match being wrong and the hook reading the wrong thing.
+pub(crate) fn note_aqw_aura_countdown_call(applies: bool, argument_count: usize) {
+    if !applies || !focus_aura_recoloured() {
+        return;
+    }
+    const REPORTS: usize = 4;
+    static REPORTED: AtomicUsize = AtomicUsize::new(0);
+    if REPORTED.fetch_add(1, Ordering::Relaxed) >= REPORTS {
+        return;
+    }
+    tracing::info!(
+        "AQW Focus aura recolour: aura countdown intercepted with {argument_count} argument(s)"
+    );
+}
+
+/// Say what the first few countdown targets actually looked like.
+///
+/// Reports whatever happened, including success. An earlier version logged only failures, which
+/// made "the hook never fired" and "the hook fired and found nothing" indistinguishable -- both
+/// were silence, and silence is the one answer that cannot be acted on. The fields being read are
+/// set on a dynamic clip at runtime, so they cannot be confirmed from the movie's class table.
+fn report_focus_icon_shape<'gc>(
+    activation: &mut Avm2Activation<'_, 'gc>,
+    icon: Avm2Value<'gc>,
+    aura_name: Option<AvmString<'gc>>,
+) {
+    /// Enough to see several different auras go past, few enough to not be noise.
+    const REPORTS: usize = 8;
+    static REPORTED: AtomicUsize = AtomicUsize::new(0);
+    if REPORTED.fetch_add(1, Ordering::Relaxed) >= REPORTS {
+        return;
+    }
+
+    let class = icon
+        .as_object()
+        .map(|object| object.instance_class().name().local_name().to_string())
+        .unwrap_or_else(|| "not an object".to_string());
+    let present = ["auraName", "nam", "aura", "icon1", "icon2", "iMask"]
+        .into_iter()
+        .filter(|field| {
+            let name = AvmString::new_utf8(activation.gc(), *field);
+            icon.get_public_property(name, activation)
+                .is_ok_and(|value| !matches!(value, Avm2Value::Undefined | Avm2Value::Null))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let named = match aura_name {
+        Some(name) => name.to_string(),
+        None => "<no name found>".to_string(),
+    };
+    tracing::info!(
+        "AQW Focus aura recolour: countdown target `{class}` carrying [{present}], aura name {named}"
+    );
+}
+
+/// A colour the Focus aura icon can be marked with.
+///
+/// Multiply-only, because that is what a colour transform on existing artwork can do without
+/// flattening it: every channel is either kept or taken down, never added to. So each colour here
+/// is really "which channels survive", and the skull's own light and shade survive with them.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum FocusAuraColour {
+    #[default]
+    Red,
+    Orange,
+    Yellow,
+    Green,
+    Cyan,
+    Blue,
+    Indigo,
+    Pink,
+    Magenta,
+}
+
+impl FocusAuraColour {
+    /// Every colour, in the order they are offered.
+    pub const ALL: [Self; 9] = [
+        Self::Red,
+        Self::Orange,
+        Self::Yellow,
+        Self::Green,
+        Self::Cyan,
+        Self::Blue,
+        Self::Indigo,
+        Self::Pink,
+        Self::Magenta,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Red => "red",
+            Self::Orange => "orange",
+            Self::Yellow => "yellow",
+            Self::Green => "green",
+            Self::Cyan => "cyan",
+            Self::Blue => "blue",
+            Self::Indigo => "indigo",
+            Self::Pink => "pink",
+            Self::Magenta => "magenta",
+        }
+    }
+
+    /// How far each channel is kept, as a multiplier.
+    ///
+    /// `DIM` is the measured setting: far enough down to be unmistakable beside the untinted skull
+    /// next to it, not so far that the artwork turns into a flat silhouette. `MID` is for the
+    /// colours that are a mix rather than a corner of the cube -- orange is red with some green
+    /// left in, indigo is blue with some red.
+    fn multipliers(self) -> (f64, f64, f64) {
+        const DIM: f64 = 0.33;
+        const MID: f64 = 0.66;
+        match self {
+            Self::Red => (1.0, DIM, DIM),
+            Self::Orange => (1.0, MID, DIM),
+            Self::Yellow => (1.0, 1.0, DIM),
+            Self::Green => (DIM, 1.0, DIM),
+            Self::Cyan => (DIM, 1.0, 1.0),
+            Self::Blue => (DIM, DIM, 1.0),
+            Self::Indigo => (MID, DIM, 1.0),
+            Self::Pink => (1.0, MID, 0.85),
+            Self::Magenta => (1.0, DIM, 1.0),
+        }
+    }
+}
+
+impl std::fmt::Display for FocusAuraColour {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+impl std::str::FromStr for FocusAuraColour {
+    type Err = ();
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|colour| colour.name().eq_ignore_ascii_case(text.trim()))
+            .ok_or(())
+    }
+}
+
+static FOCUS_AURA_COLOUR: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_focus_aura_colour(colour: FocusAuraColour) {
+    let index = FocusAuraColour::ALL
+        .iter()
+        .position(|candidate| *candidate == colour)
+        .unwrap_or(0);
+    FOCUS_AURA_COLOUR.store(index as u8, Ordering::Relaxed);
+}
+
+pub fn focus_aura_colour() -> FocusAuraColour {
+    let index = FOCUS_AURA_COLOUR.load(Ordering::Relaxed) as usize;
+    FocusAuraColour::ALL
+        .get(index)
+        .copied()
+        .unwrap_or_default()
+}
+
+/// The chosen colour, as a transform to hang on the icon.
+fn focus_tint() -> swf::ColorTransform {
+    let (r, g, b) = focus_aura_colour().multipliers();
+    swf::ColorTransform {
+        r_multiply: swf::Fixed8::from_f64(r),
+        g_multiply: swf::Fixed8::from_f64(g),
+        b_multiply: swf::Fixed8::from_f64(b),
+        a_multiply: swf::Fixed8::ONE,
+        r_add: 0,
+        g_add: 0,
+        b_add: 0,
+        a_add: 0,
+    }
+}
+
+#[cfg(test)]
+mod focus_aura_colour_tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn every_colour_survives_being_written_and_read_back() {
+        // The saved file stores the name, so a colour that does not round-trip is a setting that
+        // silently resets to red on restart.
+        for colour in FocusAuraColour::ALL {
+            assert_eq!(FocusAuraColour::from_str(colour.name()), Ok(colour));
+            assert_eq!(FocusAuraColour::from_str(&colour.to_string()), Ok(colour));
+        }
+    }
+
+    #[test]
+    fn a_name_is_read_whatever_its_case_or_spacing() {
+        assert_eq!(FocusAuraColour::from_str("  MAGENTA "), Ok(FocusAuraColour::Magenta));
+        assert_eq!(FocusAuraColour::from_str("Indigo"), Ok(FocusAuraColour::Indigo));
+    }
+
+    #[test]
+    fn an_unknown_name_is_refused_rather_than_guessed() {
+        assert!(FocusAuraColour::from_str("puce").is_err());
+        assert!(FocusAuraColour::from_str("").is_err());
+    }
+
+    #[test]
+    fn no_two_colours_tint_the_same_way() {
+        // Nine entries that produced the same transform would be nine identical menu items.
+        let mut seen = Vec::new();
+        for colour in FocusAuraColour::ALL {
+            let multipliers = colour.multipliers();
+            assert!(!seen.contains(&multipliers), "{colour} duplicates another colour");
+            seen.push(multipliers);
+        }
+    }
+
+    #[test]
+    fn a_colour_set_is_the_colour_read_back() {
+        for colour in FocusAuraColour::ALL {
+            set_focus_aura_colour(colour);
+            assert_eq!(focus_aura_colour(), colour);
+        }
+        set_focus_aura_colour(FocusAuraColour::default());
+    }
+}
+
+static FOCUS_AURA_RECOLOURED: AtomicBool = AtomicBool::new(false);
+
+pub fn set_focus_aura_recoloured(recoloured: bool) {
+    // Logged because the alternative failure -- the setting never reaching the core -- looks
+    // exactly like the feature not working, and the two need different fixes.
+    if FOCUS_AURA_RECOLOURED.swap(recoloured, Ordering::Relaxed) != recoloured {
+        tracing::info!("AQW Focus aura recolour is {}", if recoloured { "on" } else { "off" });
+    }
+}
+
+pub fn focus_aura_recoloured() -> bool {
+    FOCUS_AURA_RECOLOURED.load(Ordering::Relaxed)
 }
 
 /// Copy Spider's refresh timestamp into the existing aura entry.

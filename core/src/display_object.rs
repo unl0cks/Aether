@@ -2328,6 +2328,21 @@ fn scaling_grid_art_bounds(this: DisplayObject<'_>) -> Rectangle<Twips> {
     art
 }
 
+/// Whether this draw may use the cell masks required by nine-slice rendering.
+///
+/// A scaled-grid sprite may itself be timeline mask geometry. At that point the command list is
+/// already building an outer mask, and nested mask commands are intentionally suppressed because
+/// Flash does not support nested maskers. The transformed cell draws are not suppressed, so trying
+/// to slice there would add nine full, unclipped copies to the outer stencil and enlarge the mask.
+/// Drawing the mask once with its ordinary transform preserves its authored extent.
+///
+/// This is what left AQW's map panel unclipped: its window is masked by a scaled-grid sprite, so
+/// the mask grew to the size of the whole map and the art spilled over the frame and the tabs.
+#[inline]
+fn nine_slice_is_eligible(sliceable: bool, drawing_mask: bool) -> bool {
+    sliceable && !drawing_mask
+}
+
 /// Draw an object, in nine pieces if it has a scaling grid and is being scaled.
 ///
 /// `scale9Grid` was read from the file and answered to ActionScript but never reached the renderer,
@@ -2354,7 +2369,11 @@ fn draw_possibly_sliced<'gc, F>(
     F: FnMut(&mut RenderContext<'_, 'gc>),
 {
     let grid = this.scaling_grid();
-    if sliceable && grid.is_valid() && grid.width() > Twips::ZERO && grid.height() > Twips::ZERO {
+    if nine_slice_is_eligible(sliceable, context.commands.drawing_mask())
+        && grid.is_valid()
+        && grid.width() > Twips::ZERO
+        && grid.height() > Twips::ZERO
+    {
         // The art's own edges, not the union with whatever is sitting on it. See the function.
         let bounds = scaling_grid_art_bounds(this);
         let matrix = this.base().matrix();
@@ -5488,7 +5507,27 @@ mod cache_viewport_clip_tests {
 
 #[cfg(test)]
 mod nine_slice_tests {
-    use super::SliceAxis;
+    use super::{SliceAxis, nine_slice_is_eligible};
+    use ruffle_render::commands::{CommandHandler, CommandList};
+
+    /// A timeline mask can itself be a scaled-grid sprite. Nine-slicing it would require cell masks
+    /// nested inside the timeline mask while its stencil is being built. Nested mask commands are
+    /// intentionally discarded, so allowing the slice would draw nine transformed, unclipped
+    /// copies into the outer stencil and expose content beyond the authored mask -- which is
+    /// exactly what AQW's map panel did, spilling over its own frame and the tab bar above it.
+    #[test]
+    fn a_scaled_grid_building_mask_geometry_is_not_nine_sliced() {
+        let mut commands = CommandList::new();
+        commands.push_mask();
+
+        assert!(commands.drawing_mask());
+        assert!(!nine_slice_is_eligible(true, commands.drawing_mask()));
+
+        // Once activated, ordinary content inside the mask can still use nine-slice normally.
+        commands.activate_mask();
+        assert!(!commands.drawing_mask());
+        assert!(nine_slice_is_eligible(true, commands.drawing_mask()));
+    }
 
     /// The point of the grid: a border keeps the size it was drawn at, however far the object is
     /// stretched. Only the middle band takes up the difference.

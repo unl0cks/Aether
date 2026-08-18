@@ -6,6 +6,20 @@ use ruffle_core::backend::navigator::SocketMode;
 use ruffle_core::config::Letterbox;
 use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
+use ruffle_core::aether_compatibility::FocusAuraColour;
+
+/// Read a `--focus-aura-colour` value, listing what was allowed when it is not one of them.
+fn parse_focus_aura_colour(text: &str) -> Result<FocusAuraColour, String> {
+    text.parse().map_err(|_| {
+        let names = FocusAuraColour::ALL
+            .iter()
+            .map(|colour| colour.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("expected one of: {names}")
+    })
+}
+
 use ruffle_render::quality::StageQuality;
 use ruffle_render_wgpu::clap::{GraphicsBackend, PowerPreference};
 use std::path::{Path, PathBuf};
@@ -227,6 +241,14 @@ pub struct Opt {
     #[clap(long = "no-always-show-aura-tooltips", conflicts_with = "aether_always_show_aura_tooltips")]
     pub no_aether_always_show_aura_tooltips: bool,
 
+    /// Tint the Focus taunt aura red so a taunt's two identical skulls can be told apart.
+    #[clap(long = "recolour-focus-aura", conflicts_with = "no_aether_recolour_focus_aura")]
+    pub aether_recolour_focus_aura: bool,
+
+    /// Leave the Focus taunt aura the colour AQW draws it.
+    #[clap(long = "no-recolour-focus-aura", conflicts_with = "aether_recolour_focus_aura")]
+    pub no_aether_recolour_focus_aura: bool,
+
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
     /// every frame. Cuts texture creation by roughly 32x.
     #[clap(
@@ -370,6 +392,10 @@ pub struct Opt {
     /// The default is the current directory.
     #[clap(long)]
     pub base: Option<Url>,
+
+    /// Which colour the Focus taunt aura is marked with.
+    #[clap(long = "focus-aura-colour", value_parser = parse_focus_aura_colour)]
+    pub focus_aura_colour: Option<FocusAuraColour>,
 
     /// Default quality of the movie.
     #[clap(long, short)]

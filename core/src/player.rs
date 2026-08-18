@@ -283,6 +283,27 @@ enum RunState {
     Stepping,
 }
 
+/// A count of what the core is holding, taken periodically so growth is visible.
+///
+/// See [`Player::aether_core_census`] for what each number rules in or out.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CoreCensus {
+    /// SWFs whose library is still resident. AQW loads one per armour, hair, cape and weapon that
+    /// walks past, so this is the count that grows if loaded assets are never released.
+    pub movies: usize,
+    /// Characters across every resident library: shapes, bitmaps, fonts and sounds.
+    pub characters: usize,
+    /// Detached display objects still being ticked.
+    pub orphans: usize,
+    /// Bytes the garbage collector is holding, and how many objects that is.
+    ///
+    /// The discriminator the other three cannot supply on their own. Movies and characters
+    /// describe what the *library* holds; this describes what ActionScript holds. A process that
+    /// keeps growing while all of them stay flat is neither, and that points at the renderer.
+    pub gc_bytes: usize,
+    pub gc_objects: usize,
+}
+
 pub struct Player {
     /// The version of the player we're emulating.
     ///
@@ -799,6 +820,34 @@ impl Player {
             let ret = menu.info().clone();
             *context.current_context_menu = Some(menu);
             ret
+        })
+    }
+
+    /// What the core is holding on to, for the memory census.
+    ///
+    /// Reported over time rather than once: a leak is a slope, not a value, and the point of these
+    /// three numbers together is that they fail differently. Movies climbing means loaded assets
+    /// are never released; orphans climbing while movies hold steady means the orphan list is
+    /// keeping detached avatar pieces alive; both flat while the process still grows means the core
+    /// is a bystander and the renderer or the GC arena is not.
+    pub fn aether_core_census(&mut self) -> CoreCensus {
+        self.mutate_with_update_context(|context| {
+            let mut movies = 0usize;
+            let mut characters = 0usize;
+            for movie in context.library.known_movies() {
+                movies += 1;
+                if let Some(library) = context.library.library_for_movie(movie) {
+                    characters += library.characters().len();
+                }
+            }
+            let metrics = context.gc_context.metrics();
+            CoreCensus {
+                movies,
+                characters,
+                orphans: context.orphan_manager.len(),
+                gc_bytes: metrics.total_gc_allocation(),
+                gc_objects: metrics.total_gc_count(),
+            }
         })
     }
 

@@ -142,3 +142,26 @@ mod scheduling_tests {
         assert!(!is_below_normal_priority(0));
     }
 }
+
+/// How much memory the process is actually holding, in bytes.
+///
+/// The private working set is the number Task Manager shows in its Memory column, which is the one
+/// every leak report arrives quoting. Reporting the same number the reporter is looking at is the
+/// point: a census that measured something subtly different would have to be reconciled with their
+/// screenshot before it could be believed.
+pub fn working_set_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+
+    // SAFETY: `counters` is a correctly sized, zeroed `PROCESS_MEMORY_COUNTERS`, and the pseudo
+    // handle from `GetCurrentProcess` is always valid and needs no closing.
+    unsafe {
+        let mut counters = std::mem::zeroed::<PROCESS_MEMORY_COUNTERS>();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, size) == 0 {
+            return None;
+        }
+        Some(counters.WorkingSetSize as u64)
+    }
+}

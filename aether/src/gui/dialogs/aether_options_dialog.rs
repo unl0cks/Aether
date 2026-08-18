@@ -23,8 +23,22 @@ use egui::{
     Align2, Button, Checkbox, ComboBox, Grid, Key, Modifiers, RichText, Ui, Widget, Window,
 };
 use ruffle_core::Player;
+use ruffle_core::aether_compatibility::FocusAuraColour;
 use ruffle_render::quality::StageQuality;
 use unic_langid::LanguageIdentifier;
+
+/// The colours offered for the Focus aura, named for a menu.
+static FOCUS_AURA_COLOUR_CHOICES: [(FocusAuraColour, &str); 9] = [
+    (FocusAuraColour::Red, "Red"),
+    (FocusAuraColour::Orange, "Orange"),
+    (FocusAuraColour::Yellow, "Yellow"),
+    (FocusAuraColour::Green, "Green"),
+    (FocusAuraColour::Cyan, "Cyan"),
+    (FocusAuraColour::Blue, "Blue"),
+    (FocusAuraColour::Indigo, "Indigo"),
+    (FocusAuraColour::Pink, "Pink"),
+    (FocusAuraColour::Magenta, "Magenta"),
+];
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OptionsTab {
@@ -214,6 +228,39 @@ impl AetherOptionsDialog {
             "Show buff and aura tooltips",
             "The tooltip that names a buff or aura when you hover its icon. On, it is kept beside the pointer and on screen whatever else is set, so it survives skill tooltips being hidden. Off, it does not appear at all. AQW has its own switch for these under Class Actives/Auras UI; if that one is off, nothing here can bring them back.",
         );
+        toggle(
+            ui,
+            &mut self.settings.recolour_focus_aura,
+            self.resolved.recolour_focus_aura,
+            "Show Focus (taunt) aura in different color",
+            "Taunt applies Focus and Reckless together and AQW draws both as the same white skull, so the only thing telling them apart is that Focus runs six seconds and Reckless ten. This tints Focus red, so the one you time a loop taunt to is the one you can pick out at a glance. It matches on the aura's name, so it covers every class whose taunt is called Focus. Nothing about the auras themselves changes.",
+        );
+
+        // Gated on what will actually apply rather than on the checkbox, matching the number
+        // grouping rows above: a setting the command line pinned off leaves the colour moot.
+        let marking_on = if self.resolved.recolour_focus_aura.from_command_line {
+            self.resolved.recolour_focus_aura.value
+        } else {
+            self.settings.recolour_focus_aura
+        };
+        ui.add_enabled_ui(marking_on, |ui| {
+            ui.indent("focus-aura-colour", |ui| {
+                Grid::new("aether-options-focus-colour")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Colour");
+                        choice(
+                            ui,
+                            "aether-focus-aura-colour",
+                            &mut self.settings.focus_aura_colour,
+                            self.resolved.focus_aura_colour,
+                            &FOCUS_AURA_COLOUR_CHOICES,
+                            "Which colour the Focus aura is marked with. The icon keeps its own light and shade either way; only the channels it is drawn through change.",
+                        );
+                        ui.end_row();
+                    });
+            });
+        });
     }
 
     fn show_visuals_tab(&mut self, ui: &mut Ui) {
@@ -261,12 +308,13 @@ impl AetherOptionsDialog {
                     self.resolved.max_fps,
                     &[
                         (None, "As the game asks"),
+                        (Some(24.0), "24"),
                         (Some(30.0), "30"),
                         (Some(60.0), "60"),
                         (Some(120.0), "120"),
                         (Some(144.0), "144"),
                     ],
-                    "Overrides the rate the movie asks for, which is why 60 is the default here rather than the 24 AQW requests.",
+                    "Overrides the rate the movie asks for, which is why 60 is the default here rather than the 24 AQW requests. 24 is the rate AQW's animations were drawn at, so it is the one where they play at their intended speed, and it asks for the least work per second.",
                 );
                 ui.end_row();
             });

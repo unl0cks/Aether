@@ -482,6 +482,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             height,
             self.target.format(),
         );
+        report_stage_msaa(&self.surface);
 
         self.viewport_scale_factor = dimensions.scale_factor;
 
@@ -585,6 +586,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             self.surface.size().height,
             self.target.format(),
         );
+        report_stage_msaa(&self.surface);
     }
 
     fn viewport_dimensions(&self) -> ViewportDimensions {
@@ -1819,6 +1821,26 @@ impl ActiveFrame {
         if self.draws_since_flush >= self.max_draws_per_flush {
             self.submit_direct(descriptors);
         }
+    }
+}
+
+/// Note the stage's multisampling, when it changes.
+///
+/// Only the stage matters here, and only on the two paths that replace it -- a resize and a quality
+/// change. `Surface::new` looked like the natural place for this and was not: every offscreen render
+/// builds a surface of its own, at its own size and so at its own sample count, and logging there
+/// alternated between two values several times a frame.
+fn report_stage_msaa(surface: &Surface) {
+    use std::sync::atomic::{AtomicU8, Ordering};
+
+    static LAST: AtomicU8 = AtomicU8::new(u8::MAX);
+    let sample_count = surface.sample_count();
+    let reported = u8::try_from(sample_count).unwrap_or(u8::MAX);
+    if LAST.swap(reported, Ordering::Relaxed) != reported {
+        tracing::info!(
+            "Stage quality {} is using {sample_count}x MSAA",
+            surface.quality()
+        );
     }
 }
 

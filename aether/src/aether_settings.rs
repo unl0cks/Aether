@@ -18,6 +18,7 @@
 
 use crate::cli::Opt;
 use egui::{Key, Modifiers};
+use ruffle_core::aether_compatibility::FocusAuraColour;
 use ruffle_render::quality::StageQuality;
 use std::fmt;
 
@@ -132,12 +133,16 @@ pub struct AetherExplicitFlags {
     pub tooltips_follow_pointer: Explicit,
     pub hide_skill_tooltips: Explicit,
     pub always_show_aura_tooltips: Explicit,
+    pub recolour_focus_aura: Explicit,
     pub cache_texture_grid: Explicit,
     pub idle_gpu_upload_eviction: Explicit,
     pub crash_report: Explicit,
 
     /// `--quality`, which is already a value rather than a pair.
     pub quality: Option<StageQuality>,
+
+    /// `--focus-aura-colour`, a value rather than a pair for the same reason.
+    pub focus_aura_colour: Option<FocusAuraColour>,
     /// `--msaa1x` / `--msaa2x` / `--msaa4x`, read as a sample count.
     pub msaa_samples: Option<Option<u8>>,
     /// `--maxfps`.
@@ -208,6 +213,10 @@ impl AetherExplicitFlags {
                 opt.aether_always_show_aura_tooltips,
                 opt.no_aether_always_show_aura_tooltips,
             ),
+            recolour_focus_aura: pair(
+                opt.aether_recolour_focus_aura,
+                opt.no_aether_recolour_focus_aura,
+            ),
             cache_texture_grid: pair(
                 opt.aether_aqw_cache_texture_grid,
                 opt.no_aether_aqw_cache_texture_grid,
@@ -218,6 +227,7 @@ impl AetherExplicitFlags {
             ),
             crash_report: pair(opt.aether_crash_report, opt.no_aether_crash_report),
             quality: opt.quality,
+            focus_aura_colour: opt.focus_aura_colour,
             // Three switches for one setting, and no switch at all means the saved value decides.
             msaa_samples: match (opt.msaa1x, opt.msaa2x, opt.msaa4x) {
                 (true, _, _) => Some(Some(1)),
@@ -250,11 +260,13 @@ pub struct AetherSettings {
     pub tooltips_follow_pointer: bool,
     pub hide_skill_tooltips: bool,
     pub always_show_aura_tooltips: bool,
+    pub recolour_focus_aura: bool,
     pub cache_texture_grid: bool,
     pub idle_gpu_upload_eviction: bool,
     pub crash_report: bool,
 
     pub quality: StageQuality,
+    pub focus_aura_colour: FocusAuraColour,
 
     /// Backend multisampling, independent of Flash's own StageQuality. `None` leaves the renderer
     /// to pick, which is what it did before this was settable.
@@ -285,11 +297,15 @@ impl Default for AetherSettings {
             // On: this is the tooltip that says what is on you, and turning it off is a
             // deliberate choice rather than a default.
             always_show_aura_tooltips: true,
+            // Off: this changes what the game looks like rather than fixing something, so it is
+            // the player's to turn on.
+            recolour_focus_aura: false,
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
             // These three mirror what the AQW preset picks, same as the toggles above.
             quality: StageQuality::High,
+            focus_aura_colour: FocusAuraColour::Red,
             msaa_samples: None,
             max_fps: Some(60.0),
         }
@@ -346,10 +362,12 @@ pub struct ResolvedAetherSettings {
     pub tooltips_follow_pointer: ResolvedSetting,
     pub hide_skill_tooltips: ResolvedSetting,
     pub always_show_aura_tooltips: ResolvedSetting,
+    pub recolour_focus_aura: ResolvedSetting,
     pub cache_texture_grid: ResolvedSetting,
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
+    pub focus_aura_colour: Resolved<FocusAuraColour>,
     pub msaa_samples: Resolved<Option<u8>>,
     pub max_fps: Resolved<Option<f64>>,
 }
@@ -406,6 +424,10 @@ impl ResolvedAetherSettings {
                 explicit.always_show_aura_tooltips,
                 saved.always_show_aura_tooltips,
             ),
+            recolour_focus_aura: ResolvedSetting::resolve(
+                explicit.recolour_focus_aura,
+                saved.recolour_focus_aura,
+            ),
             cache_texture_grid: ResolvedSetting::resolve(
                 explicit.cache_texture_grid,
                 saved.cache_texture_grid,
@@ -416,6 +438,10 @@ impl ResolvedAetherSettings {
             ),
             crash_report: ResolvedSetting::resolve(explicit.crash_report, saved.crash_report),
             quality: Resolved::resolve(explicit.quality, saved.quality),
+            focus_aura_colour: Resolved::resolve(
+                explicit.focus_aura_colour,
+                saved.focus_aura_colour,
+            ),
             msaa_samples: Resolved::resolve(explicit.msaa_samples, saved.msaa_samples),
             max_fps: Resolved::resolve(explicit.max_fps, saved.max_fps),
         }
@@ -468,6 +494,10 @@ pub fn apply_live_settings(
     ruffle_core::aether_compatibility::set_aura_tooltips_always_shown(
         aqw_mode && settings.always_show_aura_tooltips.value,
     );
+    ruffle_core::aether_compatibility::set_focus_aura_recoloured(
+        aqw_mode && settings.recolour_focus_aura.value,
+    );
+    ruffle_core::aether_compatibility::set_focus_aura_colour(settings.focus_aura_colour.value);
 
     // Hold the stage at the quality that was asked for, rather than the one AQW would rather have.
     //

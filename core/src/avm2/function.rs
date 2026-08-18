@@ -292,6 +292,61 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
     None
 }
 
+/// The name a method is installed under on its class, when the build published none.
+///
+/// The same stripped-name problem the movement classifier hit, and for the same reason: AQW ships
+/// `Game3098r24.swf` with every one of its 5,605 `MethodInfo` names empty, so any hook matching on
+/// `method_name()` compares against `""` and never fires. The aura hooks were written against the
+/// staging build, which keeps its names, so they passed every check and have never once run for a
+/// player.
+///
+/// Only consulted for the classes a hook actually wants, because this is on the path of every AVM2
+/// call and a trait scan per call would not be free.
+#[cfg(feature = "aether_compatibility")]
+fn aether_trait_method_name(method: Method<'_>) -> Option<String> {
+    let class = method.bound_class()?;
+    class.traits_if_loaded()?.iter().find_map(|class_trait| {
+        match class_trait.kind() {
+            TraitKind::Method {
+                method: trait_method,
+                ..
+            } if *trait_method == method => {}
+            _ => return None,
+        }
+        Some(class_trait.name().local_name().to_utf8_lossy().into_owned())
+    })
+}
+
+/// The name to match an AQW hook against: the published one, or the trait it is installed as.
+///
+/// Gated on the classes the hooks actually care about. The published name is empty for *every*
+/// method in the shipped build, so resolving the trait unconditionally would put a trait scan on
+/// the path of every AVM2 call; these classes carry a couple of dozen traits between them and are
+/// touched rarely.
+#[cfg(feature = "aether_compatibility")]
+fn aether_hook_method_name(method: Method<'_>, bound_class_local_name: Option<&str>) -> String {
+    /// Every class an AQW compatibility hook matches a method on.
+    const HOOKED_CLASSES: [&str; 5] = [
+        "playerAuras",
+        "targetAuras",
+        "Avatar",
+        "scGame_1",
+        "SpellW",
+    ];
+
+    let published = method.method_name();
+    if !published.as_ref().is_empty() {
+        return published.as_ref().to_string();
+    }
+    let Some(class) = bound_class_local_name else {
+        return String::new();
+    };
+    if !HOOKED_CLASSES.contains(&class) {
+        return String::new();
+    }
+    aether_trait_method_name(method).unwrap_or_default()
+}
+
 /// Execute a method.
 ///
 /// The function will either be called directly if it is a Rust builtin, or
@@ -332,7 +387,7 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public());
         let applies = crate::aether_compatibility::is_aqw_aura_refresh_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
         );
@@ -356,7 +411,7 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
         let applies = crate::aether_compatibility::is_aqw_aura_insertion_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
             bound_class_has_public_namespace,
@@ -389,11 +444,12 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
         let applies = crate::aether_compatibility::is_aqw_aura_countdown_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
             bound_class_has_public_namespace,
         );
+        crate::aether_compatibility::note_aqw_aura_countdown_call(applies, arguments.len());
         (applies && arguments.len() >= 1).then(|| arguments.get_at(0))
     };
 
@@ -403,6 +459,14 @@ pub fn exec<'gc>(
             crate::aether_compatibility::repair_aqw_aura_countdown_mask(activation, event)
     {
         tracing::warn!(?error, "AQW aura countdown mask repair failed");
+    }
+
+    #[cfg(feature = "aether_compatibility")]
+    if let Some(event) = aether_aura_countdown_event
+        && let Err(error) =
+            crate::aether_compatibility::recolour_aqw_focus_aura_icon(activation, event)
+    {
+        tracing::warn!(?error, "AQW Focus aura recolour failed");
     }
 
     #[cfg(feature = "aether_compatibility")]
@@ -420,7 +484,7 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public());
         crate::aether_compatibility::is_aqw_equipment_initialization_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_is_public,
         )
@@ -441,7 +505,7 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
         crate::aether_compatibility::is_aqw_spellcraft_drag_timer_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_has_public_namespace,
         )
@@ -462,7 +526,7 @@ pub fn exec<'gc>(
             bound_class.is_some_and(|class| class.name().namespace().is_public_ignoring_ns());
         if crate::aether_compatibility::is_aqw_spellcraft_drop_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             bound_class_has_public_namespace,
         ) {
@@ -501,7 +565,7 @@ pub fn exec<'gc>(
         });
         crate::aether_compatibility::is_aqw_valiance_track_target(
             method.owner_movie().url(),
-            method.method_name().as_ref(),
+            aether_hook_method_name(method, bound_class_local_name.as_deref()).as_str(),
             bound_class_local_name.as_deref(),
             receiver_class_local_name.as_deref(),
         )

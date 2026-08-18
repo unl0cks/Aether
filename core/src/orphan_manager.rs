@@ -91,6 +91,16 @@ impl<'gc> OrphanManager<'gc> {
         }
     }
 
+    /// How many orphans are being kept alive and ticked.
+    ///
+    /// AQW orphans a piece for every part of every avatar it loads, so this is the count that grows
+    /// if they are ever kept past their welcome. Reported by the memory census, where a number that
+    /// climbs over hours separates "the orphan list is the leak" from "the orphan list is a
+    /// bystander" without having to guess.
+    pub fn len(&self) -> usize {
+        self.orphans.len()
+    }
+
     /// Called at the end of `run_all_phases_avm2` - removes any movies
     /// that have been garbage collected, or are no longer orphans
     /// (they've since acquired a parent).

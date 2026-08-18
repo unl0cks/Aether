@@ -19,6 +19,7 @@ mod dbus;
 mod gui;
 mod input_latency;
 mod log;
+mod memory_census;
 mod mouse_motion;
 mod player;
 mod preferences;

@@ -44,6 +44,7 @@ struct MainWindow {
     loaded: LoadingState,
     time: Instant,
     next_frame_time: Option<Instant>,
+    memory_census: crate::memory_census::MemoryCensus,
     event_loop_proxy: EventLoopProxy<RuffleEvent>,
     click_latency: crate::input_latency::ClickLatencyProbe,
     #[cfg(feature = "metrics")]
@@ -606,6 +607,12 @@ impl MainWindow {
                 let phases = ruffle_core::aether_metrics::take_tick_snapshot();
                 self.metrics.record_tick(tick_started.elapsed(), phases);
             }
+            // Taken here because this is the one place holding the player between frames. The
+            // census walks the library, so it is kept to once a minute.
+            if self.memory_census.sample_due(new_time) {
+                let core = player.aether_core_census();
+                self.memory_census.record(core);
+            }
             self.next_frame_time = Some(new_time + player.time_til_next_frame());
         } else {
             self.next_frame_time = None;
@@ -803,6 +810,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 modifiers: Modifiers::default(),
                 time: Instant::now(),
                 next_frame_time: None,
+                memory_census: crate::memory_census::MemoryCensus::new(Instant::now()),
                 click_latency: crate::input_latency::ClickLatencyProbe::new(
                     probe_enabled,
                     probe_path.as_deref(),

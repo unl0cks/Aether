@@ -132,11 +132,27 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
                 "always_show_aura_tooltips",
                 &mut settings.always_show_aura_tooltips,
             ),
+            ("recolour_focus_aura", &mut settings.recolour_focus_aura),
             ("crash_report", &mut settings.crash_report),
         ] {
             if let Some(value) = aether.get_bool(cx, key) {
                 *field = value;
             }
+        }
+
+        // The setting used to name the wrong half of the pair: it tinted Reckless, when the one
+        // worth watching is Focus, the shorter of the two. Carrying the old key over means a player
+        // who already turned it on does not silently lose it to the rename -- which is exactly how
+        // the tooltip settings went missing once already. Read only when the new key is absent, so
+        // the new one always wins once it has been written.
+        if aether.get_bool(cx, "recolour_focus_aura").is_none()
+            && let Some(value) = aether.get_bool(cx, "recolour_reckless_aura")
+        {
+            settings.recolour_focus_aura = value;
+        }
+
+        if let Some(value) = aether.parse_from_str(cx, "focus_aura_colour") {
+            settings.focus_aura_colour = value;
         }
 
         if let Some(value) = aether.parse_from_str(cx, "quality") {
