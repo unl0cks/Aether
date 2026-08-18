@@ -165,3 +165,33 @@ pub fn working_set_bytes() -> Option<u64> {
         Some(counters.WorkingSetSize as u64)
     }
 }
+
+/// Bytes the process has committed, which is not the same as what it has resident.
+///
+/// The working set is what Windows currently keeps in physical memory and it can be trimmed
+/// without the process releasing anything. Commit is what the process has actually asked for and
+/// still owns, so a run where commit climbs while the Rust heap holds steady is memory the client
+/// did not allocate -- the graphics driver, or the allocator holding freed pages back.
+#[cfg_attr(not(feature = "metrics"), expect(dead_code))]
+pub fn private_bytes() -> Option<u64> {
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS, PROCESS_MEMORY_COUNTERS_EX,
+    };
+
+    // SAFETY: `counters` is a correctly sized, zeroed `PROCESS_MEMORY_COUNTERS_EX`, and the API
+    // takes the size so it knows the extended layout was passed. The pseudo handle from
+    // `GetCurrentProcess` is always valid and needs no closing.
+    unsafe {
+        let mut counters = std::mem::zeroed::<PROCESS_MEMORY_COUNTERS_EX>();
+        let size = std::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+        if GetProcessMemoryInfo(
+            GetCurrentProcess(),
+            (&raw mut counters).cast::<PROCESS_MEMORY_COUNTERS>(),
+            size,
+        ) == 0
+        {
+            return None;
+        }
+        Some(counters.PrivateUsage as u64)
+    }
+}

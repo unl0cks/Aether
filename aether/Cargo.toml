@@ -5,7 +5,7 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.6.19"
+version = "0.6.31"
 
 [lints]
 workspace = true
@@ -87,7 +87,13 @@ InternalName = "aether_player"
 OriginalFilename = "aether.exe"
 
 [features]
-default = ["software_video", "external_video", "lzma", "fontconfig", "diagnostics"]
+default = ["software_video", "external_video", "lzma", "fontconfig", "diagnostics", "gpu_counters"]
+
+# Atomic counters inside wgpu-hal for live GPU objects and the bytes attributed to them. Cheap
+# enough to ship -- increments on resource create and destroy, read once a minute by the census --
+# and without it the byte totals read back as zero, which is the half that matters when resident
+# movies have gone flat and the process is still taking a gigabyte every ten minutes.
+gpu_counters = ["wgpu/counters"]
 jpegxr = ["ruffle_core/jpegxr"]
 
 # core features

@@ -102,7 +102,7 @@ pub use crate::avm2::object::index_buffer_3d_object::{
     IndexBuffer3DObject, IndexBuffer3DObjectWeak,
 };
 pub use crate::avm2::object::loaderinfo_object::{
-    LoaderInfoObject, LoaderInfoObjectWeak, LoaderStream,
+    LoaderInfoObject, LoaderInfoObjectWeak, LoaderStream, movie_unloads,
 };
 pub use crate::avm2::object::local_connection_object::{
     LocalConnectionObject, LocalConnectionObjectWeak, local_connection_allocator,
@@ -834,6 +834,11 @@ impl<'gc> Object<'gc> {
     /// Unwrap this object as a mutable event.
     pub fn as_event_mut(&self, mc: &Mutation<'gc>) -> Option<RefMut<'_, Event<'gc>>> {
         self.as_event_object().map(|o| o.event_mut(mc))
+    }
+
+    /// Unwrap this object as a list of event handlers.
+    pub fn as_dispatch(&self) -> Option<Ref<'gc, DispatchList<'gc>>> {
+        self.as_dispatch_object().map(|o| o.dispatch())
     }
 
     /// Unwrap this object as a mutable list of event handlers.

@@ -8,6 +8,15 @@
 
 #[cfg(feature = "metrics")]
 mod aether_metrics;
+#[cfg(feature = "metrics")]
+mod heap_census;
+
+/// Counts every Rust allocation, so the census can say whether growth is the client's heap or the
+/// graphics driver's. Metrics builds only -- see [`heap_census`] for why it is not shipped.
+#[cfg(feature = "metrics")]
+#[global_allocator]
+static GLOBAL_ALLOCATOR: heap_census::TrackingAllocator = heap_census::TrackingAllocator;
+
 mod aether_preset;
 mod aether_settings;
 mod app;
@@ -26,6 +35,7 @@ mod preferences;
 mod self_update;
 #[cfg(feature = "tracy")]
 mod tracy;
+mod ui_font;
 mod util;
 #[cfg(windows)]
 mod windows;

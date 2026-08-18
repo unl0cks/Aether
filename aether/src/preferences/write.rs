@@ -185,11 +185,13 @@ impl<'a> PreferencesWriter<'a> {
                 ),
                 ("recolour_focus_aura", settings.recolour_focus_aura),
                 ("crash_report", settings.crash_report),
+                ("ui_font_all_text", settings.ui_font_all_text),
             ] {
                 table[key] = value(field);
             }
             table["quality"] = value(settings.quality.to_string());
             table["focus_aura_colour"] = value(settings.focus_aura_colour.to_string());
+            table["ui_font"] = value(settings.ui_font.to_string());
             match settings.msaa_samples {
                 Some(samples) => table["msaa_samples"] = value(i64::from(samples)),
                 None => table["msaa_samples"] = toml_edit::Item::None,
@@ -447,8 +449,10 @@ hide_skill_tooltips = false
 always_show_aura_tooltips = true
 recolour_focus_aura = false
 crash_report = true
+ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+ui_font = \"default\"
 max_fps = 60.0
 ",
         );
@@ -513,8 +517,10 @@ hide_skill_tooltips = false
 always_show_aura_tooltips = true
 recolour_focus_aura = false
 crash_report = true
+ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+ui_font = \"default\"
 ",
         );
     }

@@ -75,6 +75,11 @@ impl<'gc> EventObject<'gc> {
         bubbles: bool,
         cancelable: bool,
     ) -> EventObject<'gc> {
+        // Counted by type as well as class: `Event` alone was 48% of every AVM2 object built, and
+        // the class name cannot say which dispatch is responsible.
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_object_census::record_event_construction(event_type);
+
         let class = context.avm2.classes().event;
         let base = ScriptObjectData::new(class);
 

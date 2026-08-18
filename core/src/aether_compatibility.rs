@@ -2352,6 +2352,67 @@ pub fn is_aqw_player_text_container(name: &crate::string::WStr) -> bool {
         .any(|container| name == *container)
 }
 
+/// The clips the font override restyles by default, on top of the chat ones above.
+///
+/// `pname` is the plate over a character's head. Players (`AvatarMC`), monsters (`MonsterMC`) and
+/// pets (`PetMC`) all hang their name, guild and type fields inside one, and the game's own font
+/// option scopes to exactly this clip: `Game.applyComicSansPname` restyles `pname.ti`, `pname.tg`
+/// and `pname.typ` and nothing else. Keying on the container rather than the three field names
+/// avoids matching a stray `ti`/`tg` elsewhere, the same way the chat list keys on `nc` rather
+/// than the line fields inside it.
+const NAMEPLATE_CONTAINERS: [&[u8]; 1] = [b"pname"];
+
+/// Whether a clip on the path down to a field puts the field in the font override's default scope:
+/// a chat line, or a name over a character's head.
+///
+/// The two settings the game ships for this land in the same place. Its "Chat UI" option restyles
+/// the chat log, the clips in [`PLAYER_TEXT_CONTAINERS`]; its "Comic Sans Font" option restyles the
+/// nameplates, the clips in [`NAMEPLATE_CONTAINERS`]. Together they are what a player reads during
+/// play, as opposed to the menus, server list and buttons that make up the rest of the interface --
+/// which is why this is the default, and why widening to everything is a separate opt-in.
+pub fn is_aqw_scoped_text_container(name: &crate::string::WStr) -> bool {
+    PLAYER_TEXT_CONTAINERS
+        .iter()
+        .chain(NAMEPLATE_CONTAINERS.iter())
+        .any(|container| name == *container)
+}
+
+/// The line-wrapper classes AQW's chat builds each log line inside.
+///
+/// A chat line is created, has its text set, and only *then* is named (`"bmp"`) and added to the
+/// log -- `Chat` does all three in that order. At the one moment the line lays itself out it is
+/// therefore both unparented and unnamed, and the container-name walk finds nothing to match. The
+/// class is set from birth, though: the wrapper is a `uiTextLine` (`uiTextLine2` in the alternate
+/// interface), so matching on it catches the line at the only layout it gets. Without this a chosen
+/// font reaches the nameplates but not fresh chat, which is the timing the container name alone
+/// cannot see.
+const CHAT_LINE_CLASSES: [&[u8]; 2] = [b"uiTextLine", b"uiTextLine2"];
+
+/// Whether a clip's class name marks it as a chat line wrapper; see [`CHAT_LINE_CLASSES`].
+pub fn is_aqw_scoped_text_class(class_local_name: &crate::string::WStr) -> bool {
+    CHAT_LINE_CLASSES
+        .iter()
+        .any(|class| class_local_name == *class)
+}
+
+/// The chat log clips, minus the speech balloon.
+///
+/// A line in the log is one of a stack, and AQW works out where each one sits when it adds it. Its
+/// own height is therefore not private to it: laying it out again at a different height leaves it
+/// overlapping the lines above and below, because nothing moves them. The balloon is left off this
+/// list because it floats on its own over a character and is positioned from its own size.
+const STACKED_CHAT_CONTAINERS: [&[u8]; 4] = [b"nc", b"ncTextLine", b"textLine", b"bmp"];
+
+/// Whether a clip on the path down to a field means the game decides where the field sits.
+///
+/// Used to leave such a field out of a forced relayout: it will pick the new font up when AQW next
+/// rebuilds the log, which is the only moment the stack's positions are recomputed.
+pub fn is_aqw_game_positioned_container(name: &crate::string::WStr) -> bool {
+    STACKED_CHAT_CONTAINERS
+        .iter()
+        .any(|container| name == *container)
+}
+
 /// Group a plain run of digits for readability, as `1250000` to `1,250,000`.
 ///
 /// Requested by a dyslexic player who could read the digits but not the magnitude: with boss health
@@ -2396,7 +2457,10 @@ pub fn aqw_grouped_html(html: &str) -> Option<String> {
 
 #[cfg(test)]
 mod digit_grouping_tests {
-    use super::{NumberSeparator, group_digits, group_number_runs, is_aqw_player_text_container};
+    use super::{
+        NumberSeparator, group_digits, group_number_runs, is_aqw_player_text_container,
+        is_aqw_scoped_text_class, is_aqw_scoped_text_container,
+    };
 
     #[test]
     fn boss_health_gets_separators_at_every_thousand() {
@@ -2471,6 +2535,46 @@ mod digit_grouping_tests {
     #[test]
     fn the_speech_balloon_is_where_players_write() {
         assert!(player_text(b"bubble"));
+    }
+
+    fn scoped_text(name: &[u8]) -> bool {
+        is_aqw_scoped_text_container(crate::string::WStr::from_units(name))
+    }
+
+    /// The font override's default scope is chat plus the nameplate. `pname` is the plate players,
+    /// monsters and pets all share; the chat clips carry over from the list above so a chosen font
+    /// reaches both halves of what a player reads during play.
+    #[test]
+    fn the_font_scope_is_chat_and_the_nameplate() {
+        assert!(scoped_text(b"pname"));
+        assert!(scoped_text(b"nc"));
+        assert!(scoped_text(b"bubble"));
+    }
+
+    /// The interface chrome stays in the game's own font by default: the readout containers, and a
+    /// near miss on the nameplate name, are all out of scope.
+    #[test]
+    fn the_interface_chrome_is_left_alone_by_default() {
+        assert!(!scoped_text(b"mcGold"));
+        assert!(!scoped_text(b"strIntHP"));
+        assert!(!scoped_text(b"pnames"));
+        assert!(!scoped_text(b"pname_"));
+        assert!(!scoped_text(b""));
+    }
+
+    fn scoped_class(name: &[u8]) -> bool {
+        is_aqw_scoped_text_class(crate::string::WStr::from_units(name))
+    }
+
+    /// A fresh chat line is unnamed and unparented at the moment it lays itself out, so it is caught
+    /// by the wrapper class instead. Both interfaces' wrappers count; a near miss does not.
+    #[test]
+    fn a_chat_line_is_caught_by_its_wrapper_class() {
+        assert!(scoped_class(b"uiTextLine"));
+        assert!(scoped_class(b"uiTextLine2"));
+        assert!(!scoped_class(b"uiTextLine3"));
+        assert!(!scoped_class(b"TextLine"));
+        assert!(!scoped_class(b""));
     }
 
     /// Everything a number lands in. Naming these was the losing side of this problem: each one
@@ -3020,4 +3124,106 @@ mod stage_quality_floor_tests {
         assert_eq!(stage_quality_floor(), Some(4));
         set_stage_quality_floor(None);
     }
+}
+
+/// Whether a chosen font should replace the ones a movie embeds.
+///
+/// AQW embeds the faces it draws its text with, so `resolve_font` finds an embedded match for
+/// chat, nameplates and damage numbers and never reaches device font resolution -- which is where
+/// a user's choice can be applied. The game's own "Comic Sans Font" option works the same way from
+/// the inside, restyling nameplates in ActionScript rather than substituting a face.
+///
+/// Setting this makes text layout skip the embedded lookup so the request falls through to the
+/// system, at the cost of the movie's own glyph metrics: text laid out with a different face
+/// occupies a different width, so lines can wrap and centre slightly differently. That is the
+/// trade the setting is asking for, which is why it only applies when a font has been chosen.
+static UI_FONT_OVERRIDE: AtomicBool = AtomicBool::new(false);
+
+pub fn set_ui_font_override(active: bool) {
+    // Logged for the same reason as the aura recolour: a setting that never reaches the core looks
+    // identical to a feature that does not work.
+    if UI_FONT_OVERRIDE.swap(active, Ordering::Relaxed) != active {
+        tracing::info!(
+            "AQW text font override is {}",
+            if active { "on" } else { "off" }
+        );
+    }
+}
+
+pub fn ui_font_override() -> bool {
+    UI_FONT_OVERRIDE.load(Ordering::Relaxed)
+}
+
+/// The family a chosen font should resolve to, when one is chosen.
+///
+/// Held separately from the flag so the common case -- no override -- costs an atomic load and
+/// never touches the lock.
+static UI_FONT_FAMILY: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
+pub fn set_ui_font_family(family: Option<String>) {
+    let active = family.is_some();
+    if let Ok(mut slot) = UI_FONT_FAMILY.lock() {
+        *slot = family;
+    }
+    set_ui_font_override(active);
+}
+
+/// The chosen family, if any.
+pub fn ui_font_family() -> Option<String> {
+    if !ui_font_override() {
+        return None;
+    }
+    UI_FONT_FAMILY.lock().ok().and_then(|slot| slot.clone())
+}
+
+/// How wide the chosen font reaches.
+///
+/// The default is the narrow one: only the text a player reads during play. Overriding every field
+/// -- the menus, the server list, the buttons -- was the first cut of this feature and it read as a
+/// bug, so it is now the opt-in rather than the default. Which fields are "chat and nameplates" is
+/// decided by [`is_aqw_scoped_text_container`]; this only decides whether that filter is consulted
+/// at all.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum UiFontScope {
+    /// Chat lines and the names over characters' heads, and nothing else.
+    #[default]
+    ChatAndNameplates,
+    /// Every text field the game draws.
+    Everything,
+}
+
+static UI_FONT_SCOPE: AtomicU8 = AtomicU8::new(0);
+
+pub fn set_ui_font_scope(scope: UiFontScope) {
+    UI_FONT_SCOPE.store(
+        match scope {
+            UiFontScope::ChatAndNameplates => 0,
+            UiFontScope::Everything => 1,
+        },
+        Ordering::Relaxed,
+    );
+}
+
+pub fn ui_font_scope() -> UiFontScope {
+    match UI_FONT_SCOPE.load(Ordering::Relaxed) {
+        1 => UiFontScope::Everything,
+        _ => UiFontScope::ChatAndNameplates,
+    }
+}
+
+/// Whether the chosen font should be asked for at bold weight even where the text is not bold.
+///
+/// Some families are drawn far lighter than the faces AQW embeds, and against the game's art the
+/// regular weight reads as thin and washed out rather than as a different font -- Courier New is
+/// the one this was raised for. Asking for the bold cut restores the stroke weight the interface
+/// was drawn around. It only applies where the override applies, so it can never embolden text the
+/// setting is not already replacing.
+static UI_FONT_BOLD: AtomicBool = AtomicBool::new(false);
+
+pub fn set_ui_font_bold(bold: bool) {
+    UI_FONT_BOLD.store(bold, Ordering::Relaxed);
+}
+
+pub fn ui_font_bold() -> bool {
+    UI_FONT_BOLD.load(Ordering::Relaxed)
 }

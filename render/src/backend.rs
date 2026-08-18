@@ -29,6 +29,22 @@ pub struct BitmapCacheEntry {
     pub filters: Vec<Filter>,
 }
 
+/// A count of what the renderer is holding on the GPU.
+///
+/// Object counts and the bytes the driver attributes to them, kept separate because they fail
+/// differently: a count that climbs is a resource never being released, while bytes climbing
+/// against a flat count is the same resources being reallocated larger.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct RenderResourceCensus {
+    pub textures: u64,
+    pub texture_bytes: u64,
+    pub buffers: u64,
+    pub buffer_bytes: u64,
+    /// Real driver allocations. Vulkan caps these per device, so this can exhaust while most of
+    /// the card is still free.
+    pub memory_allocations: u64,
+}
+
 pub trait RenderBackend: Any {
     fn viewport_dimensions(&self) -> ViewportDimensions;
     // Do not call this method directly - use `player.set_viewport_dimensions`,
@@ -110,6 +126,16 @@ pub trait RenderBackend: Any {
     fn debug_info(&self) -> Cow<'static, str>;
     /// An internal name that is used to identify the render-backend.
     fn name(&self) -> &'static str;
+
+    /// Live GPU resources, for backends that can count them.
+    ///
+    /// Sampled once a minute by the memory census rather than per frame, because the case it
+    /// exists for only shows up over time: a session whose resident movies, characters and SWF
+    /// bytes have all gone flat while the process keeps taking a gigabyte every ten minutes. The
+    /// core cannot account for that, so something below it has to be able to answer.
+    fn resource_census(&self) -> Option<RenderResourceCensus> {
+        None
+    }
 
     fn set_quality(&mut self, quality: StageQuality);
 

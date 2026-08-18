@@ -15,6 +15,15 @@
 //! * all of them flat while `rss` still climbs -- neither the library nor the collector is holding
 //!   it, which leaves the renderer.
 //!
+//! It found one: five hours idle in Yulgar took `movies` from 81 to 5,479 without a single release,
+//! and `rss` from 1.2 GB to 31.7 GB with it -- 5.7 MB per SWF, perfectly linear.
+//!
+//! Releasing them turned out not to be available. AQW loads its assets into a shared application
+//! domain, where the definitions outlive the `Loader` by design and by Flash's own semantics, and
+//! dropping them on unload stripped every avatar in the room to a black silhouette. So `distinct
+//! urls` was added to ask the question that is still open: of the SWFs being retained, how many are
+//! second and third copies of a URL already resident, which export nothing and are looked up never.
+//!
 //! Always compiled, not gated behind the metrics build. The people who can reproduce this are
 //! running ordinary releases, and a diagnostic they have to be handed a special binary for is a
 //! diagnostic that does not get run.
@@ -28,6 +37,19 @@ use ruffle_core::CoreCensus;
 /// Long enough that the cost is irrelevant, short enough that an hour of play is still sixty
 /// points of curve.
 const SAMPLE_INTERVAL: Duration = Duration::from_secs(60);
+
+/// Bytes the process has committed, if the platform can say.
+#[cfg(feature = "metrics")]
+fn private_bytes() -> Option<u64> {
+    #[cfg(windows)]
+    {
+        crate::windows::private_bytes()
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
 
 /// Bytes the process is holding, if the platform can say.
 fn resident_bytes() -> Option<u64> {
@@ -81,7 +103,9 @@ impl MemoryCensus {
         let first = *self.first.get_or_insert(sample);
 
         tracing::info!(
-            "memory census: {} | gc {} ({:+}) MB over {} objects | movies {} ({:+}) |              characters {} ({:+}) | orphans {} ({:+})",
+            "memory census: {} | gc {} ({:+}) MB over {} objects | movies {} ({:+}) | \
+             characters {} ({:+}) | orphans {} ({:+}) | unloads {} | distinct urls {} | \
+             swf bytes {} MB ({} MB duplicated)",
             describe_resident(sample.resident, first.resident),
             sample.core.gc_bytes / (1024 * 1024),
             delta(sample.core.gc_bytes, first.core.gc_bytes) / (1024 * 1024),
@@ -92,7 +116,64 @@ impl MemoryCensus {
             delta(sample.core.characters, first.core.characters),
             sample.core.orphans,
             delta(sample.core.orphans, first.core.orphans),
+            sample.core.unloads,
+            sample.core.distinct_urls,
+            sample.core.movie_bytes / (1024 * 1024),
+            sample.core.duplicate_movie_bytes / (1024 * 1024),
         );
+
+        // The line the other two cannot produce between them: what the client's own heap holds,
+        // against what the process has committed. The difference is everything Rust did not
+        // allocate -- driver, GPU staging, and pages the allocator has kept rather than returned.
+        #[cfg(feature = "metrics")]
+        {
+            let mb = |bytes: u64| bytes / (1024 * 1024);
+            let heap = crate::heap_census::live_bytes() as u64;
+            let committed = private_bytes();
+            let outside = committed.map(|committed| committed.saturating_sub(heap));
+            tracing::info!(
+                "heap census: rust heap {} MB live over {} allocations | committed {} | \
+                 outside the rust heap {}",
+                mb(heap),
+                crate::heap_census::total_allocations(),
+                committed.map_or("unavailable".to_string(), |b| format!("{} MB", mb(b))),
+                outside.map_or("unavailable".to_string(), |b| format!("{} MB", mb(b))),
+            );
+        }
+
+        // What the two summary lines above cannot say: which classes and which texture sizes. Both
+        // tables are already maintained; only the totals were ever being printed.
+        #[cfg(feature = "metrics")]
+        {
+            for line in ruffle_core::aether_object_census::object_census_report(20) {
+                tracing::info!("{line}");
+            }
+            for line in ruffle_core::aether_object_census::event_type_census_report(20) {
+                tracing::info!("{line}");
+            }
+            for line in ruffle_render_wgpu::aether_metrics::texture_census_report(20) {
+                tracing::info!("{line}");
+            }
+        }
+
+        if let Some(render) = sample.core.render {
+            let first = first.core.render.unwrap_or_default();
+            let mb = |bytes: u64| bytes / (1024 * 1024);
+            tracing::info!(
+                "gpu census: textures {} ({:+}) holding {} ({:+}) MB | buffers {} ({:+}) holding \
+                 {} ({:+}) MB | driver allocations {} ({:+})",
+                render.textures,
+                delta64(render.textures, first.textures),
+                mb(render.texture_bytes),
+                delta64(mb(render.texture_bytes), mb(first.texture_bytes)),
+                render.buffers,
+                delta64(render.buffers, first.buffers),
+                mb(render.buffer_bytes),
+                delta64(mb(render.buffer_bytes), mb(first.buffer_bytes)),
+                render.memory_allocations,
+                delta64(render.memory_allocations, first.memory_allocations),
+            );
+        }
     }
 }
 
@@ -102,6 +183,11 @@ impl MemoryCensus {
 /// panics in debug and wraps to something enormous in release, which is exactly the sort of number
 /// that gets mistaken for the leak it is meant to be measuring.
 fn delta(current: usize, first: usize) -> i64 {
+    current as i64 - first as i64
+}
+
+/// As [`delta`], for the renderer's counters.
+fn delta64(current: u64, first: u64) -> i64 {
     current as i64 - first as i64
 }
 

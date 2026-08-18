@@ -54,7 +54,7 @@ mod domain;
 mod dynamic_map;
 mod e4x;
 pub mod error;
-mod events;
+pub(crate) mod events;
 mod filters;
 mod flv;
 mod function;

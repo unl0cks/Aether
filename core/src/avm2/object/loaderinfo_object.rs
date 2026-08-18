@@ -14,6 +14,19 @@ use gc_arena::{Collect, Gc, GcWeak, Mutation, lock::RefLock};
 use ruffle_common::utils::HasPrefixField;
 use std::cell::{Cell, Ref};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+/// How many times a movie has been unloaded from a `Loader`.
+///
+/// Reported by the memory census. The eviction that `unload` performs is only as good as how often
+/// it runs, and content is not obliged to run it at all -- a session where this stays at zero means
+/// the release path is never reached, which looks identical in every other number.
+static MOVIE_UNLOADS: AtomicUsize = AtomicUsize::new(0);
+
+/// The running total behind [`MOVIE_UNLOADS`].
+pub fn movie_unloads() -> usize {
+    MOVIE_UNLOADS.load(Ordering::Relaxed)
+}
 
 /// Represents a thing which can be loaded by a loader.
 #[derive(Collect, Clone)]
@@ -264,13 +277,15 @@ impl<'gc> LoaderInfoObject<'gc> {
     }
 
     pub fn unload(self, context: &mut UpdateContext<'gc>) {
+        MOVIE_UNLOADS.fetch_add(1, Ordering::Relaxed);
+
         // Release the unloaded movie's cached GPU uploads.
         //
-        // Its library cannot simply be dropped: an application domain holds a strong
-        // reference to the movie for every script it has ever exported, and those entries
-        // are never removed. Without this, every bitmap in every SWF ever loaded keeps a GPU
-        // texture for the life of the process. AQW loads a separate SWF per equipment piece
-        // per player, which measured 4,396 live textures and ~8.5 GB of GPU memory.
+        // These are dropped separately from the library because they are worth reclaiming even
+        // when the library survives: anything still drawing simply re-uploads from the compressed
+        // source. Without this, every bitmap in every SWF ever loaded kept a GPU texture for the
+        // life of the process. AQW loads a separate SWF per equipment piece per player, which
+        // measured 4,396 live textures and ~8.5 GB of GPU memory.
         let unloaded_movie = self.0.loaded_stream.borrow().movie().clone();
         let released = context
             .library
@@ -281,6 +296,23 @@ impl<'gc> LoaderInfoObject<'gc> {
                 unloaded_movie.url()
             );
         }
+
+        // The movie's exported definitions are deliberately *not* dropped here, and the reason is
+        // worth writing down because the opposite looks obviously right.
+        //
+        // Unloading a Loader does not unexport what it loaded. When a SWF is loaded into a shared
+        // ApplicationDomain -- `ApplicationDomain.currentDomain`, which is what AQW passes -- its
+        // definitions belong to that domain and outlive the Loader entirely. That is the whole
+        // point of loading into a shared domain, and AQW depends on it: it loads an armour SWF
+        // once, discards the Loader, and then instantiates `WarriorBlackMChest` and friends by
+        // name for every player who turns up wearing it. Evicting on unload was tried and it
+        // stripped every avatar in the room down to a black silhouette within a minute -- the
+        // bodies still resolved, every piece of equipment and hair did not.
+        //
+        // Only a SWF loaded into its own child domain can be reclaimed this way, because only then
+        // is the domain itself unreachable. So the accumulation measured in Yulgar is not a
+        // reference-counting bug to be fixed here; it is what shared-domain loading costs, and the
+        // work is in what each retained SWF is holding rather than in whether it is retained.
 
         // Reset properties
         let movie = &context.root_swf;

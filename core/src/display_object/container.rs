@@ -31,10 +31,16 @@ pub fn dispatch_removed_from_stage_event<'gc>(
     context: &mut UpdateContext<'gc>,
 ) {
     if let Some(object) = child.object2() {
-        let removed_evt = Avm2EventObject::bare_default_event(context, "removedFromStage");
-        Avm2::dispatch_event(context, removed_evt, object.into());
+        let event_type = istr!(context, "removedFromStage");
+        // Does not bubble.
+        if crate::avm2::events::has_listener_in_hierarchy(object.into(), event_type, false) {
+            let removed_evt = Avm2EventObject::bare_default_event(context, "removedFromStage");
+            Avm2::dispatch_event(context, removed_evt, object.into());
+        }
     }
 
+    // Outside the guard on purpose. Whether *this* child has a listener says nothing about its
+    // grandchildren, and skipping the walk would stop the event reaching them.
     if let Some(child_container) = child.as_container() {
         for grandchild in child_container.iter_render_list() {
             dispatch_removed_from_stage_event(grandchild, context)
@@ -46,9 +52,14 @@ pub fn dispatch_removed_from_stage_event<'gc>(
 /// whilst doing so.
 pub fn dispatch_removed_event<'gc>(child: DisplayObject<'gc>, context: &mut UpdateContext<'gc>) {
     if let Some(object) = child.object2() {
-        let removed_evt = Avm2EventObject::bare_event(context, "removed", true, false);
-        Avm2::dispatch_event(context, removed_evt, object.into());
+        let event_type = istr!(context, "removed");
+        if crate::avm2::events::has_listener_in_hierarchy(object.into(), event_type, true) {
+            let removed_evt = Avm2EventObject::bare_event(context, "removed", true, false);
+            Avm2::dispatch_event(context, removed_evt, object.into());
+        }
 
+        // Not guarded by the check above: `removedFromStage` is a different event with its own
+        // listeners, and it still has to be dispatched when nobody wanted `removed`.
         if child.is_on_stage(context) {
             dispatch_removed_from_stage_event(child, context)
         }
@@ -61,8 +72,12 @@ pub fn dispatch_added_to_stage_event_only<'gc>(
     context: &mut UpdateContext<'gc>,
 ) {
     if let Some(object) = child.object2() {
-        let added_evt = Avm2EventObject::bare_default_event(context, "addedToStage");
-        Avm2::dispatch_event(context, added_evt, object.into());
+        let event_type = istr!(context, "addedToStage");
+        // Does not bubble.
+        if crate::avm2::events::has_listener_in_hierarchy(object.into(), event_type, false) {
+            let added_evt = Avm2EventObject::bare_default_event(context, "addedToStage");
+            Avm2::dispatch_event(context, added_evt, object.into());
+        }
     }
 }
 
@@ -90,8 +105,11 @@ pub fn dispatch_added_to_stage_event<'gc>(
 /// whilst doing so.
 pub fn dispatch_added_event_only<'gc>(child: DisplayObject<'gc>, context: &mut UpdateContext<'gc>) {
     if let Some(object) = child.object2() {
-        let added_evt = Avm2EventObject::bare_event(context, "added", true, false);
-        Avm2::dispatch_event(context, added_evt, object.into());
+        let event_type = istr!(context, "added");
+        if crate::avm2::events::has_listener_in_hierarchy(object.into(), event_type, true) {
+            let added_evt = Avm2EventObject::bare_event(context, "added", true, false);
+            Avm2::dispatch_event(context, added_evt, object.into());
+        }
     }
 }
 
@@ -302,6 +320,11 @@ pub trait TDisplayObjectContainer<'gc>:
 
         if parent_changed {
             dispatch_added_event(this, child, child_was_on_stage, context);
+            // Now that the child has a place in the tree, text inside it that could not be
+            // identified while it was detached can be resolved. See
+            // `aether_resolve_font_scope_on_attach`.
+            #[cfg(feature = "aether_compatibility")]
+            crate::display_object::edit_text::aether_resolve_font_scope_on_attach(context, child);
         }
 
         this.invalidate_cached_bitmap();

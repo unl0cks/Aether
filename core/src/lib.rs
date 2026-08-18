@@ -56,6 +56,8 @@ pub mod aether_movie;
 pub mod aether_diagnostics;
 #[cfg(feature = "aether_metrics")]
 pub mod aether_metrics;
+#[cfg(feature = "aether_metrics")]
+pub mod aether_object_census;
 #[cfg(feature = "aether_performance")]
 pub mod aether_performance;
 

@@ -357,6 +357,12 @@ impl UiBackend for DesktopUiBackend {
             ..Default::default()
         };
 
+        // The UI font override is applied in the core text layout, per field and only for the ones
+        // it is scoped to (see `EditText::relayout`), so this resolves names faithfully: an in-scope
+        // field asks for the chosen family by name and gets it here, while everything else asks for
+        // its own font and keeps it. Doing the substitution here instead would force every device
+        // font in the game to the chosen family, which is exactly the un-scoped behaviour the
+        // per-field path replaced.
         let mut selected_alias = None;
         let id = self.font_database.query(&exact_query).or_else(|| {
             let (family_name, normal_weight) = aqw_device_font_alias(name)?;

@@ -18,6 +18,7 @@
 
 use crate::cli::Opt;
 use egui::{Key, Modifiers};
+use crate::ui_font::UiFont;
 use ruffle_core::aether_compatibility::FocusAuraColour;
 use ruffle_render::quality::StageQuality;
 use std::fmt;
@@ -137,12 +138,16 @@ pub struct AetherExplicitFlags {
     pub cache_texture_grid: Explicit,
     pub idle_gpu_upload_eviction: Explicit,
     pub crash_report: Explicit,
+    /// Whether the chosen UI font reaches every text field rather than just chat and nameplates.
+    pub ui_font_all_text: Explicit,
 
     /// `--quality`, which is already a value rather than a pair.
     pub quality: Option<StageQuality>,
 
     /// `--focus-aura-colour`, a value rather than a pair for the same reason.
     pub focus_aura_colour: Option<FocusAuraColour>,
+    /// `--ui-font`, likewise.
+    pub ui_font: Option<UiFont>,
     /// `--msaa1x` / `--msaa2x` / `--msaa4x`, read as a sample count.
     pub msaa_samples: Option<Option<u8>>,
     /// `--maxfps`.
@@ -226,8 +231,13 @@ impl AetherExplicitFlags {
                 opt.no_aether_aqw_idle_gpu_upload_eviction,
             ),
             crash_report: pair(opt.aether_crash_report, opt.no_aether_crash_report),
+            ui_font_all_text: pair(
+                opt.aether_ui_font_all_text,
+                opt.no_aether_ui_font_all_text,
+            ),
             quality: opt.quality,
             focus_aura_colour: opt.focus_aura_colour,
+            ui_font: opt.ui_font,
             // Three switches for one setting, and no switch at all means the saved value decides.
             msaa_samples: match (opt.msaa1x, opt.msaa2x, opt.msaa4x) {
                 (true, _, _) => Some(Some(1)),
@@ -264,9 +274,12 @@ pub struct AetherSettings {
     pub cache_texture_grid: bool,
     pub idle_gpu_upload_eviction: bool,
     pub crash_report: bool,
+    /// Whether the chosen UI font reaches every text field, rather than only chat and nameplates.
+    pub ui_font_all_text: bool,
 
     pub quality: StageQuality,
     pub focus_aura_colour: FocusAuraColour,
+    pub ui_font: UiFont,
 
     /// Backend multisampling, independent of Flash's own StageQuality. `None` leaves the renderer
     /// to pick, which is what it did before this was settable.
@@ -303,9 +316,13 @@ impl Default for AetherSettings {
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
+            // Off: the chosen font reaches chat and nameplates by default. Widening it to the menus,
+            // server list and buttons is the deliberate choice, not the other way round.
+            ui_font_all_text: false,
             // These three mirror what the AQW preset picks, same as the toggles above.
             quality: StageQuality::High,
             focus_aura_colour: FocusAuraColour::Red,
+            ui_font: UiFont::Default,
             msaa_samples: None,
             max_fps: Some(60.0),
         }
@@ -366,8 +383,10 @@ pub struct ResolvedAetherSettings {
     pub cache_texture_grid: ResolvedSetting,
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
+    pub ui_font_all_text: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
     pub focus_aura_colour: Resolved<FocusAuraColour>,
+    pub ui_font: Resolved<UiFont>,
     pub msaa_samples: Resolved<Option<u8>>,
     pub max_fps: Resolved<Option<f64>>,
 }
@@ -437,11 +456,16 @@ impl ResolvedAetherSettings {
                 saved.idle_gpu_upload_eviction,
             ),
             crash_report: ResolvedSetting::resolve(explicit.crash_report, saved.crash_report),
+            ui_font_all_text: ResolvedSetting::resolve(
+                explicit.ui_font_all_text,
+                saved.ui_font_all_text,
+            ),
             quality: Resolved::resolve(explicit.quality, saved.quality),
             focus_aura_colour: Resolved::resolve(
                 explicit.focus_aura_colour,
                 saved.focus_aura_colour,
             ),
+            ui_font: Resolved::resolve(explicit.ui_font, saved.ui_font),
             msaa_samples: Resolved::resolve(explicit.msaa_samples, saved.msaa_samples),
             max_fps: Resolved::resolve(explicit.max_fps, saved.max_fps),
         }
@@ -498,6 +522,18 @@ pub fn apply_live_settings(
         aqw_mode && settings.recolour_focus_aura.value,
     );
     ruffle_core::aether_compatibility::set_focus_aura_colour(settings.focus_aura_colour.value);
+    ruffle_core::aether_compatibility::set_ui_font_family(
+        settings.ui_font.value.family().map(str::to_owned),
+    );
+    ruffle_core::aether_compatibility::set_ui_font_bold(settings.ui_font.value.force_bold());
+    // Scope applies whether or not AQW mode is on: outside AQW no field matches the chat and
+    // nameplate containers, so "chat and nameplates" reaches nothing and only "everything" does
+    // anything -- which is the right behaviour for a plain movie a user pointed a font at.
+    ruffle_core::aether_compatibility::set_ui_font_scope(if settings.ui_font_all_text.value {
+        ruffle_core::aether_compatibility::UiFontScope::Everything
+    } else {
+        ruffle_core::aether_compatibility::UiFontScope::ChatAndNameplates
+    });
 
     // Hold the stage at the quality that was asked for, rather than the one AQW would rather have.
     //
@@ -514,6 +550,11 @@ pub fn apply_live_settings(
     // frame rate are read while the renderer and the player are built, and cannot.
     if let Some(player) = player {
         player.set_quality(settings.quality.value);
+        // The font family and scope above are read fresh as each field lays itself out, so text
+        // drawn after this already shows the choice. Text already on screen -- a name that never
+        // changes, a button that only redraws when its counter ticks -- has to be pushed, so lay it
+        // all out again now rather than leaving it until the next reload.
+        player.aether_relayout_text();
     }
 }
 

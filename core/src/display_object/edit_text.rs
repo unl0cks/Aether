@@ -6,7 +6,7 @@ use crate::avm1::{
 };
 use crate::avm2::object::{
     ClassObject as Avm2ClassObject, EventObject as Avm2EventObject, StageObject as Avm2StageObject,
-    StyleSheetObject as Avm2StyleSheetObject,
+    StyleSheetObject as Avm2StyleSheetObject, TObject as _,
 };
 use crate::avm2::{Activation as Avm2Activation, Avm2};
 use crate::backend::ui::MouseCursor;
@@ -196,6 +196,28 @@ pub struct EditTextData<'gc> {
     /// See <https://docs.ruffle.rs/en_US/FlashPlatform/reference/actionscript/3/flash/text/engine/package-detail.html>
     /// See <https://docs.ruffle.rs/en_US/as3/dev/WS9dd7ed846a005b294b857bfa122bd808ea6-8000.html>
     is_fte: Cell<bool>,
+
+    /// Whether the Aether UI font override applies to this field, decided at the last relayout.
+    ///
+    /// The override draws the field with a system face, which makes it a device-font field for the
+    /// duration; `layout_to_local_matrix` keys its aspect correction off `font_type`, and that
+    /// answer has to be the same at render as it was when the glyphs were laid out. Deciding it once
+    /// per relayout -- which is also the only place the field's position in the tree is walked --
+    /// and remembering it here keeps the two in step and keeps the walk off the render path.
+    #[cfg(feature = "aether_compatibility")]
+    aether_font_override: Cell<bool>,
+
+    /// Whether the scope answer above was taken while the field was off the stage, and so could be
+    /// wrong.
+    ///
+    /// AQW's current chat builds a line as a bare `TextField` inside a plain `MovieClip`, sets its
+    /// text, and only then adds the wrapper to the log. The layout that decides the font therefore
+    /// happens when the field has no name, no meaningful class and no path to the stage -- nothing
+    /// the scope walk can match, so chat came out unchanged unless the scope was widened to
+    /// everything. Marking it here lets the answer be taken again the moment it is attached, which
+    /// is the first time where it will hang can be asked at all.
+    #[cfg(feature = "aether_compatibility")]
+    aether_scope_unresolved: Cell<bool>,
 }
 
 impl EditTextData<'_> {
@@ -215,6 +237,18 @@ impl EditTextData<'_> {
     }
 
     fn font_type(&self) -> FontType {
+        // A field the font override applies to is a device-font field for the duration, because
+        // that is what it now draws with. The flag alone describes what the SWF asked for, and
+        // `layout_to_local_matrix` keys its aspect-ratio correction off this: a field still calling
+        // itself embedded while holding a substituted system face skips that correction and lays
+        // its glyphs out against metrics they do not have, which drew AQW's server list as
+        // unreadable fragments. The decision is per-field and taken at relayout; see
+        // `aether_font_override`.
+        #[cfg(feature = "aether_compatibility")]
+        if self.aether_font_override.get() {
+            return FontType::Device;
+        }
+
         if !self.flags.get().contains(EditTextFlag::USE_OUTLINES) {
             FontType::Device
         } else if self.is_fte.get() {
@@ -345,6 +379,10 @@ impl<'gc> EditText<'gc> {
                 max_chars: Cell::new(swf_tag.max_length().unwrap_or_default() as i32),
                 mouse_wheel_enabled: Cell::new(true),
                 is_fte: Cell::new(false),
+                #[cfg(feature = "aether_compatibility")]
+                aether_font_override: Cell::new(false),
+                #[cfg(feature = "aether_compatibility")]
+                aether_scope_unresolved: Cell::new(false),
                 restrict: RefCell::new(EditTextRestrict::allow_all()),
                 last_click: Cell::new(None),
                 layout_debug_boxes_flags: Cell::new(LayoutDebugBoxesFlag::empty()),
@@ -867,6 +905,105 @@ impl<'gc> EditText<'gc> {
         self.try_bind_text_field_variable(activation, true);
     }
 
+    /// The system font family this field should be drawn with in place of what it asked for, or
+    /// `None` to resolve normally.
+    ///
+    /// `None` unless a font has been chosen (`ui_font_family`) and the field is in that font's
+    /// scope. The scope is the whole point of the feature: the default reaches only the text a
+    /// player reads during play -- chat and the names over characters' heads -- and leaving the
+    /// menus, server list and buttons in the game's own font is what tells this apart from the
+    /// blunt "restyle everything" that read as a bug. Widening to everything is the opt-in.
+    #[cfg(feature = "aether_compatibility")]
+    fn aether_font_override_family(self) -> Option<String> {
+        let family = crate::aether_compatibility::ui_font_family()?;
+        let applies = match crate::aether_compatibility::ui_font_scope() {
+            crate::aether_compatibility::UiFontScope::Everything => true,
+            crate::aether_compatibility::UiFontScope::ChatAndNameplates => {
+                self.aether_is_in_font_scope()
+            }
+        };
+        applies.then_some(family)
+    }
+
+    /// This field's own box, for putting back after a relayout that must not move it.
+    #[cfg(feature = "aether_compatibility")]
+    pub fn aether_bounds(self) -> Rectangle<Twips> {
+        self.0.bounds.get()
+    }
+
+    /// Put a saved box back, discarding the one the relayout just measured.
+    #[cfg(feature = "aether_compatibility")]
+    pub fn aether_restore_bounds(self, bounds: Rectangle<Twips>) {
+        self.0.autosize_lazy_bounds.set(None);
+        self.0.bounds.set(bounds);
+        self.invalidate_cached_bitmap();
+    }
+
+    /// Whether AQW, rather than this field, decides where the field sits.
+    ///
+    /// True for a line in the chat log, which is one of a stack the game positions as it adds each
+    /// one. Laying such a field out again changes its height without moving its neighbours, so the
+    /// lines end up overlapping -- which is what a forced relayout did to the chat. Left alone, the
+    /// line keeps the font it was built with until AQW rebuilds the log, and every line added after
+    /// the setting changed is built with the new one.
+    #[cfg(feature = "aether_compatibility")]
+    pub fn aether_layout_is_game_positioned(self) -> bool {
+        const MAX_ANCESTRY: usize = 32;
+
+        let mut ancestor = self.parent();
+        let mut depth = 0;
+        while let Some(clip) = ancestor {
+            if let Some(name) = clip.name()
+                && crate::aether_compatibility::is_aqw_game_positioned_container(&name)
+            {
+                return true;
+            }
+            depth += 1;
+            if depth == MAX_ANCESTRY {
+                break;
+            }
+            ancestor = clip.parent();
+        }
+        false
+    }
+
+    /// Whether a clip on the path down to this field puts it in the default font scope.
+    ///
+    /// The same bounded ancestor walk the number grouping uses to find chat lines: chat and
+    /// nameplate fields both hang inside a container (`nc`, `pname`, ...) rather than carrying any
+    /// property that marks them, so the container is what identifies them. A container is matched by
+    /// instance name where it has one, and by class name where it does not -- a fresh chat line is
+    /// unnamed at the one moment it lays itself out, but its wrapper class is set from birth. See
+    /// `is_aqw_scoped_text_container` and `is_aqw_scoped_text_class`. Bounded so a display list that
+    /// is somehow cyclic or absurdly deep costs a fixed amount rather than the frame.
+    #[cfg(feature = "aether_compatibility")]
+    fn aether_is_in_font_scope(self) -> bool {
+        const MAX_ANCESTRY: usize = 32;
+
+        let mut ancestor = self.parent();
+        let mut depth = 0;
+        while let Some(clip) = ancestor {
+            if let Some(name) = clip.name()
+                && crate::aether_compatibility::is_aqw_scoped_text_container(&name)
+            {
+                return true;
+            }
+            if let Some(object) = clip.object2()
+                && crate::aether_compatibility::is_aqw_scoped_text_class(
+                    object.instance_class().name().local_name().as_wstr(),
+                )
+            {
+                return true;
+            }
+            depth += 1;
+            if depth == MAX_ANCESTRY {
+                break;
+            }
+            ancestor = clip.parent();
+        }
+        false
+    }
+
     /// Relayout the `EditText`.
     ///
     /// This function operates exclusively with the text-span representation of
@@ -878,6 +1015,25 @@ impl<'gc> EditText<'gc> {
         let is_word_wrap = self.0.flags.get().contains(EditTextFlag::WORD_WRAP);
         let movie = self.0.shared.swf.clone();
         let padding = Self::GUTTER * 2;
+
+        // Settle whether the chosen UI font applies to this field before anything reads `font_type`
+        // for it: the width maths below and the layout itself both key off that answer, so it has to
+        // be decided and stored first. See `aether_font_override_family`.
+        #[cfg(feature = "aether_compatibility")]
+        let font_override_family = {
+            let family = self.aether_font_override_family();
+            self.0.aether_font_override.set(family.is_some());
+            // A field that is not on the stage has no path to walk, so a "no" here is provisional.
+            // See `aether_scope_unresolved`; the answer is taken again when it is attached.
+            self.0.aether_scope_unresolved.set(
+                family.is_none()
+                    && crate::aether_compatibility::ui_font_family().is_some()
+                    && !self.is_on_stage(context),
+            );
+            family
+        };
+        #[cfg(not(feature = "aether_compatibility"))]
+        let font_override_family: Option<String> = None;
 
         let mut text_spans = self.0.text_spans.borrow_mut();
         if self.0.flags.get().contains(EditTextFlag::PASSWORD) {
@@ -903,6 +1059,7 @@ impl<'gc> EditText<'gc> {
             !self.0.flags.get().contains(EditTextFlag::READ_ONLY),
             is_word_wrap,
             self.0.font_type(),
+            font_override_family,
         );
         drop(text_spans);
 
@@ -3842,4 +3999,49 @@ struct EditTextRenderState {
     /// Used for delaying rendering the caret, so that it's
     /// rendered outside of the text mask.
     draw_caret_command: Option<RenderCommand>,
+}
+
+/// Take the font scope answer again for text in a subtree that has just been attached.
+///
+/// AQW's current chat sets a line's text before the line is added to the log, so at the only layout
+/// the field gets there is no name, class or path to identify it by and the chosen font is not
+/// applied. This runs at the moment of attachment, which is the first point where the field's place
+/// in the tree can be asked, and lays out again only the fields that were marked provisional; see
+/// `EditTextData::aether_scope_unresolved`.
+///
+/// Free of charge until a font is chosen, and bounded in depth because the wrappers that hide these
+/// fields are one or two clips deep, not arbitrarily nested.
+#[cfg(feature = "aether_compatibility")]
+pub(crate) fn aether_resolve_font_scope_on_attach<'gc>(
+    context: &mut UpdateContext<'gc>,
+    object: DisplayObject<'gc>,
+) {
+    if crate::aether_compatibility::ui_font_family().is_none() {
+        return;
+    }
+    aether_resolve_font_scope_subtree(context, object, 0);
+}
+
+#[cfg(feature = "aether_compatibility")]
+fn aether_resolve_font_scope_subtree<'gc>(
+    context: &mut UpdateContext<'gc>,
+    object: DisplayObject<'gc>,
+    depth: usize,
+) {
+    const MAX_DEPTH: usize = 8;
+
+    if let Some(edit_text) = object.as_edit_text()
+        && edit_text.0.aether_scope_unresolved.get()
+    {
+        edit_text.relayout(context);
+    }
+
+    if depth == MAX_DEPTH {
+        return;
+    }
+    if let Some(container) = object.as_container() {
+        for child in container.iter_render_list() {
+            aether_resolve_font_scope_subtree(context, child, depth + 1);
+        }
+    }
 }

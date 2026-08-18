@@ -134,6 +134,7 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
             ),
             ("recolour_focus_aura", &mut settings.recolour_focus_aura),
             ("crash_report", &mut settings.crash_report),
+            ("ui_font_all_text", &mut settings.ui_font_all_text),
         ] {
             if let Some(value) = aether.get_bool(cx, key) {
                 *field = value;
@@ -151,6 +152,9 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
             settings.recolour_focus_aura = value;
         }
 
+        if let Some(value) = aether.parse_from_str(cx, "ui_font") {
+            settings.ui_font = value;
+        }
         if let Some(value) = aether.parse_from_str(cx, "focus_aura_colour") {
             settings.focus_aura_colour = value;
         }

@@ -31,6 +31,16 @@ pub struct LayoutContext<'a, 'gc> {
     /// Type of the font used by the text field.
     font_type: FontType,
 
+    /// A system font family to draw this field with in place of what it asked for, or `None` to
+    /// resolve normally.
+    ///
+    /// Set by the Aether "Text / Font" option, and only for the fields it is scoped to -- the
+    /// caller ([`EditText::relayout`]) decides scope and passes the family in, so this stays a
+    /// property of one field rather than a global switch every field reads. When it is `Some`, the
+    /// embedded lookup below is skipped and the requested names, Flash's `_sans` aliases included,
+    /// give way to this family.
+    font_override_family: Option<String>,
+
     /// The position to put text into.
     ///
     /// We are laying out boxes so that the cursor is at their baseline.
@@ -109,12 +119,14 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         is_input: bool,
         is_word_wrap: bool,
         font_type: FontType,
+        font_override_family: Option<String>,
     ) -> Self {
         Self {
             movie,
             cursor: Default::default(),
             font_set: None,
             text,
+            font_override_family,
             max_font_size: Default::default(),
             max_ascent: Default::default(),
             max_descent: Default::default(),
@@ -539,9 +551,18 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
         let font_name = span.font.face.to_utf8_lossy();
 
+        // A chosen UI font replaces what this field asked for, and only for the fields it is scoped
+        // to: `EditText::relayout` decides scope and hands the family in through `font_override_family`
+        // (see `aether_compatibility::is_aqw_scoped_text_container`), so this stays per-field rather
+        // than a global switch. When it is set the embedded lookup is skipped -- AQW embeds the very
+        // faces it draws chat and nameplates with, so this branch would otherwise always match and
+        // the substitution would never be reached.
+        let override_family = self.font_override_family.as_deref();
+
         // Note that the SWF can still contain a DefineFont tag with no glyphs/layout info in this case (see #451).
         // In an ideal world, device fonts would search for a matching font on the system and render it in some way.
-        if self.font_type.is_embedded()
+        if override_family.is_none()
+            && self.font_type.is_embedded()
             && let Some(font) = context
                 .library
                 .get_embedded_font_by_name(
@@ -560,8 +581,25 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         // then a bunch of SWFs would just show no text suddenly.
         // return new_empty_font(context, span, self.font_type);
 
+        // A chosen font replaces the requested names outright, including Flash's `_sans`, `_serif`
+        // and `_typewriter` aliases. Those resolve through `default_font` rather than by name, on a
+        // path that never asks the backend for a family -- which is why AQW's chat kept its own face
+        // while nameplates changed, and why the game needs a separate Chat UI setting to restyle it
+        // from the inside.
+        //
         // Specifying multiple font names is supported only for device fonts.
-        let font_names: Vec<&str> = font_name.split(",").collect();
+        let font_names: Vec<&str> = match override_family {
+            Some(family) => vec![family],
+            None => font_name.split(",").collect(),
+        };
+
+        // A chosen font may ask for its bold cut throughout; see `aether_compatibility::ui_font_bold`.
+        // Only where the override applies, so text the setting is not replacing keeps its own weight.
+        #[cfg(feature = "aether_compatibility")]
+        let is_bold =
+            span.style.bold || (override_family.is_some() && crate::aether_compatibility::ui_font_bold());
+        #[cfg(not(feature = "aether_compatibility"))]
+        let is_bold = span.style.bold;
         for font_name in &font_names {
             let font_name = font_name.trim();
 
@@ -569,7 +607,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
             if let Some(default_font) = DefaultFont::from_name(font_name) {
                 let fonts = context.library.default_font(
                     default_font,
-                    span.style.bold,
+                    is_bold,
                     span.style.italic,
                     context.ui,
                     context.renderer,
@@ -588,7 +626,7 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
 
             let fonts = context.library.get_or_sort_device_fonts(
                 font_name,
-                span.style.bold,
+                is_bold,
                 span.style.italic,
                 context.ui,
                 context.renderer,
@@ -811,6 +849,7 @@ pub fn lower_from_text_spans<'gc>(
     is_input: bool,
     is_word_wrap: bool,
     font_type: FontType,
+    font_override_family: Option<String>,
 ) -> Layout<'gc> {
     let requested_width = requested_width.unwrap_or_else(|| {
         // When we don't know the width of the text field, we have to lay out
@@ -824,6 +863,7 @@ pub fn lower_from_text_spans<'gc>(
             is_input,
             false,
             font_type,
+            font_override_family.clone(),
         );
         let max_width = layout
             .lines()
@@ -840,6 +880,7 @@ pub fn lower_from_text_spans<'gc>(
         is_input,
         is_word_wrap,
         font_type,
+        font_override_family,
     )
 }
 
@@ -851,6 +892,7 @@ fn lower_from_text_spans_known_width<'gc>(
     is_input: bool,
     is_word_wrap: bool,
     font_type: FontType,
+    font_override_family: Option<String>,
 ) -> Layout<'gc> {
     let mut layout_context = LayoutContext::new(
         movie,
@@ -859,6 +901,7 @@ fn lower_from_text_spans_known_width<'gc>(
         is_input,
         is_word_wrap,
         font_type,
+        font_override_family,
     );
 
     layout_context.lay_out_spans(context, fs);

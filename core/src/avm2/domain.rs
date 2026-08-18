@@ -399,6 +399,7 @@ impl<'gc> Domain<'gc> {
         Ref::map(self.cell(), |this| &this.defs)
     }
 
+
     pub fn is_default_domain_memory(&self) -> bool {
         let domain_memory_ptr = self.domain_memory().as_ptr();
         let default_domain_memory_ptr = self

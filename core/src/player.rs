@@ -302,6 +302,28 @@ pub struct CoreCensus {
     /// keeps growing while all of them stay flat is neither, and that points at the renderer.
     pub gc_bytes: usize,
     pub gc_objects: usize,
+    /// How many times a movie has been unloaded from a `Loader`.
+    pub unloads: usize,
+    /// What the renderer is holding on the GPU, if the backend can say.
+    pub render: Option<ruffle_render::backend::RenderResourceCensus>,
+    /// Uncompressed SWF bytes held across every resident movie, and how many of those bytes are
+    /// second or later copies of a URL already resident.
+    ///
+    /// `SwfMovie` keeps the whole decompressed file for its lifetime, so two loads of one URL hold
+    /// two identical buffers. This splits the per-SWF cost into the part that can be reclaimed by
+    /// sharing a byte buffer -- no change to how characters are registered -- and the part that
+    /// needs the library itself to be shared, which is far more invasive. The ratio decides which
+    /// is worth doing.
+    pub movie_bytes: usize,
+    pub duplicate_movie_bytes: usize,
+    /// How many of the resident movies are distinct URLs.
+    ///
+    /// Retaining a shared-domain SWF is correct and cannot be undone, so the question is not
+    /// whether these accumulate but whether they are worth keeping. Every load past the first for
+    /// a given URL exports nothing -- `export_definition` keeps the definition it already has --
+    /// so a second copy is a fully parsed SWF, library and ABC that nothing will ever look up. The
+    /// gap between this and `movies` is exactly how much of the total is that kind of waste.
+    pub distinct_urls: usize,
 }
 
 pub struct Player {
@@ -834,8 +856,17 @@ impl Player {
         self.mutate_with_update_context(|context| {
             let mut movies = 0usize;
             let mut characters = 0usize;
+            let mut urls = std::collections::HashSet::new();
+            let mut movie_bytes = 0usize;
+            let mut duplicate_movie_bytes = 0usize;
             for movie in context.library.known_movies() {
                 movies += 1;
+                let bytes = movie.data().len();
+                movie_bytes += bytes;
+                // Every copy past the first is a buffer that a shared one would have replaced.
+                if !urls.insert(movie.url().to_owned()) {
+                    duplicate_movie_bytes += bytes;
+                }
                 if let Some(library) = context.library.library_for_movie(movie) {
                     characters += library.characters().len();
                 }
@@ -847,6 +878,11 @@ impl Player {
                 orphans: context.orphan_manager.len(),
                 gc_bytes: metrics.total_gc_allocation(),
                 gc_objects: metrics.total_gc_count(),
+                unloads: crate::avm2::object::movie_unloads(),
+                distinct_urls: urls.len(),
+                movie_bytes,
+                duplicate_movie_bytes,
+                render: context.renderer.resource_census(),
             }
         })
     }
@@ -1126,6 +1162,24 @@ impl Player {
     pub fn set_quality(&mut self, quality: StageQuality) {
         self.mutate_with_update_context(|context| {
             context.stage.set_quality(context, quality);
+        })
+    }
+
+    /// Lay out every text field on the stage again.
+    ///
+    /// The chosen UI font is read fresh whenever a field lays itself out, so a field whose text has
+    /// changed since the setting changed already shows it. This is for the ones that have not -- a
+    /// name that never changes, a button that only redraws when its counter ticks -- and for the
+    /// instant the setting itself changes, when everything on screen has to catch up at once instead
+    /// of waiting for a reload. It walks the tree once on a settings change; nothing here runs per
+    /// frame.
+    #[cfg(feature = "aether_compatibility")]
+    pub fn aether_relayout_text(&mut self) {
+        self.mutate_with_update_context(|context| {
+            let stage = context.stage;
+            for child in stage.iter_render_list() {
+                aether_relayout_text_tree(child, context);
+            }
         })
     }
 
@@ -3625,6 +3679,45 @@ pub struct DragObject<'gc> {
     /// The bounding rectangle where the clip will be maintained.
     #[collect(require_static)]
     pub constraint: Rectangle<Twips>,
+}
+
+/// Relay out this object if it is a text field, then recurse into its children.
+///
+/// Used only by [`Player::aether_relayout_text`]; see there for why. `relayout` does not add or
+/// remove children, so walking the render list while calling it is safe.
+///
+/// Two things are held steady across the call, because `relayout` exists to serve a field whose
+/// content just changed and does more than re-resolve fonts. It sends the field back to the top,
+/// which on a scrolled field means the view jumps; and it re-measures an autosized field, which for
+/// a field the game has positioned in a stack means it overlaps its neighbours. The scroll is saved
+/// and put back, and a game-positioned field is left out entirely.
+#[cfg(feature = "aether_compatibility")]
+fn aether_relayout_text_tree<'gc>(object: DisplayObject<'gc>, context: &mut UpdateContext<'gc>) {
+    if let Some(edit_text) = object.as_edit_text() {
+        // Every field is laid out again, including the ones the game positions. Skipping them
+        // instead would leave the field drawing a substituted face while reporting the font type it
+        // had before, and the aspect correction keyed off that type is what decides how wide the
+        // glyphs land -- the two disagreeing is what drew the interface as cut-off text. What the
+        // game owns is put back afterwards rather than left out: the box for a field in a stack, so
+        // its neighbours do not move, and the scroll for any field, so the view does not jump.
+        let hscroll = edit_text.hscroll();
+        let scroll = edit_text.scroll();
+        let game_positioned = edit_text.aether_layout_is_game_positioned();
+        let bounds = edit_text.aether_bounds();
+
+        edit_text.relayout(context);
+
+        edit_text.set_hscroll(hscroll);
+        edit_text.set_scroll(scroll as f64);
+        if game_positioned {
+            edit_text.aether_restore_bounds(bounds);
+        }
+    }
+    if let Some(container) = object.as_container() {
+        for child in container.iter_render_list() {
+            aether_relayout_text_tree(child, context);
+        }
+    }
 }
 
 fn run_mouse_pick<'gc>(

@@ -108,10 +108,35 @@ try {
             throw "Missing $([System.IO.Path]::GetFileName($asset)). Run installer\build-setup.cmd first."
         }
     }
-    # The launcher is optional, since it is only built with -Launcher. It is uploaded when it is there and
-    # not demanded when it is not, because a release without one is still a complete release.
+    # The versioned launcher is optional, since it is only built with -Launcher.
     $launcher = Join-Path $distDir "Aether-Launcher-$version-win-x64.exe"
     if (Test-Path -LiteralPath $launcher -PathType Leaf) { $assets += $launcher }
+
+    # The universal launcher goes out with every release under a name that carries no version, so a
+    # download link can be written once and keep working.
+    #
+    # It is refreshed from this version's build rather than kept as a file of its own. The name says
+    # the launcher works against any version, and it does -- it installs whatever the releases page
+    # is currently offering -- but the build still knows its own number, and that number is the
+    # fallback recorded as the installed version when a download does not report one of its own (see
+    # InstallEngine.InstalledVersion). Publishing the same frozen copy release after release is what
+    # left a launcher telling players they had 0.6.14, so the copy is retaken each time and the
+    # fallback is at worst the current version.
+    $universalLauncher = Join-Path $distDir 'Aether-Launcher-universal-win-x64.exe'
+    if (Test-Path -LiteralPath $launcher -PathType Leaf) {
+        if (-not $DryRun) { Copy-Item -LiteralPath $launcher -Destination $universalLauncher -Force }
+        Write-Ok "universal launcher refreshed from the $version build"
+    }
+    elseif (Test-Path -LiteralPath $universalLauncher -PathType Leaf) {
+        # Publishing an older launcher still beats publishing none, since it fetches the current
+        # release either way. Said out loud because the version it falls back to is now wrong.
+        $built = (Get-Item -LiteralPath $universalLauncher).LastWriteTime.ToString('yyyy-MM-dd')
+        Write-Warning "Aether-Launcher-universal-win-x64.exe is from an earlier build ($built), not $version. It will install $version correctly, but reports its own version if a download names none. Rebuild with installer\build-setup.cmd -Launcher to refresh it."
+    }
+    else {
+        throw "Missing Aether-Launcher-universal-win-x64.exe in installer\dist, and no Aether-Launcher-$version-win-x64.exe to refresh it from. Build one with installer\build-setup.cmd -Launcher."
+    }
+    $assets += $universalLauncher
     Write-Ok "artifacts present for $version ($($assets.Count) files)"
 
     if (-not $Force) {

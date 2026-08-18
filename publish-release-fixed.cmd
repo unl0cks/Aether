@@ -4,6 +4,11 @@ rem
 rem Build first with installer\build-setup.cmd. This script publishes what is already in
 rem installer\dist and refuses if the artifacts for that version are missing.
 rem
+rem Every release also carries Aether-Launcher-universal-win-x64.exe, so a download link that names
+rem no version keeps working. It is refreshed from this version's launcher when one was built, which
+rem is what installer\build-setup.cmd -Launcher produces; without that it publishes the launcher
+rem already in dist and warns that it is an older build.
+rem
 rem Usage:
 rem   publish-release.cmd                          uses release-notes.md next to this file
 rem   publish-release.cmd notes\0.5.11.md          uses a specific notes file

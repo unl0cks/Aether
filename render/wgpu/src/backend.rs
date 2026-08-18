@@ -543,6 +543,19 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         Cow::Owned(result.join("\n"))
     }
 
+    fn resource_census(&self) -> Option<ruffle_render::backend::RenderResourceCensus> {
+        // Plain atomic loads, which is why this is not behind the metrics feature: the sessions
+        // that need answering are ordinary release builds.
+        let hal = self.descriptors.device.get_internal_counters().hal;
+        Some(ruffle_render::backend::RenderResourceCensus {
+            textures: hal.textures.read().max(0) as u64,
+            texture_bytes: hal.texture_memory.read().max(0) as u64,
+            buffers: hal.buffers.read().max(0) as u64,
+            buffer_bytes: hal.buffer_memory.read().max(0) as u64,
+            memory_allocations: hal.memory_allocations.read().max(0) as u64,
+        })
+    }
+
     fn name(&self) -> &'static str {
         if cfg!(target_family = "wasm") {
             let info = self.descriptors.adapter.get_info();

@@ -9,6 +9,13 @@ use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
 use ruffle_core::aether_compatibility::FocusAuraColour;
 
 /// Read a `--focus-aura-colour` value, listing what was allowed when it is not one of them.
+fn parse_ui_font(text: &str) -> Result<crate::ui_font::UiFont, String> {
+    text.parse().map_err(|_| {
+        let names: Vec<&str> = crate::ui_font::UiFont::ALL.iter().map(|f| f.key()).collect();
+        format!("expected one of: {}", names.join(", "))
+    })
+}
+
 fn parse_focus_aura_colour(text: &str) -> Result<FocusAuraColour, String> {
     text.parse().map_err(|_| {
         let names = FocusAuraColour::ALL
@@ -396,6 +403,18 @@ pub struct Opt {
     /// Which colour the Focus taunt aura is marked with.
     #[clap(long = "focus-aura-colour", value_parser = parse_focus_aura_colour)]
     pub focus_aura_colour: Option<FocusAuraColour>,
+
+    /// Override the font AQW draws its text with.
+    #[clap(long = "ui-font", value_parser = parse_ui_font)]
+    pub ui_font: Option<crate::ui_font::UiFont>,
+
+    /// Apply the chosen font to every text field, not just chat and nameplates.
+    #[clap(long = "ui-font-all-text", conflicts_with = "no_aether_ui_font_all_text")]
+    pub aether_ui_font_all_text: bool,
+
+    /// Keep the chosen font to chat and nameplates, leaving the rest of the interface alone.
+    #[clap(long = "no-ui-font-all-text", conflicts_with = "aether_ui_font_all_text")]
+    pub no_aether_ui_font_all_text: bool,
 
     /// Default quality of the movie.
     #[clap(long, short)]

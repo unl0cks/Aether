@@ -150,6 +150,11 @@ impl<'gc> ScriptObjectData<'gc> {
         proto: Option<Object<'gc>>,
         vtable: VTable<'gc>,
     ) -> Self {
+        // Every AVM2 object in the process is built here, which is what makes it the right place
+        // to count them by class.
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_object_census::record_construction(instance_class);
+
         let slot_table = vtable.slot_table();
 
         // We use `iter` and `collect` rather than setting elements of a Box<[]>

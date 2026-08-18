@@ -999,4 +999,32 @@ mod tests {
             "a movie library must not outlive the movie it belongs to"
         );
     }
+
+    #[test]
+    fn one_strong_reference_anywhere_keeps_the_whole_library_resident() {
+        // The shape of the leak, and the reason `Domain::remove_definitions_for_movie` has to
+        // exist. Weak keying only releases a library when the *last* strong reference goes, and an
+        // application domain holds a `Script` for every definition the movie exported, each of
+        // which reaches a strong `Arc<SwfMovie>` through its translation unit. A single one of
+        // those pins the key, and with it every character, font and bitmap in the library --
+        // measured at 5,479 movies and 31.7 GB after five hours in Yulgar.
+        let mut libraries = MovieLibraries::<'static>::new();
+        let movie = Arc::new(SwfMovie::empty(32, None));
+        libraries.get_or_insert_mut(movie.clone());
+
+        let held_by_a_translation_unit = movie.clone();
+        drop(movie);
+        assert_eq!(
+            libraries.known_movies().count(),
+            1,
+            "an exported definition is enough on its own to keep the library resident"
+        );
+
+        drop(held_by_a_translation_unit);
+        assert_eq!(
+            libraries.known_movies().count(),
+            0,
+            "dropping the last definition must release the library with it"
+        );
+    }
 }

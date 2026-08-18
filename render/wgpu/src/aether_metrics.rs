@@ -746,7 +746,7 @@ impl TextureBucketCounters {
 /// Fixed table, probed linearly. A texture allocation is already an expensive operation, so the
 /// cost of a short scan here is irrelevant, and a fixed table means no allocation on this path and
 /// no lock to contend.
-const TEXTURE_BUCKETS: usize = 512;
+const TEXTURE_BUCKETS: usize = 4096;
 static TEXTURE_CENSUS: [TextureBucketCounters; TEXTURE_BUCKETS] =
     [const { TextureBucketCounters::new() }; TEXTURE_BUCKETS];
 

@@ -25,7 +25,16 @@ use egui::{
 use ruffle_core::Player;
 use ruffle_core::aether_compatibility::FocusAuraColour;
 use ruffle_render::quality::StageQuality;
+use crate::ui_font::UiFont;
 use unic_langid::LanguageIdentifier;
+
+/// The fonts offered for AQW's text, named for a menu.
+///
+/// Built from [`UiFont::ALL`] rather than written out again, so a font added there cannot be left
+/// out of the menu that is the only way to reach it.
+fn ui_font_choices() -> Vec<(UiFont, &'static str)> {
+    UiFont::ALL.iter().map(|font| (*font, font.name())).collect()
+}
 
 /// The colours offered for the Focus aura, named for a menu.
 static FOCUS_AURA_COLOUR_CHOICES: [(FocusAuraColour, &str); 9] = [
@@ -260,6 +269,41 @@ impl AetherOptionsDialog {
                         ui.end_row();
                     });
             });
+        });
+
+        ui.add_space(8.0);
+        ui.label("Text");
+        Grid::new("aether-options-ui-font")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Font");
+                choice(
+                    ui,
+                    "aether-ui-font",
+                    &mut self.settings.ui_font,
+                    self.resolved.ui_font,
+                    &ui_font_choices(),
+                    "The font AQW draws its text with. \"Default\" leaves the game's own choices alone. By default it reaches chat and the names over characters' heads -- the text you read while playing; turn on \"Apply to all text\" to extend it to the rest of the interface. Takes effect at once, so text already on screen is redrawn without a reload.",
+                );
+                ui.end_row();
+            });
+
+        // Only meaningful once a font has been chosen: with Default there is nothing to widen the
+        // reach of. Gated on what will actually apply rather than on the dropdown, matching the aura
+        // colour above, so a font pinned to Default on the command line greys this out too.
+        let a_font_is_chosen = if self.resolved.ui_font.from_command_line {
+            self.resolved.ui_font.value != UiFont::Default
+        } else {
+            self.settings.ui_font != UiFont::Default
+        };
+        ui.add_enabled_ui(a_font_is_chosen, |ui| {
+            toggle(
+                ui,
+                &mut self.settings.ui_font_all_text,
+                self.resolved.ui_font_all_text,
+                "Apply to all text",
+                "On, the chosen font replaces every text field in the game -- the menus, the server list, buttons and all. Off, it stays on chat and the names over characters' heads and leaves the rest of the interface in the game's own font. Tahoma and Segoe UI can turn the server list to fragments, which is why they are not among the fonts offered.",
+            );
         });
     }
 
