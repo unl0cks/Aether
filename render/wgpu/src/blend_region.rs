@@ -199,7 +199,12 @@ mod tests {
     /// The saving, on the shape an avatar layer actually takes.
     #[test]
     fn a_small_layer_costs_far_fewer_pixels_than_it_did() {
-        let region = BlendRegion { x: 100, y: 100, width: 60, height: 90 };
+        let region = BlendRegion {
+            x: 100,
+            y: 100,
+            width: 60,
+            height: 90,
+        };
         let fine = quantise_region(region, (0, 0), 2560, 1440, blend_region_grid(60, 90));
         let coarse = quantise_region(region, (0, 0), 2560, 1440, 128);
 
@@ -215,7 +220,6 @@ mod tests {
         assert!(fine.x + fine.width >= region.x + region.width);
         assert!(fine.y + fine.height >= region.y + region.height);
     }
-
 
     fn rect(x_min: f64, y_min: f64, x_max: f64, y_max: f64) -> Rectangle<Twips> {
         Rectangle {

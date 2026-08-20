@@ -7,8 +7,8 @@ use windows_sys::Win32::System::Console::{
 use windows_sys::Win32::System::Threading::{
     BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, GetPriorityClass, IDLE_PRIORITY_CLASS,
     NORMAL_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION,
-    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling,
-    SetPriorityClass, SetProcessInformation,
+    PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
 };
 
 /// Whether an inherited priority class is one to climb out of.

@@ -3651,6 +3651,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         version: u8,
     ) -> Result<(), Error> {
         let define_bits_lossless = reader.read_define_bits_lossless(version)?;
+        if self.character_already_defined(context, define_bits_lossless.id) {
+            return Ok(());
+        }
         let bitmap = Gc::new(
             context.gc(),
             BitmapCharacter::new(CompressedBitmap::Lossless(DefineBitsLossless {
@@ -3694,6 +3697,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let tag = reader.read_define_morph_shape(version)?;
         let id = tag.id;
+        if self.character_already_defined(context, id) {
+            return Ok(());
+        }
         let morph_shape = MorphShape::from_swf_tag(context.gc(), tag, self.movie());
         self.library_mut(context)
             .register_character(id, Character::MorphShape(morph_shape));
@@ -3709,6 +3715,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let swf_shape = reader.read_define_shape(version)?;
         let id = swf_shape.id;
+        if self.character_already_defined(context, id) {
+            return Ok(());
+        }
         let graphic = Graphic::from_swf_tag(context, swf_shape, self.movie());
         self.library_mut(context)
             .register_character(id, Character::Graphic(graphic));
@@ -3774,9 +3783,12 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         context: &mut UpdateContext<'gc>,
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
+        let (id, jpeg_data) = reader.read_define_bits()?;
+        if self.character_already_defined(context, id) {
+            return Ok(());
+        }
         let mc = context.gc();
         let library = self.library_mut(context);
-        let (id, jpeg_data) = reader.read_define_bits()?;
         let jpeg_tables = library.jpeg_tables();
         let jpeg_data =
             ruffle_render::utils::glue_tables_to_jpeg(jpeg_data, jpeg_tables).into_owned();
@@ -3801,6 +3813,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let (id, jpeg_data) = reader.read_define_bits_jpeg_2()?;
+        if self.character_already_defined(context, id) {
+            return Ok(());
+        }
         let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(jpeg_data)?;
         let bitmap = Character::Bitmap(Gc::new(
             context.gc(),
@@ -3823,6 +3838,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         version: u8,
     ) -> Result<(), Error> {
         let jpeg = reader.read_define_bits_jpeg_3(version)?;
+        if self.character_already_defined(context, jpeg.id) {
+            return Ok(());
+        }
         let (width, height) = ruffle_render::utils::decode_define_bits_jpeg_dimensions(jpeg.data)?;
 
         let bitmap = Character::Bitmap(Gc::new(
@@ -3867,6 +3885,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         context: &mut UpdateContext<'gc>,
         swf_button: swf::Button<'a>,
     ) -> Result<(), Error> {
+        if self.character_already_defined(context, swf_button.id) {
+            return Ok(());
+        }
         let button = if self.swf.movie.is_action_script_3() {
             Character::Avm2Button(Avm2Button::from_swf_tag(
                 &swf_button,
@@ -3951,6 +3972,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let swf_edit_text = reader.read_define_edit_text()?;
+        if self.character_already_defined(context, swf_edit_text.id()) {
+            return Ok(());
+        }
         let edit_text = EditText::from_swf_tag(context, self.movie(), swf_edit_text);
         self.library_mut(context)
             .register_character(edit_text.id(), Character::EditText(edit_text));
@@ -3964,6 +3988,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let font = reader.read_define_font_1()?;
+        if self.character_already_defined(context, font.id) {
+            return Ok(());
+        }
         let glyphs = font
             .glyphs
             .into_iter()
@@ -4005,6 +4032,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let font = reader.read_define_font_2(2)?;
         let font_id = font.id;
+        if self.character_already_defined(context, font_id) {
+            return Ok(());
+        }
         let font_object = Font::from_swf_tag(
             context.gc(),
             context.renderer,
@@ -4025,6 +4055,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let font = reader.read_define_font_2(3)?;
         let font_id = font.id;
+        if self.character_already_defined(context, font_id) {
+            return Ok(());
+        }
         let font_object = Font::from_swf_tag(
             context.gc(),
             context.renderer,
@@ -4045,10 +4078,27 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let font = reader.read_define_font_4()?;
         let font_id = font.id;
+        if self.character_already_defined(context, font_id) {
+            return Ok(());
+        }
         let font_object = Font::from_font4_tag(context.gc(), font, reader.encoding())?;
         self.library_mut(context)
             .register_character(font_id, Character::Font(font_object));
         Ok(())
+    }
+
+    /// Whether this movie's library already holds `id`, so defining it again would be discarded.
+    ///
+    /// A movie loaded from a URL already resident is shared rather than parsed twice, and its
+    /// library comes with it fully populated. Preload still runs, because the clip's own timeline
+    /// has to be built from the tags -- but every character it would define is already there, and
+    /// `register_character` would throw the new one away after it had been paid for. For a sound
+    /// that is worse than waste: `AudioBackend::register_sound` happens first and its handle is
+    /// then dropped on the floor, leaking a backend registration per duplicate load.
+    #[inline]
+    fn character_already_defined(&self, context: &UpdateContext<'gc>, id: CharacterId) -> bool {
+        self.library(context)
+            .is_some_and(|library| library.contains_character(id))
     }
 
     #[inline]
@@ -4058,6 +4108,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let sound = reader.read_define_sound()?;
+        if self.character_already_defined(context, sound.id) {
+            return Ok(());
+        }
         if let Ok(handle) = context.audio.register_sound(&sound) {
             self.library_mut(context)
                 .register_character(sound.id, Character::Sound(handle));
@@ -4078,6 +4131,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
     ) -> Result<(), Error> {
         let streamdef = reader.read_define_video_stream()?;
         let id = streamdef.id;
+        if self.character_already_defined(context, id) {
+            return Ok(());
+        }
         let video = Video::from_swf_tag(self.movie(), streamdef, context.gc());
         self.library_mut(context)
             .register_character(id, Character::Video(video));
@@ -4093,6 +4149,35 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         let id = reader.read_character_id()?;
         let num_frames = reader.read_u16()?;
 
+        // This character was already defined, so we can skip preloading it, as the character ID
+        // refers to the pre-existing character, and not this one.
+        //
+        // Asked before building anything rather than after. Upstream learned the answer from
+        // `register_character` returning false, which builds a whole `MovieClip` to throw away and
+        // logs the rejection at ERROR -- and once movie loads are deduped by URL a reused movie
+        // preloads against an already-populated library, so the collision is the expected case,
+        // not a fault. One measured session logged 2,083 of them in seven minutes.
+        //
+        // **Carry on to the next tag rather than ending the chunk, which is what upstream does
+        // here and what made a re-shown armour take seconds to appear.** `Player::run_frame` pumps
+        // preload exactly once per frame, and `decode_tags` stops the whole pass on `Exit`, so
+        // every already-defined sprite cost one entire frame of progress -- a few hundred of them
+        // in a class or armour is several seconds of nothing, and the `return` here even bypasses
+        // the execution limit that is supposed to govern how much a frame does. Skipping is right;
+        // stopping is not. `decode_tags` restores the reader to the end of the tag either way, so
+        // continuing skips the sprite's body exactly as an ignored tag would.
+        if self.character_already_defined(context, id) {
+            #[cfg(feature = "aether_performance")]
+            crate::aether_performance::note_preload_sprite_already_defined();
+            // Still charged against the frame's budget, at the same rate the success path below
+            // charges, so a movie made entirely of already-defined sprites cannot spin forever.
+            return Ok(if chunk_limit.did_ops_breach_limit(context, 4) {
+                ControlFlow::Exit
+            } else {
+                ControlFlow::Continue
+            });
+        }
+
         let movie_clip = MovieClip::new_with_data(
             context.gc(),
             id,
@@ -4106,8 +4191,6 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         {
             self.preload_progress.cur_preload_symbol.set(Some(id));
         } else {
-            // This character was already defined, so we can skip preloading it, as the
-            // character ID refers to the pre-existing character, and not this one.
             return Ok(ControlFlow::Exit);
         }
 
@@ -4133,6 +4216,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         version: u8,
     ) -> Result<(), Error> {
         let text = reader.read_define_text(version)?;
+        if self.character_already_defined(context, text.id) {
+            return Ok(());
+        }
         let text_object = Text::from_swf_tag(context, self.movie(), &text);
         self.library_mut(context)
             .register_character(text.id, Character::Text(text_object));
@@ -4146,6 +4232,9 @@ impl<'gc, 'a> MovieClipShared<'gc> {
         reader: &mut SwfStream<'a>,
     ) -> Result<(), Error> {
         let tag_data = reader.read_define_binary_data()?;
+        if self.character_already_defined(context, tag_data.id) {
+            return Ok(());
+        }
         let binary_data = BinaryData::from_swf_tag(self.movie(), &tag_data);
         let binary_data = Gc::new(context.gc(), binary_data);
         self.library_mut(context)

@@ -19,13 +19,14 @@ use crate::aether_settings::{
     AetherSettings, OptionsHotkey, Resolved, ResolvedAetherSettings, ResolvedSetting,
 };
 use crate::preferences::GlobalPreferences;
+use crate::ui_font::UiFont;
 use egui::{
     Align2, Button, Checkbox, ComboBox, Grid, Key, Modifiers, RichText, Ui, Widget, Window,
 };
 use ruffle_core::Player;
 use ruffle_core::aether_compatibility::FocusAuraColour;
+use ruffle_core::aether_performance::BitmapCacheSweep;
 use ruffle_render::quality::StageQuality;
-use crate::ui_font::UiFont;
 use unic_langid::LanguageIdentifier;
 
 /// The fonts offered for AQW's text, named for a menu.
@@ -33,7 +34,22 @@ use unic_langid::LanguageIdentifier;
 /// Built from [`UiFont::ALL`] rather than written out again, so a font added there cannot be left
 /// out of the menu that is the only way to reach it.
 fn ui_font_choices() -> Vec<(UiFont, &'static str)> {
-    UiFont::ALL.iter().map(|font| (*font, font.name())).collect()
+    UiFont::ALL
+        .iter()
+        .map(|font| (*font, font.name()))
+        .collect()
+}
+
+/// How long an idle cached surface is kept, named for a menu.
+///
+/// Taken from `BitmapCacheSweep::label` rather than written out again here. Spelling the delays
+/// out twice is how the menu ended up offering "about 6 seconds" for a policy that had been
+/// retuned to thirty.
+fn bitmap_cache_sweep_choices() -> Vec<(BitmapCacheSweep, &'static str)> {
+    BitmapCacheSweep::ALL
+        .into_iter()
+        .map(|choice| (choice, choice.label()))
+        .collect()
 }
 
 /// The colours offered for the Focus aura, named for a menu.
@@ -359,6 +375,23 @@ impl AetherOptionsDialog {
                         (Some(144.0), "144"),
                     ],
                     "Overrides the rate the movie asks for, which is why 60 is the default here rather than the 24 AQW requests. 24 is the rate AQW's animations were drawn at, so it is the one where they play at their intended speed, and it asks for the least work per second.",
+                );
+                ui.end_row();
+            });
+
+        ui.add_space(8.0);
+        ui.label("Memory");
+        Grid::new("aether-options-bitmap-cache-sweep")
+            .num_columns(2)
+            .show(ui, |ui| {
+                ui.label("Release unused image caches");
+                choice(
+                    ui,
+                    "aether-bitmap-cache-sweep",
+                    &mut self.settings.bitmap_cache_sweep,
+                    self.resolved.bitmap_cache_sweep,
+                    &bitmap_cache_sweep_choices(),
+                    "AQW keeps a rendered image of things it draws often -- players, panels, parts of the map. Those images sit in graphics memory, and until now nothing ever gave one back, so a long session in a busy room measured over 2 GB of them. This releases the ones nothing has drawn for a while; anything still on screen is never touched. Rebuilding a released image is not free: the artwork it is drawn from has usually been given back too, so it has to be prepared again first, which is what makes a shop item you looked at a moment ago take a beat to reappear. Shorter settings free memory sooner and pay that more often.",
                 );
                 ui.end_row();
             });

@@ -142,6 +142,17 @@ pub struct BitmapCache {
     /// Remaining frames for which a repeatedly invalidated, filterless cache is drawn directly.
     /// This preserves every authored animation frame while avoiding redundant offscreen work.
     filterless_direct_frames: u16,
+
+    /// Whether this surface has been drawn since the last idle sweep.
+    ///
+    /// The same reprieve `BitmapCharacter` gets for library uploads, for the same reason: a cache
+    /// that is still on screen must survive a sweep, and one that is not can be rebuilt from the
+    /// display list the next time it is drawn. Measured in a crowded room, cache surfaces reached
+    /// 2.25 GB across 9,324 live textures with nothing ever releasing one.
+    drawn_since_sweep: bool,
+
+    /// Consecutive sweeps this surface has gone undrawn. Reset the moment it draws again.
+    idle_sweeps: u8,
 }
 
 const FILTERLESS_HOT_CACHE_REBUILD_THRESHOLD: u8 = 3;
@@ -287,6 +298,68 @@ fn aqw_cache_texture_grid() -> bool {
 }
 
 #[cfg(test)]
+mod adaptive_avatar_cache_tests {
+    use super::*;
+
+    /// The bug this exists to prevent: a filter renders only through the cache surface, so
+    /// abandoning the cache abandons the filter. A selected AQW avatar is exactly this case --
+    /// glow applied, no explicit `cacheAsBitmap`, so it counts as ours to discard.
+    #[test]
+    fn a_filtered_object_is_never_abandoned_however_large_it_is() {
+        let huge = (
+            AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION,
+            AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION,
+        );
+        assert!(
+            !adaptive_avatar_cache_may_be_abandoned(true, true, huge.0, huge.1),
+            "a filtered object must keep its cache, or it loses the filter with it"
+        );
+        // And the unfiltered case still is, which is the whole point of the guard.
+        assert!(adaptive_avatar_cache_may_be_abandoned(
+            true, false, huge.0, huge.1
+        ));
+    }
+
+    /// Only caches we added ourselves are ours to drop. One the content asked for is authored
+    /// behaviour and stays whatever its size.
+    #[test]
+    fn a_cache_the_content_asked_for_is_never_abandoned() {
+        assert!(!adaptive_avatar_cache_may_be_abandoned(
+            false, false, 4096, 4096
+        ));
+    }
+
+    /// The oscillation the owner saw: bounds drifting a pixel across the limit flipped the cache on
+    /// and off frame to frame, taking the glow and the pixel snapping with it. Sizes either side of
+    /// the pixel budget must now agree for anything filtered.
+    #[test]
+    fn drifting_across_the_pixel_limit_does_not_change_a_filtered_objects_answer() {
+        let side = 1024_u32;
+        assert_eq!(
+            u64::from(side) * u64::from(side),
+            AETHER_ADAPTIVE_AVATAR_CACHE_MAX_PIXELS,
+            "this test is calibrated to the limit and the limit moved",
+        );
+        for (w, h) in [(side, side), (side + 1, side), (side, side + 1)] {
+            assert!(
+                !adaptive_avatar_cache_may_be_abandoned(true, true, w, h),
+                "{w}x{h} flipped a filtered object's cache"
+            );
+        }
+        // Unfiltered, the limit still bites, and that is intended.
+        assert!(!adaptive_avatar_cache_may_be_abandoned(
+            true, false, side, side
+        ));
+        assert!(adaptive_avatar_cache_may_be_abandoned(
+            true,
+            false,
+            side + 1,
+            side
+        ));
+    }
+}
+
+#[cfg(test)]
 mod cache_texture_grid_tests {
     use super::*;
 
@@ -382,6 +455,31 @@ fn adaptive_avatar_cache_dimensions_allowed(width: u32, height: u32) -> bool {
     width <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
         && height <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_DIMENSION
         && u64::from(width) * u64::from(height) <= AETHER_ADAPTIVE_AVATAR_CACHE_MAX_PIXELS
+}
+
+/// Whether an adaptively-cached object may have its cache thrown away for being too large.
+///
+/// The size guard exists so one elaborate character cannot retain a huge live render target, and
+/// for a cache we added ourselves that is a free trade: dropping it just means drawing the object
+/// directly.
+///
+/// **It is not free when the object has filters, and that was shipped as a rendering bug.** A
+/// filter only renders through the cache surface, so abandoning it drops the filter entirely --
+/// and `is_bitmap_cached_preference` is the *explicit* `cacheAsBitmap` flag, which content does not
+/// set for an object it merely applied a filter to. So a selected AQW avatar, which gets a blue
+/// glow and no explicit preference, counted as "ours to discard".
+///
+/// The symptom that found it: a character whose filtered bounds sat near the pixel limit crossed it
+/// as it animated, so the glow appeared and vanished frame to frame, and the character shifted a
+/// pixel or two with it -- the cached path pixel-snaps and the direct path does not. Both halves,
+/// one cause.
+fn adaptive_avatar_cache_may_be_abandoned(
+    adaptive_only: bool,
+    has_filters: bool,
+    width: u32,
+    height: u32,
+) -> bool {
+    adaptive_only && !has_filters && !adaptive_avatar_cache_dimensions_allowed(width, height)
 }
 
 impl BitmapCache {
@@ -561,6 +659,39 @@ impl BitmapCache {
     /// temporarily disabled.
     fn clear(&mut self) {
         self.bitmap = None;
+    }
+
+    /// Note that this surface reached the renderer this frame.
+    fn note_drawn(&mut self) {
+        self.drawn_since_sweep = true;
+    }
+
+    /// Release this surface once it has gone undrawn for `sweeps_before_release` sweeps.
+    ///
+    /// Returns whether anything was released. Clearing only drops the GPU texture -- the cache is
+    /// rebuilt from the display list the next time the object draws, exactly as it was built the
+    /// first time, so nothing is lost but the work of rebuilding it.
+    ///
+    /// `None` never releases, which is what every build before the sweep existed did.
+    fn sweep_if_idle(&mut self, sweeps_before_release: Option<u8>) -> bool {
+        if std::mem::take(&mut self.drawn_since_sweep) {
+            self.idle_sweeps = 0;
+            return false;
+        }
+
+        let Some(limit) = sweeps_before_release else {
+            return false;
+        };
+
+        self.idle_sweeps = self.idle_sweeps.saturating_add(1);
+        if self.idle_sweeps < limit {
+            return false;
+        }
+
+        self.idle_sweeps = 0;
+        let had_surface = self.bitmap.is_some();
+        self.clear();
+        had_surface
     }
 
     fn handle(&self) -> Option<BitmapHandle> {
@@ -1882,23 +2013,25 @@ pub fn render_base<'gc>(
                         // is outside the physical viewport. Leave the cache dirty so returning
                         // onscreen rebuilds it before the first visible draw.
                         bitmap_cache_culled = true;
-                    } else if adaptive_avatar_cache_only
-                        && !adaptive_avatar_cache_dimensions_allowed(texture_width, texture_height)
-                    {
+                    } else if adaptive_avatar_cache_may_be_abandoned(
+                        adaptive_avatar_cache_only,
+                        !filters.is_empty(),
+                        texture_width,
+                        texture_height,
+                    ) {
                         // Adaptive avatar caches are an optimization, not authored Flash
                         // semantics. Never let a single elaborate character retain a huge live
                         // render target; direct rendering is both safer and more predictable.
+                        // Filtered objects are exempt -- see the function's own note for why.
                         cache.clear();
                         cache_info = None;
-                    } else if let Some(invalidation_reason) =
-                        cache.dirty_reason(
-                            &base_transform.matrix,
-                            width,
-                            height,
-                            &stage_matrix,
-                            bounds_offset,
-                        )
-                    {
+                    } else if let Some(invalidation_reason) = cache.dirty_reason(
+                        &base_transform.matrix,
+                        width,
+                        height,
+                        &stage_matrix,
+                        bounds_offset,
+                    ) {
                         let filterless_output_pixels =
                             u64::from(texture_width) * u64::from(texture_height);
                         let filterless_direct_threshold_reached = filterless_hot_cache_candidate
@@ -1961,6 +2094,7 @@ pub fn render_base<'gc>(
                                 cache_update_started.elapsed(),
                             );
                             let logical_size = cache.output_size();
+                            cache.note_drawn();
                             cache_info = cache.handle().map(|handle| DrawCacheInfo {
                                 handle,
                                 dirty: true,
@@ -1978,6 +2112,7 @@ pub fn render_base<'gc>(
                         crate::aether_metrics::bitmap_cache_hit();
 
                         let logical_size = cache.output_size();
+                        cache.note_drawn();
                         cache_info = cache.handle().map(|handle| DrawCacheInfo {
                             handle,
                             dirty: false,
@@ -2006,7 +2141,8 @@ pub fn render_base<'gc>(
             }
 
             #[cfg(feature = "aether_diagnostics")]
-            if let Some((names, width, height, texture_width, texture_height)) = filter_room_report {
+            if let Some((names, width, height, texture_width, texture_height)) = filter_room_report
+            {
                 crate::aether_diagnostics::record_filter_ancestry(
                     this,
                     &names,
@@ -3169,6 +3305,37 @@ pub trait TDisplayObject<'gc>:
     /// Refresh exact AQW AvatarMC root cache eligibility.
     ///
     /// Descendants are traversed so any stale eligibility from reparenting is cleared, but
+    /// Release `cacheAsBitmap` surfaces in this subtree that were not drawn since the last sweep.
+    ///
+    /// Returns how many were released.
+    ///
+    /// Library bitmap uploads have had an idle sweep for a while; these never did. A cache surface
+    /// lives on the display object rather than in the library, so nothing the library sweeps can
+    /// reach it, and it was held for as long as the object lived however long ago it last drew. A
+    /// crowded room measured 9,324 live textures holding 2.25 GB while the pools themselves
+    /// retained only 0.82 GB -- the rest was checked out and never coming back.
+    ///
+    /// Clearing costs the object one rebuild the next time it draws, from the same display list
+    /// that built it originally. See [`BitmapCache::sweep_if_idle`] for the reprieve rule.
+    #[cfg(feature = "aether_performance")]
+    fn sweep_idle_bitmap_caches(self, sweeps_before_release: Option<u8>) -> usize {
+        let mut released = 0;
+
+        if let Some(cache) = self.base().bitmap_cache_mut().as_mut()
+            && cache.sweep_if_idle(sweeps_before_release)
+        {
+            released += 1;
+        }
+
+        if let Some(container) = self.as_container() {
+            for child in container.iter_render_list() {
+                released += child.sweep_idle_bitmap_caches(sweeps_before_release);
+            }
+        }
+
+        released
+    }
+
     /// equipment sublayers never own independent live GPU caches.
     #[cfg(feature = "aether_performance")]
     fn refresh_aether_adaptive_avatar_cache_candidates(self) {
@@ -5470,8 +5637,9 @@ mod cache_viewport_clip_tests {
     /// The map layer that made this necessary, measured from a live session.
     #[test]
     fn a_map_several_times_the_window_is_cut_down_to_it() {
-        let clipped = clip_cache_bounds_to_viewport(rect(-1900.0, -400.0, 6334.0, 2269.0), 2560, 1440)
-            .expect("a map this size is worth clipping");
+        let clipped =
+            clip_cache_bounds_to_viewport(rect(-1900.0, -400.0, 6334.0, 2269.0), 2560, 1440)
+                .expect("a map this size is worth clipping");
 
         // Never wider than the window plus its margin on each side.
         assert!(clipped.width().to_pixels() <= 2560.0 + CACHE_VIEWPORT_MARGIN * 2.0);
@@ -5492,7 +5660,9 @@ mod cache_viewport_clip_tests {
     fn an_object_that_fits_the_window_is_left_alone() {
         assert!(clip_cache_bounds_to_viewport(rect(0.0, 0.0, 400.0, 300.0), 2560, 1440).is_none());
         // Large, but not enough of it off screen to pay for the pan rebuilds.
-        assert!(clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2600.0, 1500.0), 2560, 1440).is_none());
+        assert!(
+            clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2600.0, 1500.0), 2560, 1440).is_none()
+        );
     }
 
     /// Entirely off screen is the viewport cull's business, not this one's.
@@ -5592,7 +5762,10 @@ mod nine_slice_tests {
 
         let (_, dest_start, stretch, dest_end) = shrunk.band(0);
         // Twice as wide in the object's own space, which at half scale is the 12px it was drawn.
-        assert!((stretch - 2.0).abs() < 1e-9, "border band drawn at {stretch}x");
+        assert!(
+            (stretch - 2.0).abs() < 1e-9,
+            "border band drawn at {stretch}x"
+        );
         assert!(((dest_end - dest_start) * 0.5 - 12.0).abs() < 1e-9);
 
         // Growing goes the other way, and lands on the same 12px on screen.
@@ -5638,7 +5811,11 @@ mod nine_slice_tests {
 
         // Growing can never run out of room: the borders are divided by the scale, so the larger
         // the object gets the less of its own space they take.
-        assert!(SliceAxis::plan(0.0, 49.0, 51.0, 100.0, 1000.0).unwrap().is_sliced());
+        assert!(
+            SliceAxis::plan(0.0, 49.0, 51.0, 100.0, 1000.0)
+                .unwrap()
+                .is_sliced()
+        );
     }
 
     #[test]

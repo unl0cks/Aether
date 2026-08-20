@@ -1,4 +1,4 @@
-use crate::avm2::object::Object;
+use crate::avm2::object::{Object, WeakObject};
 use crate::string::AvmString;
 use fnv::FnvBuildHasher;
 use gc_arena::Collect;
@@ -24,6 +24,27 @@ pub enum DynamicKey<'gc> {
     // can be `number`
     Uint(u32),
     Object(Object<'gc>),
+    /// An object key that does not keep its object alive. Only `flash.utils.Dictionary`
+    /// constructed with `weakKeys` produces these.
+    ///
+    /// It is a separate variant rather than a flag on `Object` because the two hash and compare
+    /// differently the moment the target dies, and because the derived `Collect` has to trace this
+    /// one weakly -- which is the entire point. A dictionary that uses weak keys uses them for
+    /// every entry, so the two variants never have to match each other.
+    WeakObject(WeakObject<'gc>),
+}
+
+impl<'gc> DynamicKey<'gc> {
+    /// Whether this key refers to an object that has since been collected.
+    ///
+    /// Such an entry is not deleted the instant its key dies -- nothing is watching -- so every
+    /// read has to treat it as absent until a sweep physically removes it.
+    pub fn is_dead(&self) -> bool {
+        match self {
+            DynamicKey::WeakObject(weak) => weak.is_dropped(),
+            _ => false,
+        }
+    }
 }
 
 /// A HashMap designed for dynamic properties on an object.
@@ -226,6 +247,24 @@ impl<K: Eq + Hash, V> DynamicMap<K, V> {
             prop.enumerable = enumerable;
         }
     }
+
+    /// Drop every entry whose key `should_remove` accepts, returning how many went.
+    ///
+    /// Only weak-keyed dictionaries need this: an entry whose key has been collected is already
+    /// invisible to reads, but it still holds its *value* alive, so something has to physically
+    /// take it out.
+    pub fn remove_keys(&mut self, mut should_remove: impl FnMut(&K) -> bool) -> usize {
+        let before = self.table.len();
+        self.table.retain(|(k, _)| !should_remove(k));
+        let removed = before - self.table.len();
+        if removed > 0 {
+            // Bucket indices are what enumeration walks, and retaining moves entries. Anything
+            // part-way through an enumeration has to start over rather than read a stale cursor.
+            self.public_index.set(0);
+            self.real_index.set(0);
+        }
+        removed
+    }
 }
 
 #[cfg(test)]
@@ -255,5 +294,112 @@ mod tests {
             println!("{}", map.key_at(current).unwrap());
             current = next;
         }
+    }
+}
+
+#[cfg(test)]
+mod weak_key_tests {
+    use super::*;
+    use gc_arena::{Arena, Gc, Rootable};
+
+    /// The root for the arena test below. The weak handle has to live *inside* the arena: `'gc` is
+    /// branded and cannot escape a `mutate` call, which is the safety property that makes any of
+    /// this sound in the first place.
+    #[derive(Collect)]
+    #[collect(no_drop)]
+    struct WeakRoot<'gc> {
+        strong: Option<Gc<'gc, u32>>,
+        weak: Option<gc_arena::GcWeak<'gc, u32>>,
+        #[collect(require_static)]
+        address: Cell<usize>,
+    }
+
+    /// Everything the weak-key design assumes about `gc_arena`, checked against a real collector
+    /// rather than taken on faith.
+    ///
+    /// If any of this were untrue, a `Dictionary` with `weakKeys` would silently keep behaving like
+    /// the strong one it used to be -- which is exactly the failure that went unnoticed for years.
+    #[test]
+    fn a_weak_handle_outlives_its_object_and_reports_the_death() {
+        type Root = Rootable![WeakRoot<'_>];
+        let mut arena: Arena<Root> = Arena::new(|mc| {
+            let strong = Gc::new(mc, 7u32);
+            WeakRoot {
+                strong: Some(strong),
+                weak: Some(Gc::downgrade(strong)),
+                address: Cell::new(Gc::as_ptr(strong) as usize),
+            }
+        });
+
+        // While alive: not dropped, upgrades, and the address matches the strong pointer.
+        arena.mutate(|mc, root| {
+            let weak = root.weak.expect("root starts with a weak handle");
+            assert!(!weak.is_dropped(), "a live object must not read as dropped");
+            assert!(weak.upgrade(mc).is_some(), "a live object must upgrade");
+            assert_eq!(weak.as_ptr() as usize, root.address.get());
+        });
+
+        // Drop the only strong reference and collect to completion. Two cycles, because the first
+        // finishes whatever was already in progress.
+        arena.mutate_root(|_mc, root| root.strong = None);
+        arena.finish_cycle();
+        arena.finish_cycle();
+
+        arena.mutate(|mc, root| {
+            let weak = root.weak.expect("the handle itself survives");
+            // The key is gone. This is what lets a sweep find dead entries, and what makes the
+            // whole feature work rather than quietly do nothing.
+            assert!(weak.is_dropped(), "a collected object must read as dropped");
+            assert!(
+                weak.upgrade(mc).is_none(),
+                "a collected object must not upgrade"
+            );
+            // And the address still answers, unchanged, so the entry stays findable and removable
+            // after its key has died. Hashing a weak key by address depends on this.
+            assert_eq!(weak.as_ptr() as usize, root.address.get());
+        });
+    }
+
+    /// The sweep removes exactly the entries it is told to and leaves the rest reachable.
+    #[test]
+    fn removing_keys_drops_only_those_it_matches() {
+        let mut map: DynamicMap<u32, i32> = DynamicMap::new();
+        for key in 0..10u32 {
+            map.insert(key, key as i32 * 10);
+        }
+        assert_eq!(map.len(), 10);
+
+        let removed = map.remove_keys(|key| key % 2 == 0);
+        assert_eq!(removed, 5);
+        assert_eq!(map.len(), 5);
+        for key in 0..10u32 {
+            assert_eq!(map.get(&key).is_some(), key % 2 == 1, "key {key}");
+        }
+    }
+
+    /// Removing nothing must not disturb an enumeration that is part-way through, and removing
+    /// something must reset it: bucket indices are what enumeration walks, and `retain` moves them.
+    #[test]
+    fn a_sweep_that_removes_nothing_leaves_enumeration_alone() {
+        let mut map: DynamicMap<u32, i32> = DynamicMap::new();
+        for key in 0..6u32 {
+            map.insert(key, 0);
+        }
+
+        let first = map.next(0).expect("a non-empty map enumerates");
+        let second = map.next(first).expect("and keeps going");
+        assert_eq!(map.remove_keys(|_| false), 0);
+        // Cursor untouched, so the walk continues from where it was.
+        assert_eq!(map.next(second), Some(second + 1));
+
+        // A sweep that removes something restarts the walk instead of trusting a stale cursor.
+        assert!(map.remove_keys(|key| *key == 0) > 0);
+        assert_eq!(map.next(0), Some(1));
+    }
+
+    /// Non-object keys are never "dead", so ordinary objects pay nothing for this.
+    #[test]
+    fn only_weak_object_keys_can_be_dead() {
+        assert!(!DynamicKey::<'_>::Uint(3).is_dead());
     }
 }

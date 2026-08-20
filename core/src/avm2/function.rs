@@ -269,8 +269,9 @@ fn classify_aether_movement_method_for(method: Method<'_>) -> Option<AetherMovem
     } else {
         None
     };
-    let movement_method = classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)
-        .or_else(|| classify_aether_movement_method_by_trait(method))?;
+    let movement_method =
+        classify_aether_movement_method_for_parts(method_name.as_ref(), bound_class)
+            .or_else(|| classify_aether_movement_method_by_trait(method))?;
     let owner_movie = method.owner_movie();
     let owner_url = owner_movie.url();
     if crate::aether_movie::is_aqw_game_movie(owner_url) {
@@ -326,13 +327,8 @@ fn aether_trait_method_name(method: Method<'_>) -> Option<String> {
 #[cfg(feature = "aether_compatibility")]
 fn aether_hook_method_name(method: Method<'_>, bound_class_local_name: Option<&str>) -> String {
     /// Every class an AQW compatibility hook matches a method on.
-    const HOOKED_CLASSES: [&str; 5] = [
-        "playerAuras",
-        "targetAuras",
-        "Avatar",
-        "scGame_1",
-        "SpellW",
-    ];
+    const HOOKED_CLASSES: [&str; 5] =
+        ["playerAuras", "targetAuras", "Avatar", "scGame_1", "SpellW"];
 
     let published = method.method_name();
     if !published.as_ref().is_empty() {

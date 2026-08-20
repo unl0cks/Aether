@@ -107,6 +107,18 @@ pub fn split_submission(
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,
 ) {
+    // Nothing may be submitted once the device has faulted. `CommandEncoder::finish` ends the
+    // underlying Vulkan command buffer, and wgpu-hal nulls its handle *before* making that
+    // fallible call -- so when it fails the encoder is left in exactly the state the discard
+    // that follows asserts against, and the process dies on an `assert_ne!` inside the driver
+    // wrapper rather than through the fault path this crate exists to reach.
+    //
+    // Reported upstream as an integrated-GPU crash class and closed as not planned, so the
+    // guard is ours to hold: see `note_pass_and_maybe_split` for where encoding stops.
+    if descriptors.device_status.is_faulted() {
+        return;
+    }
+
     staging_belt.finish();
     let finished = std::mem::replace(
         encoder,
@@ -122,15 +134,27 @@ pub fn split_submission(
     crate::aether_metrics::record_submission_split();
 }
 
-/// Note a pass and split if the count warrants it.
+/// Note a pass and split if the count warrants it, returning whether encoding should continue.
+///
+/// A fault recorded part-way through a frame means every resource in flight may already be
+/// invalid. Aether checks for one when a frame begins and again after it submits, but an
+/// out-of-memory device loss happens *between* those, while passes are still being encoded --
+/// which is precisely the window an integrated GPU dies in. This is the per-pass hook, so it is
+/// where that window is closed: the frame stops adding work and unwinds to the fault report that
+/// is already built for this, instead of encoding several hundred more passes into a dead device.
 pub fn note_pass_and_maybe_split(
     descriptors: &crate::descriptors::Descriptors,
     encoder: &mut wgpu::CommandEncoder,
     staging_belt: &mut wgpu::util::StagingBelt,
-) {
+) -> bool {
+    if descriptors.device_status.is_faulted() {
+        return false;
+    }
+
     if note_pass(max_passes_per_submission()) {
         split_submission(descriptors, encoder, staging_belt);
     }
+    true
 }
 
 #[cfg(test)]

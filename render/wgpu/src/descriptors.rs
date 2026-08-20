@@ -25,6 +25,14 @@ pub struct Descriptors {
     copy_pipeline: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), wgpu::RenderPipeline>>,
     pub shaders: Shaders,
     pipelines: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), Arc<Pipelines>>>,
+    /// What sample count the adapter will actually honour, by the count asked for and the format.
+    ///
+    /// `Surface::new` used to ask the adapter this directly, and a crowded AQW frame builds one
+    /// `Surface` per bitmap-cache entry, per blend and per mask -- measured at 137 cache entries
+    /// and 114 blends in a single frame. On Vulkan `get_texture_format_features` reaches the
+    /// driver, so that was a few hundred round trips a frame to re-derive an answer that depends
+    /// only on the adapter and the format, neither of which change while the client is running.
+    supported_sample_counts: Mutex<FnvHashMap<(u32, wgpu::TextureFormat), u32>>,
     /// Transform bind groups for a blend that covers part of its target, kept by the four numbers
     /// that decide their contents.
     ///
@@ -107,6 +115,7 @@ impl Descriptors {
             copy_pipeline: Default::default(),
             shaders,
             pipelines: Default::default(),
+            supported_sample_counts: Default::default(),
             region_frame_bind_groups: Default::default(),
             filters,
             device_status,
@@ -250,6 +259,22 @@ impl Descriptors {
                     })
             })
             .clone()
+    }
+
+    /// As [`crate::utils::supported_sample_count`], answered from memory after the first ask.
+    pub fn supported_sample_count(
+        &self,
+        requested_sample_count: u32,
+        format: wgpu::TextureFormat,
+    ) -> u32 {
+        *self
+            .supported_sample_counts
+            .lock()
+            .expect("Supported sample counts should not be already locked")
+            .entry((requested_sample_count, format))
+            .or_insert_with(|| {
+                crate::utils::supported_sample_count(&self.adapter, requested_sample_count, format)
+            })
     }
 
     pub fn pipelines(&self, msaa_sample_count: u32, format: wgpu::TextureFormat) -> Arc<Pipelines> {

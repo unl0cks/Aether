@@ -69,7 +69,9 @@ impl<T> MouseMotionCoalescer<T> {
             // stays at the interval rather than drifting a little slower with every burst.
             self.next_dispatch_at = Some(
                 self.last_dispatch_at
-                    .map_or(now + MOUSE_MOTION_INTERVAL, |last| last + MOUSE_MOTION_INTERVAL),
+                    .map_or(now + MOUSE_MOTION_INTERVAL, |last| {
+                        last + MOUSE_MOTION_INTERVAL
+                    }),
             );
         }
         MouseMotionDecision::queued(coalesced)
@@ -131,7 +133,10 @@ mod tests {
         let start = Instant::now();
         let mut policy = MouseMotionCoalescer::new(true);
 
-        assert_eq!(policy.push(1, start), MouseMotionDecision::dispatch(1, false));
+        assert_eq!(
+            policy.push(1, start),
+            MouseMotionDecision::dispatch(1, false)
+        );
 
         // Within the interval the rate limit still applies, so the rest are held.
         assert_eq!(

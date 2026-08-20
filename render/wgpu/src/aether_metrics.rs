@@ -74,6 +74,63 @@ pub struct WgpuMetricsSnapshot {
     /// How many times a frame's commands were handed over part-way through. Zero means every frame
     /// reached the driver in one piece, which is the state the device was lost in.
     pub submission_splits: u64,
+    /// Why runs of blends are not sharing passes, and how many passes a perfect batcher would use.
+    ///
+    /// `blend_chunks` alone cannot say whether batching is failing or simply has nothing to batch.
+    /// These do: `blend_full_surface` says the regions are unusable, `blend_adjacent` says whether
+    /// compatible blends ever sit next to each other, and `blend_ideal_batches` is the composite
+    /// pass count a batcher that could reorder freely would reach. The gap between that and
+    /// `blend_chunks` is the entire prize, and it is worth knowing before building anything.
+    pub blend_full_surface: u64,
+    pub blend_adjacent: u64,
+    pub blend_ideal_batches: u64,
+    pub blend_break_not_blend: u64,
+    pub blend_break_mode: u64,
+    pub blend_break_overlap: u64,
+    pub draw_chunks: u64,
+    /// Draw chunks whose extent could not be worked out, so no blend may be reordered past them.
+    /// If this is large the reordering is being blocked by missing bounds rather than by overlap.
+    pub draw_unbounded: u64,
+    /// CPU time spent building the per-blend bind groups counted by `bind_groups`.
+    ///
+    /// Frame time is now known to be CPU encoding rather than GPU work, and one bind group is
+    /// built per blend and never reused, so this says whether that is where it goes.
+    pub bind_group_nanos: u64,
+    /// How many blends the reorder actually relocated, and how many draw chunks ran out of boxes.
+    ///
+    /// These separate the two ways the reordering can come to nothing. If `moves` is near zero the
+    /// rule still cannot fire and the constraint is elsewhere; if `moves` is large but blend passes
+    /// have not fallen, the moves are not producing batches. And if `at_box_capacity` is large the
+    /// eight boxes are saturating and re-merging into the same screen-wide union that made the
+    /// first attempt useless.
+    pub blend_reorder_moves: u64,
+    pub draw_chunks_at_box_capacity: u64,
+    /// Bitmap-cache entries rebuilt this interval, split by whether they carry a filter.
+    ///
+    /// The two cost completely different things and only one of them can be avoided. A filterless
+    /// cache that is dirty every frame is pure loss -- its subtree could have been drawn straight
+    /// into the parent -- while a filtered one has to render to a texture whatever we do, because
+    /// the filter reads it back.
+    pub cache_entries_filtered: u64,
+    pub cache_entries_filterless: u64,
+    pub cache_entry_filters: u64,
+    /// Cache-entry encoding time split by whether the entry carries a filter. Only the filterless
+    /// half is reclaimable by a caching decision; the filtered half belongs to the blur.
+    pub cache_filtered_nanos: u64,
+    pub cache_filterless_nanos: u64,
+    /// How the frame's blur-family filters would group under an atlas.
+    ///
+    /// `filter_applications / filter_groups` is the batch size atlasing would reach. At 1.0 the
+    /// objects share no blur parameters and atlasing is worth nothing, which is the whole go/no-go.
+    pub filter_applications: u64,
+    pub filter_groups: u64,
+    pub filter_largest_group: u64,
+    /// Groups that really were blurred together, and both sides of the trade. `members / groups` is
+    /// the passes bought; `atlas_pixels / member_pixels` is the padding paid for them.
+    pub filter_atlas_groups: u64,
+    pub filter_atlas_members: u64,
+    pub filter_atlas_pixels: u64,
+    pub filter_atlas_member_pixels: u64,
 }
 
 struct PoolCounters {
@@ -348,7 +405,186 @@ pub fn record_encoded_chunk(draw_commands: u64, is_blend: bool) {
     saturating_atomic_add(&DRAW_COMMANDS, draw_commands);
     if is_blend {
         saturating_atomic_add(&BLEND_CHUNKS, 1);
+    } else {
+        saturating_atomic_add(&DRAW_CHUNKS, 1);
     }
+}
+
+static BLEND_FULL_SURFACE: AtomicU64 = AtomicU64::new(0);
+static BLEND_ADJACENT: AtomicU64 = AtomicU64::new(0);
+static BLEND_IDEAL_BATCHES: AtomicU64 = AtomicU64::new(0);
+static BLEND_BREAK_NOT_BLEND: AtomicU64 = AtomicU64::new(0);
+static BLEND_BREAK_MODE: AtomicU64 = AtomicU64::new(0);
+static BLEND_BREAK_OVERLAP: AtomicU64 = AtomicU64::new(0);
+static DRAW_CHUNKS: AtomicU64 = AtomicU64::new(0);
+static DRAW_UNBOUNDED: AtomicU64 = AtomicU64::new(0);
+static BLEND_REORDER_MOVES: AtomicU64 = AtomicU64::new(0);
+static DRAW_CHUNKS_AT_BOX_CAPACITY: AtomicU64 = AtomicU64::new(0);
+
+/// Record the blends one target's reorder relocated, and how many of its draw chunks were full.
+pub fn record_blend_reorder(moves: u64, chunks_at_capacity: u64) {
+    saturating_atomic_add(&BLEND_REORDER_MOVES, moves);
+    saturating_atomic_add(&DRAW_CHUNKS_AT_BOX_CAPACITY, chunks_at_capacity);
+}
+
+static CACHE_ENTRIES_FILTERED: AtomicU64 = AtomicU64::new(0);
+static CACHE_ENTRIES_FILTERLESS: AtomicU64 = AtomicU64::new(0);
+static CACHE_ENTRY_FILTERS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one rebuilt bitmap-cache entry and how many filters it carries.
+pub fn record_cache_entry(filters: u64) {
+    if filters == 0 {
+        saturating_atomic_add(&CACHE_ENTRIES_FILTERLESS, 1);
+    } else {
+        saturating_atomic_add(&CACHE_ENTRIES_FILTERED, 1);
+        saturating_atomic_add(&CACHE_ENTRY_FILTERS, filters);
+    }
+}
+
+static CACHE_FILTERED_NANOS: AtomicU64 = AtomicU64::new(0);
+static CACHE_FILTERLESS_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// Split the cache-entry encoding cost by whether the entry carries a filter.
+///
+/// The two are not the same problem and only one of them is reclaimable. A filterless entry that is
+/// dirty every frame is pure loss, because its subtree could have been drawn straight into the
+/// parent; a filtered one has to render to a texture no matter what, because the filter reads it
+/// back. `cache N ms over M entries` cannot tell those apart, and it is the largest single item in
+/// a crowded frame, so which half it is decides what to build.
+pub fn record_cache_entry_time(filtered: bool, elapsed: std::time::Duration) {
+    let nanos = elapsed.as_nanos() as u64;
+    if filtered {
+        saturating_atomic_add(&CACHE_FILTERED_NANOS, nanos);
+    } else {
+        saturating_atomic_add(&CACHE_FILTERLESS_NANOS, nanos);
+    }
+}
+
+static FILTER_APPLICATIONS: AtomicU64 = AtomicU64::new(0);
+static FILTER_GROUPS: AtomicU64 = AtomicU64::new(0);
+static FILTER_LARGEST_GROUP: AtomicU64 = AtomicU64::new(0);
+
+/// The grouping key for a filter whose cost is a separable blur, or `None` if it has no such cost.
+///
+/// This exists to decide one question: would atlasing the frame's filter work pay? Atlasing packs
+/// several objects into one padded texture and runs a single horizontal and vertical pass over the
+/// group, so it only helps objects that share blur parameters exactly. Two glows of radius 8 can
+/// share; a radius-8 and a radius-17 cannot share anything.
+///
+/// Keyed on the raw fixed-point radii and the pass count rather than anything derived, so two
+/// filters group only when they would genuinely run the same kernel.
+pub fn atlasable_filter_signature(filter: &ruffle_render::filters::Filter) -> Option<u64> {
+    use ruffle_render::filters::Filter;
+
+    // A distinct tag per variant, so two filters with equal radii but different maths never share
+    // a group.
+    let (tag, blur_x, blur_y, passes) = match filter {
+        Filter::BlurFilter(f) => (0u64, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        Filter::GlowFilter(f) => (1, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        Filter::DropShadowFilter(f) => (2, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        Filter::BevelFilter(f) => (3, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        Filter::GradientGlowFilter(f) => (4, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        Filter::GradientBevelFilter(f) => (5, f.blur_x.get(), f.blur_y.get(), f.num_passes()),
+        // No blur, so no separable passes to share.
+        Filter::ColorMatrixFilter(_)
+        | Filter::ConvolutionFilter(_)
+        | Filter::DisplacementMapFilter(_)
+        | Filter::ShaderFilter(_) => return None,
+    };
+
+    Some(
+        (tag << 56)
+            ^ ((blur_x as u32 as u64) << 24)
+            ^ ((blur_y as u32 as u64) << 8)
+            ^ passes as u64,
+    )
+}
+
+/// Record how the frame's blur-family filters would group under an atlas.
+///
+/// `applications / groups` is the batch size an atlas would achieve. At 1.0 every filter has its
+/// own parameters and atlasing is worth exactly nothing; the lever is only worth building if this
+/// is comfortably above 1.
+pub fn record_filter_groups(signatures: &mut Vec<u64>) {
+    if signatures.is_empty() {
+        return;
+    }
+    let (groups, largest) = count_signature_groups(signatures);
+
+    saturating_atomic_add(&FILTER_APPLICATIONS, signatures.len() as u64);
+    saturating_atomic_add(&FILTER_GROUPS, groups);
+    saturating_atomic_add(&FILTER_LARGEST_GROUP, largest);
+}
+
+/// How many distinct groups a frame's signatures form, and the size of the biggest.
+///
+/// Split out from the recording so the arithmetic can be tested without a GPU or a frame. Sorts in
+/// place and counts runs; the caller's vector order is not meaningful afterwards.
+fn count_signature_groups(signatures: &mut [u64]) -> (u64, u64) {
+    signatures.sort_unstable();
+
+    let mut groups = 0u64;
+    let mut largest = 0u64;
+    let mut run = 0u64;
+    let mut previous = None;
+    for &signature in signatures.iter() {
+        if Some(signature) == previous {
+            run += 1;
+        } else {
+            groups += 1;
+            // The run that just ended, not the one starting, so the final run needs the same
+            // comparison again after the loop.
+            largest = largest.max(run);
+            run = 1;
+            previous = Some(signature);
+        }
+    }
+
+    (groups, largest.max(run))
+}
+
+static FILTER_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
+static FILTER_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
+static FILTER_ATLAS_PIXELS: AtomicU64 = AtomicU64::new(0);
+static FILTER_ATLAS_MEMBER_PIXELS: AtomicU64 = AtomicU64::new(0);
+
+/// Record one group that was actually blurred together, and both sides of the trade it makes.
+///
+/// Atlasing buys passes and pays pixels. `members / groups` is what it bought: a group of six runs
+/// one set of blur passes where six would have run their own. `pixels` against `member_pixels` is
+/// what it cost: every source is padded by the blur's reach on all four sides, so a small object
+/// with a wide kernel can easily take three times its own area in the atlas.
+///
+/// Both are needed to judge it. Frame time was measured as CPU encoding rather than GPU work, which
+/// is why trading pixels for passes should win -- but "should" is why this is counted rather than
+/// assumed, and a scene of small objects with wide glows is exactly where it could lose.
+pub fn record_filter_atlas(members: u64, atlas_pixels: u64, member_pixels: u64) {
+    saturating_atomic_add(&FILTER_ATLAS_GROUPS, 1);
+    saturating_atomic_add(&FILTER_ATLAS_MEMBERS, members);
+    saturating_atomic_add(&FILTER_ATLAS_PIXELS, atlas_pixels);
+    saturating_atomic_add(&FILTER_ATLAS_MEMBER_PIXELS, member_pixels);
+}
+
+/// What one target's chunk list says about why its blends are not sharing passes.
+#[derive(Default, Clone, Copy)]
+pub struct BlendBatchCensus {
+    pub full_surface: u64,
+    pub adjacent: u64,
+    pub ideal_batches: u64,
+    pub break_not_blend: u64,
+    pub break_mode: u64,
+    pub break_overlap: u64,
+    pub draw_unbounded: u64,
+}
+
+pub fn record_blend_batch_census(census: BlendBatchCensus) {
+    saturating_atomic_add(&BLEND_FULL_SURFACE, census.full_surface);
+    saturating_atomic_add(&BLEND_ADJACENT, census.adjacent);
+    saturating_atomic_add(&BLEND_IDEAL_BATCHES, census.ideal_batches);
+    saturating_atomic_add(&BLEND_BREAK_NOT_BLEND, census.break_not_blend);
+    saturating_atomic_add(&BLEND_BREAK_MODE, census.break_mode);
+    saturating_atomic_add(&BLEND_BREAK_OVERLAP, census.break_overlap);
+    saturating_atomic_add(&DRAW_UNBOUNDED, census.draw_unbounded);
 }
 
 /// A frame's commands were handed to the driver part-way through rather than all at once.
@@ -359,6 +595,19 @@ pub fn record_submission_split() {
 /// Record a bind group built during encoding rather than served from a cache.
 pub fn record_bind_group_created() {
     saturating_atomic_add(&BIND_GROUPS, 1);
+}
+
+static BIND_GROUP_NANOS: AtomicU64 = AtomicU64::new(0);
+
+/// CPU time spent inside `create_bind_group` for complex blends.
+///
+/// Frame time is now known to be CPU encoding rather than GPU work -- a crowded Yulgar frame
+/// spends 54 of its 57 ms in submit while the queue blocks for 2 -- and that comes to ~67 us per
+/// render pass, which is a great deal for describing one. One bind group is built per blend and
+/// never reused, so this says whether that is where the time goes before anything is built to
+/// cache them.
+pub fn record_bind_group_nanos(elapsed: std::time::Duration) {
+    saturating_atomic_add(&BIND_GROUP_NANOS, nanos(elapsed));
 }
 
 pub fn take_snapshot() -> WgpuMetricsSnapshot {
@@ -379,6 +628,29 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         draw_commands: DRAW_COMMANDS.swap(0, Ordering::Relaxed),
         blend_chunks: BLEND_CHUNKS.swap(0, Ordering::Relaxed),
         bind_groups: BIND_GROUPS.swap(0, Ordering::Relaxed),
+        blend_full_surface: BLEND_FULL_SURFACE.swap(0, Ordering::Relaxed),
+        blend_adjacent: BLEND_ADJACENT.swap(0, Ordering::Relaxed),
+        blend_ideal_batches: BLEND_IDEAL_BATCHES.swap(0, Ordering::Relaxed),
+        blend_break_not_blend: BLEND_BREAK_NOT_BLEND.swap(0, Ordering::Relaxed),
+        blend_break_mode: BLEND_BREAK_MODE.swap(0, Ordering::Relaxed),
+        blend_break_overlap: BLEND_BREAK_OVERLAP.swap(0, Ordering::Relaxed),
+        draw_chunks: DRAW_CHUNKS.swap(0, Ordering::Relaxed),
+        draw_unbounded: DRAW_UNBOUNDED.swap(0, Ordering::Relaxed),
+        bind_group_nanos: BIND_GROUP_NANOS.swap(0, Ordering::Relaxed),
+        blend_reorder_moves: BLEND_REORDER_MOVES.swap(0, Ordering::Relaxed),
+        draw_chunks_at_box_capacity: DRAW_CHUNKS_AT_BOX_CAPACITY.swap(0, Ordering::Relaxed),
+        cache_entries_filtered: CACHE_ENTRIES_FILTERED.swap(0, Ordering::Relaxed),
+        cache_entries_filterless: CACHE_ENTRIES_FILTERLESS.swap(0, Ordering::Relaxed),
+        cache_entry_filters: CACHE_ENTRY_FILTERS.swap(0, Ordering::Relaxed),
+        cache_filtered_nanos: CACHE_FILTERED_NANOS.swap(0, Ordering::Relaxed),
+        cache_filterless_nanos: CACHE_FILTERLESS_NANOS.swap(0, Ordering::Relaxed),
+        filter_applications: FILTER_APPLICATIONS.swap(0, Ordering::Relaxed),
+        filter_groups: FILTER_GROUPS.swap(0, Ordering::Relaxed),
+        filter_largest_group: FILTER_LARGEST_GROUP.swap(0, Ordering::Relaxed),
+        filter_atlas_groups: FILTER_ATLAS_GROUPS.swap(0, Ordering::Relaxed),
+        filter_atlas_members: FILTER_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
+        filter_atlas_pixels: FILTER_ATLAS_PIXELS.swap(0, Ordering::Relaxed),
+        filter_atlas_member_pixels: FILTER_ATLAS_MEMBER_PIXELS.swap(0, Ordering::Relaxed),
     }
 }
 
@@ -437,6 +709,64 @@ mod recent_texture_tests {
 mod tests {
     use super::*;
     use crate::texture_pool_policy::PoolMaintenanceReport;
+
+    /// The go/no-go arithmetic for atlasing filters, including the case that decides it.
+    #[test]
+    fn signature_groups_count_runs_including_the_last_one() {
+        // Nothing shares parameters: one group each, biggest group of one. This is the reading that
+        // would mean an atlas buys nothing, so it has to be unambiguous.
+        let (groups, largest) = count_signature_groups(&mut [1, 2, 3, 4]);
+        assert_eq!((groups, largest), (4, 1));
+
+        // All identical: one group covering everything.
+        let (groups, largest) = count_signature_groups(&mut [7, 7, 7, 7]);
+        assert_eq!((groups, largest), (1, 4));
+
+        // Unsorted input, and the largest run sits at the END -- the case a run-counter that only
+        // compares on change silently loses.
+        let (groups, largest) = count_signature_groups(&mut [5, 9, 5, 9, 9, 9]);
+        assert_eq!((groups, largest), (2, 4));
+
+        let (groups, largest) = count_signature_groups(&mut [3]);
+        assert_eq!((groups, largest), (1, 1));
+    }
+
+    /// Filters with no blur have no separable passes, so they must not be counted as atlasable.
+    #[test]
+    fn only_blur_family_filters_get_a_signature() {
+        use ruffle_render::filters::Filter;
+
+        let blur = Filter::BlurFilter(swf::BlurFilter {
+            blur_x: swf::Fixed16::from_f32(8.0),
+            blur_y: swf::Fixed16::from_f32(8.0),
+            flags: swf::BlurFilterFlags::from_passes(2),
+        });
+        let same = Filter::BlurFilter(swf::BlurFilter {
+            blur_x: swf::Fixed16::from_f32(8.0),
+            blur_y: swf::Fixed16::from_f32(8.0),
+            flags: swf::BlurFilterFlags::from_passes(2),
+        });
+        let wider = Filter::BlurFilter(swf::BlurFilter {
+            blur_x: swf::Fixed16::from_f32(17.0),
+            blur_y: swf::Fixed16::from_f32(8.0),
+            flags: swf::BlurFilterFlags::from_passes(2),
+        });
+
+        assert_eq!(
+            atlasable_filter_signature(&blur),
+            atlasable_filter_signature(&same),
+            "equal parameters must share a group, or atlasing looks worthless when it is not"
+        );
+        assert_ne!(
+            atlasable_filter_signature(&blur),
+            atlasable_filter_signature(&wider),
+            "a different radius runs a different kernel and cannot share a pass"
+        );
+        assert!(
+            atlasable_filter_signature(&Filter::ColorMatrixFilter(Default::default())).is_none(),
+            "a colour matrix has no blur to batch"
+        );
+    }
 
     #[test]
     fn texture_estimator_handles_blocks_mips_layers_and_samples() {
@@ -603,8 +933,11 @@ mod tests {
             report.contains("67.1 MB"),
             "overflow must carry its bytes: {report}"
         );
+        // Derived, not spelled out. This read `513` from when the table held 512 buckets, so
+        // growing it to 4096 turned a working guard into a failing one and the assertion stopped
+        // saying anything about the overflow it exists to check.
         assert!(
-            report.contains("513 allocations"),
+            report.contains(&format!("{} allocations", TEXTURE_BUCKETS + 1)),
             "the header total must include the overflow: {report}"
         );
     }
@@ -922,7 +1255,8 @@ pub fn record_texture_created(
     let key = texture_key(origin, width, height, samples);
     // Wrapping ring, written before the census bookkeeping below so an allocation that is about to
     // fail is still recorded.
-    let slot = RECENT_TEXTURE_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % RECENT_TEXTURE_SLOTS;
+    let slot =
+        RECENT_TEXTURE_CURSOR.fetch_add(1, Ordering::Relaxed) as usize % RECENT_TEXTURE_SLOTS;
     RECENT_TEXTURES[slot].store(key, Ordering::Relaxed);
     let start = (key % TEXTURE_BUCKETS as u64) as usize;
     for probe in 0..TEXTURE_BUCKETS {

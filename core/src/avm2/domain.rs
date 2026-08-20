@@ -135,12 +135,32 @@ impl<'gc> Domain<'gc> {
 
         #[cfg(feature = "egui")]
         if let Some(parent) = parent {
-            parent
-                .cell_mut(mc)
-                .children
-                .push(DomainWeak(Gc::downgrade(this.0)));
+            Self::register_child(parent, this.0, mc);
         }
         this
+    }
+
+    /// Register `child` with its parent for the debug UI, dropping entries that have died.
+    ///
+    /// The list is only ever read by `debug_ui`, and pruned only when it is read -- so in ordinary
+    /// play nothing reads it and nothing prunes it. AQW builds a fresh child `ApplicationDomain`
+    /// every time it clears its loaders, which is every map change, so the parent accumulates a
+    /// weak entry per map change for a list nobody will look at. A `GcWeak` also pins the
+    /// allocation it points at, so dead entries hold their domain's header open indefinitely.
+    ///
+    /// Pruning here keeps it proportional to the number of domains actually alive. It is amortised
+    /// against growth rather than run on every push, so the common case stays a single `push`.
+    #[cfg(feature = "egui")]
+    fn register_child(parent: Domain<'gc>, child: Gc<'gc, DomainData<'gc>>, mc: &Mutation<'gc>) {
+        /// Prune once the list has doubled past whatever survived the previous prune.
+        const MIN_BEFORE_PRUNE: usize = 32;
+
+        let mut cell = parent.cell_mut(mc);
+        if cell.children.len() >= MIN_BEFORE_PRUNE.max(cell.children.capacity() / 2) {
+            cell.children
+                .retain(|child| GcWeak::upgrade(child.0, mc).is_some());
+        }
+        cell.children.push(DomainWeak(Gc::downgrade(child)));
     }
 
     pub fn classes(&self) -> Ref<'_, PropertyMap<'gc, Class<'gc>>> {
@@ -188,12 +208,7 @@ impl<'gc> Domain<'gc> {
         ));
 
         #[cfg(feature = "egui")]
-        {
-            parent
-                .cell_mut(context.gc())
-                .children
-                .push(DomainWeak(Gc::downgrade(this.0)));
-        }
+        Self::register_child(parent, this.0, context.gc());
 
         this
     }
@@ -398,7 +413,6 @@ impl<'gc> Domain<'gc> {
     pub fn defs(&self) -> Ref<'_, PropertyMap<'gc, Script<'gc>>> {
         Ref::map(self.cell(), |this| &this.defs)
     }
-
 
     pub fn is_default_domain_memory(&self) -> bool {
         let domain_memory_ptr = self.domain_memory().as_ptr();

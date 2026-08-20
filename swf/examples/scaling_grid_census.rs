@@ -120,8 +120,8 @@ fn main() {
             }
         }
 
-        let interactive = census.get("TEXT").copied().unwrap_or(0)
-            + census.get("BUTTON").copied().unwrap_or(0);
+        let interactive =
+            census.get("TEXT").copied().unwrap_or(0) + census.get("BUTTON").copied().unwrap_or(0);
         if interactive > 0 {
             with_content += 1;
         } else {

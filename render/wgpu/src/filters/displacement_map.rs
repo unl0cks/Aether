@@ -177,7 +177,7 @@ impl DisplacementMapFilter {
         let format = source.texture.format();
         let pipeline = self.pipeline(descriptors, sample_count);
 
-        let target = CommandTarget::new(
+        let target = CommandTarget::new_for_filter(
             descriptors,
             texture_pool,
             wgpu::Extent3d {

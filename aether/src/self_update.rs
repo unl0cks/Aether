@@ -271,7 +271,6 @@ pub async fn fetch_latest_release() -> Option<Release> {
     parse_latest_release(&response.text().await.ok()?)
 }
 
-
 /// How many times one route is tried before moving on to the next.
 const DOWNLOAD_ATTEMPTS: u32 = 3;
 
@@ -293,10 +292,10 @@ async fn fetch_asset(
     use anyhow::Context as _;
 
     let mut routes: Vec<(&str, bool)> = vec![(direct, false)];
-    if let Some(api) = via_api {
-        if api != direct {
-            routes.push((api, true));
-        }
+    if let Some(api) = via_api
+        && api != direct
+    {
+        routes.push((api, true));
     }
 
     let mut last: Option<anyhow::Error> = None;
@@ -318,7 +317,11 @@ async fn fetch_asset(
                 tokio::time::sleep(std::time::Duration::from_secs(u64::from(attempt))).await;
             }
         }
-        tracing::warn!("downloading {what} from {url} failed: {:#}", last.as_ref().unwrap());
+        // `last` is set by every failing attempt above, but saying so with `unwrap` puts a panic in
+        // the error path of the updater -- the one place least able to afford a second failure.
+        if let Some(error) = last.as_ref() {
+            tracing::warn!("downloading {what} from {url} failed: {error:#}");
+        }
     }
 
     Err(last.unwrap_or_else(|| anyhow::anyhow!("no route to the asset")))

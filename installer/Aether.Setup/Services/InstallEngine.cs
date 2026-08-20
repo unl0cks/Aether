@@ -96,7 +96,14 @@ public static class InstallEngine
 
         progress?.Report(new Progress("Registering with Windows", 0.95));
         RegisterFileTypes(o, log);
-        RegisterUninstall(o, InstalledVersion(version, downloaded), log);
+        // The files are on disk by now, so the binary itself can be asked what was just installed. That beats
+        // both of the guesses below: a launcher's own number is not what it fetched, and a download that named
+        // no version leaves nothing to record at all. They stay as the fallback for an aether.exe with no
+        // readable version resource.
+        RegisterUninstall(o,
+            PreferBinaryVersion(BinaryVersion(o.InstallDir), InstalledVersion(version, downloaded))
+                ?? InstalledVersion(version, downloaded),
+            log);
 
         progress?.Report(new Progress("Done", 1));
         log("Install complete.");
@@ -218,8 +225,55 @@ public static class InstallEngine
     public static string? ExistingInstall()
         => ReadOurArp("InstallLocation") is { } a && Directory.Exists(a) ? a : null;
 
+    /// <summary>Which Aether is on disk, asked of the binary first and the registry only if that fails.
+    ///
+    /// The registry holds whatever the last installer wrote, which is a record of an intention rather than a
+    /// fact, and two things routinely make it wrong. Aether updates itself, replacing aether.exe without going
+    /// near Add/Remove Programs, so an in-app update leaves the recorded number behind immediately. And a
+    /// launcher whose download named no version records its own build number as a fallback, which is how a
+    /// launcher copied from the 0.6.14 build told people they had 0.6.14 whatever they actually had.
+    ///
+    /// The file that runs cannot be wrong about what it is, so it is asked first.</summary>
     public static string? ExistingVersion()
-        => ReadOurArp("DisplayVersion") ?? FindLegacy()?.Version;
+    {
+        string? recorded = ReadOurArp("DisplayVersion") ?? FindLegacy()?.Version;
+        string? onDisk = BinaryVersion(ExistingInstall()) ?? BinaryVersion(FindLegacy()?.InstallLocation);
+        return PreferBinaryVersion(onDisk, recorded);
+    }
+
+    /// <summary>The version stamped into the aether.exe in a directory, or null if there is no readable one.
+    ///
+    /// Null rather than a guess for every way this can come up short -- no directory, no exe, an exe with no
+    /// version resource, an exe being replaced as we look -- because the caller has a recorded version to fall
+    /// back to and a wrong number is worse than a missing one.</summary>
+    public static string? BinaryVersion(string? installDir)
+    {
+        if (string.IsNullOrWhiteSpace(installDir)) return null;
+        try
+        {
+            string exe = Path.Combine(installDir, ExeName);
+            if (!File.Exists(exe)) return null;
+            return NormalizeVersion(FileVersionInfo.GetVersionInfo(exe).ProductVersion);
+        }
+        catch { return null; }
+    }
+
+    /// <summary>Trim a version resource down to the number people recognise.
+    ///
+    /// Build metadata after a '+' is dropped the same way <c>SetupInfo</c> drops it, so a version read off the
+    /// binary and one read off the installer are comparable strings rather than nearly-equal ones.</summary>
+    public static string? NormalizeVersion(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return null;
+        string v = raw.Trim();
+        int plus = v.IndexOf('+');
+        if (plus > 0) v = v[..plus];
+        return string.IsNullOrWhiteSpace(v) ? null : v;
+    }
+
+    /// <summary>Prefer what the binary says over what was recorded, falling back when it says nothing.</summary>
+    public static string? PreferBinaryVersion(string? fromBinary, string? recorded) =>
+        string.IsNullOrWhiteSpace(fromBinary) ? recorded : fromBinary;
 
     /// <summary>Read one of OUR Add/Remove Programs values. HKCU only, on purpose: a machine-wide entry left
     /// by an older elevated build must not pre-fill the wizard, because setup now runs unelevated and would

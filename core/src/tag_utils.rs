@@ -105,3 +105,78 @@ pub fn movie_from_path<P: AsRef<std::path::Path>>(
 
     SwfMovie::from_data(&data, url.into(), loader_url).map_err(Error::InvalidSwf)
 }
+
+#[cfg(test)]
+mod decode_tags_tests {
+    use super::*;
+
+    /// A tag header is a u16 of `code << 6 | length`, with 0x3F meaning "a u32 length follows".
+    fn tag(code: u16, body: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        if body.len() < 0x3F {
+            out.extend_from_slice(&((code << 6) | body.len() as u16).to_le_bytes());
+        } else {
+            out.extend_from_slice(&((code << 6) | 0x3F).to_le_bytes());
+            out.extend_from_slice(&(body.len() as u32).to_le_bytes());
+        }
+        out.extend_from_slice(body);
+        out
+    }
+
+    /// ShowFrame, a DefineSprite with a body nobody reads, ShowFrame, End.
+    fn stream() -> Vec<u8> {
+        let mut data = tag(1, &[]);
+        data.extend(tag(39, &[0xAA; 10]));
+        data.extend(tag(1, &[]));
+        data.extend(tag(0, &[]));
+        data
+    }
+
+    fn visit(reader: &mut SwfStream<'_>, stop_at: Option<TagCode>) -> Vec<TagCode> {
+        let mut seen = Vec::new();
+        let _ = decode_tags(reader, |_reader, tag| {
+            seen.push(tag);
+            Ok(if Some(tag) == stop_at {
+                ControlFlow::Exit
+            } else {
+                ControlFlow::Continue
+            })
+        });
+        seen
+    }
+
+    /// What makes it safe to skip a definition tag without reading it: the loop restores the reader
+    /// to the end of the tag itself, so a callback that consumes none of the body still lands on
+    /// the next tag rather than inside this one.
+    #[test]
+    fn continuing_from_a_callback_skips_the_rest_of_that_tag() {
+        let data = stream();
+        let mut reader = SwfStream::new(&data, 10);
+        assert_eq!(
+            visit(&mut reader, None),
+            vec![
+                TagCode::ShowFrame,
+                TagCode::DefineSprite,
+                TagCode::ShowFrame,
+                TagCode::End
+            ],
+        );
+    }
+
+    /// And what makes `Exit` expensive: it ends the whole pass, leaving the reader just past the
+    /// tag that stopped it. `MovieClip::preload` is pumped once per frame, so a pass that stops on
+    /// every already-defined sprite advances exactly one sprite per frame -- which is why a
+    /// re-shown armour took seconds to appear.
+    #[test]
+    fn exiting_ends_the_pass_and_a_resumed_one_starts_after_that_tag() {
+        let data = stream();
+        let mut reader = SwfStream::new(&data, 10);
+
+        let first = visit(&mut reader, Some(TagCode::DefineSprite));
+        assert_eq!(first, vec![TagCode::ShowFrame, TagCode::DefineSprite]);
+
+        // Resuming does not repeat the sprite, and does not land inside its body.
+        let second = visit(&mut reader, Some(TagCode::DefineSprite));
+        assert_eq!(second, vec![TagCode::ShowFrame, TagCode::End]);
+    }
+}

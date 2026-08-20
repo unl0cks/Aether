@@ -24,6 +24,13 @@
 //! urls` was added to ask the question that is still open: of the SWFs being retained, how many are
 //! second and third copies of a URL already resident, which export nothing and are looked up never.
 //!
+//! **That question is now answered: 4,693 movies for 1,935 distinct urls, so 2.4 copies of every
+//! file.** Since they cannot be released afterwards, they are no longer created -- a load of a URL
+//! already resident shares the movie that is there (`Library::resident_movie`). `reused` counts how
+//! often that path is taken, and `movies` should now track `distinct urls` rather than multiplying
+//! it. What remains after that is the genuine first copy of each file, which is the cost of
+//! shared-domain loading and is not a leak.
+//!
 //! Always compiled, not gated behind the metrics build. The people who can reproduce this are
 //! running ordinary releases, and a diagnostic they have to be handed a special binary for is a
 //! diagnostic that does not get run.
@@ -104,7 +111,7 @@ impl MemoryCensus {
 
         tracing::info!(
             "memory census: {} | gc {} ({:+}) MB over {} objects | movies {} ({:+}) | \
-             characters {} ({:+}) | orphans {} ({:+}) | unloads {} | distinct urls {} | \
+             characters {} ({:+}) | orphans {} ({:+}) | unloads {} | reused {} (skipped {} sprites) | weak dicts {} ({} object-keyed, pruned {} keys) | collections {} freeing {} MB worst {} ms | caches swept {} | distinct urls {} | \
              swf bytes {} MB ({} MB duplicated)",
             describe_resident(sample.resident, first.resident),
             sample.core.gc_bytes / (1024 * 1024),
@@ -117,9 +124,39 @@ impl MemoryCensus {
             sample.core.orphans,
             delta(sample.core.orphans, first.core.orphans),
             sample.core.unloads,
+            sample.core.movie_reuses,
+            sample.core.preload_sprites_already_defined,
+            sample.core.weak_dictionaries,
+            sample.core.weak_dictionaries_object_keyed,
+            sample.core.dictionary_keys_pruned,
+            sample.core.collections_run,
+            sample.core.collection_reclaimed_bytes / (1024 * 1024),
+            sample.core.collection_worst_micros / 1000,
+            sample.core.bitmap_caches_swept,
             sample.core.distinct_urls,
             sample.core.movie_bytes / (1024 * 1024),
             sample.core.duplicate_movie_bytes / (1024 * 1024),
+        );
+
+        // What those characters actually are. `characters` climbing says retention is happening;
+        // this says which kind of thing is being retained, and for bitmaps and binary data how many
+        // bytes of Rust heap that comes to. Sounds are named separately because they are the one
+        // kind no release path touches.
+        let characters = sample.core.character_census;
+        tracing::info!(
+            "character census: bitmaps {} ({} MB source, {} uploaded) | graphics {} | \
+             morph shapes {} | fonts {} | sounds {} | movie clips {} | \
+             binary {} | other {}",
+            characters.bitmaps,
+            characters.bitmap_bytes / (1024 * 1024),
+            characters.bitmaps_uploaded,
+            characters.graphics,
+            characters.morph_shapes,
+            characters.fonts,
+            characters.sounds,
+            characters.movie_clips,
+            characters.binary_data,
+            characters.other,
         );
 
         // The line the other two cannot produce between them: what the client's own heap holds,
@@ -201,7 +238,7 @@ fn describe_resident(current: Option<u64>, first: Option<u64>) -> String {
         Some(first) => format!(
             "rss {:.0} MB ({:+.0} MB)",
             megabytes(current),
-            megabytes(current) as f64 - megabytes(first),
+            megabytes(current) - megabytes(first),
         ),
         None => format!("rss {:.0} MB", megabytes(current)),
     }

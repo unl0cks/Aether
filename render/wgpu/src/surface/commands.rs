@@ -463,6 +463,12 @@ pub enum Chunk {
         chunk: Vec<DrawCommand>,
         needs_stencil: bool,
         transforms: BufferBuilder,
+        /// Where this chunk draws, in the space blend regions use. `None` means it holds a command
+        /// whose extent is not known, so it must be assumed to cover everything.
+        ///
+        /// Only used to decide whether a blend may be reordered past this chunk; nothing about how
+        /// the chunk itself renders depends on it.
+        bounds: Option<DrawRegions>,
     },
     Blend {
         texture: PoolOrArcTexture,
@@ -582,6 +588,148 @@ struct WgpuCommandHandler<'a> {
     transforms: BufferBuilder,
     needs_stencil: bool,
     num_masks: i32,
+    /// Where everything in `current` draws, in the space the commands were recorded in.
+    ///
+    /// `None` means at least one command in the chunk could not be bounded, so the chunk has to be
+    /// treated as covering everything. See [`Chunk::Draw::bounds`].
+    current_bounds: ChunkBounds,
+}
+
+/// How many disjoint boxes a draw chunk's extent is described by.
+///
+/// One union per chunk was the first attempt and it does not work: a crowded AQW frame packs
+/// twenty avatars into a chunk, so the union is most of the screen and no blend can ever be shown
+/// to clear it. Measured with a single box, 246 blend passes stayed 246 against an ideal of 63.
+/// Keeping a handful of boxes describes "two avatars, opposite corners" for what it is. Eight is
+/// enough to separate the clusters that matter without making the overlap test expensive, since it
+/// runs against every candidate blend.
+const CHUNK_BOUND_BOXES: usize = 8;
+
+/// The screen extent of a draw chunk, or the admission that it is not known.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum ChunkBounds {
+    /// Nothing has been drawn into this chunk yet.
+    Empty,
+    /// Everything so far is inside these boxes, in the recording space.
+    Known([Rectangle<Twips>; CHUNK_BOUND_BOXES], u8),
+    /// Something in this chunk cannot be bounded. Treat it as covering the whole target.
+    Unknown,
+}
+
+const EMPTY_BOX: Rectangle<Twips> = Rectangle {
+    x_min: Twips::ZERO,
+    x_max: Twips::ZERO,
+    y_min: Twips::ZERO,
+    y_max: Twips::ZERO,
+};
+
+/// How much area merging two boxes would add over keeping them apart. Chooses the cheapest pair
+/// to collapse once the table is full, so distant clusters stay distinct for as long as possible.
+fn union_cost(a: &Rectangle<Twips>, b: &Rectangle<Twips>) -> i64 {
+    let area = |r: &Rectangle<Twips>| {
+        let w = (r.x_max.get() as i64 - r.x_min.get() as i64).max(0);
+        let h = (r.y_max.get() as i64 - r.y_min.get() as i64).max(0);
+        w.saturating_mul(h)
+    };
+    area(&a.union(b))
+        .saturating_sub(area(a))
+        .saturating_sub(area(b))
+}
+
+impl ChunkBounds {
+    fn add(&mut self, bounds: Option<Rectangle<Twips>>) {
+        let Some(bounds) = bounds else {
+            *self = ChunkBounds::Unknown;
+            return;
+        };
+        if !bounds.is_valid() {
+            return;
+        }
+
+        match self {
+            ChunkBounds::Unknown => {}
+            ChunkBounds::Empty => {
+                let mut boxes = [EMPTY_BOX; CHUNK_BOUND_BOXES];
+                boxes[0] = bounds;
+                *self = ChunkBounds::Known(boxes, 1);
+            }
+            ChunkBounds::Known(boxes, len) => {
+                let used = *len as usize;
+                if used < CHUNK_BOUND_BOXES {
+                    boxes[used] = bounds;
+                    *len += 1;
+                    return;
+                }
+                // Full: fold the new box into whichever existing one it costs least to widen.
+                let mut best = 0;
+                let mut best_cost = i64::MAX;
+                for (index, held) in boxes.iter().enumerate() {
+                    let cost = union_cost(held, &bounds);
+                    if cost < best_cost {
+                        best_cost = cost;
+                        best = index;
+                    }
+                }
+                boxes[best] = boxes[best].union(&bounds);
+            }
+        }
+    }
+
+    fn take(&mut self) -> Self {
+        mem::replace(self, ChunkBounds::Empty)
+    }
+
+    /// As pixel rectangles in the space blend regions use, or `None` if unbounded.
+    ///
+    /// An empty chunk draws nothing, so it obstructs nothing and reports no boxes at all.
+    fn to_regions(self) -> Option<DrawRegions> {
+        match self {
+            ChunkBounds::Unknown => None,
+            ChunkBounds::Empty => Some(DrawRegions::default()),
+            ChunkBounds::Known(boxes, len) => {
+                let mut regions = DrawRegions::default();
+                for held in boxes.iter().take(len as usize) {
+                    if !held.is_valid() {
+                        continue;
+                    }
+                    let x = held.x_min.to_pixels().floor().max(0.0) as u32;
+                    let y = held.y_min.to_pixels().floor().max(0.0) as u32;
+                    let right = held.x_max.to_pixels().ceil().max(0.0) as u32;
+                    let bottom = held.y_max.to_pixels().ceil().max(0.0) as u32;
+                    regions.push((x, y, right.saturating_sub(x), bottom.saturating_sub(y)));
+                }
+                Some(regions)
+            }
+        }
+    }
+}
+
+/// The boxes a draw chunk occupies, in the space blend regions use.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct DrawRegions {
+    boxes: [(u32, u32, u32, u32); CHUNK_BOUND_BOXES],
+    len: u8,
+}
+
+impl DrawRegions {
+    fn push(&mut self, region: (u32, u32, u32, u32)) {
+        if (self.len as usize) < CHUNK_BOUND_BOXES {
+            self.boxes[self.len as usize] = region;
+            self.len += 1;
+        }
+    }
+
+    /// Whether every box is spoken for, so further drawing widens one instead of adding another.
+    pub fn is_at_capacity(&self) -> bool {
+        self.len as usize >= CHUNK_BOUND_BOXES
+    }
+
+    /// Whether a blend covering `region` touches any of this chunk's drawing.
+    pub fn overlaps(&self, region: Option<(u32, u32, u32, u32)>) -> bool {
+        self.boxes[..self.len as usize]
+            .iter()
+            .any(|held| blend_regions_overlap(Some(*held), region))
+    }
 }
 
 impl<'a> WgpuCommandHandler<'a> {
@@ -622,6 +770,7 @@ impl<'a> WgpuCommandHandler<'a> {
 
             result: vec![],
             current: vec![],
+            current_bounds: ChunkBounds::Empty,
             transforms,
             needs_stencil: false,
             num_masks: 0,
@@ -655,31 +804,50 @@ impl<'a> WgpuCommandHandler<'a> {
                 chunk: current,
                 needs_stencil,
                 transforms,
+                bounds: self.current_bounds.take().to_regions(),
             });
         }
 
+        reorder_blends_for_batching(&mut result);
+
         result
     }
+
+    /// The unit square, which is the geometry every pipeline but `RenderShape` draws.
+    ///
+    /// Rects, lines and bitmaps all reach here with the size already folded into the matrix, so
+    /// their extent is the matrix applied to this.
+    const UNIT_QUAD: Rectangle<Twips> = Rectangle {
+        x_min: Twips::ZERO,
+        x_max: Twips::ONE_PX,
+        y_min: Twips::ZERO,
+        y_max: Twips::ONE_PX,
+    };
 
     fn add_to_current(
         &mut self,
         matrix: Matrix,
         color_transform: ColorTransform,
+        local_bounds: Option<Rectangle<Twips>>,
         command_builder: impl FnOnce(wgpu::DynamicOffset) -> DrawCommand,
     ) {
         self.add_to_current_with_bitmap_uv_scale(
             matrix,
             color_transform,
             [1.0, 1.0],
+            local_bounds,
             command_builder,
         );
     }
 
     /// Queue a shape draw carrying `blend_mode` on the pipelines that draw it.
     fn draw_shape(&mut self, shape: ShapeHandle, transform: Transform, blend_mode: TrivialBlend) {
+        // The one command whose extent is not implied by its matrix; `Mesh` keeps it for this.
+        let local_bounds = Some(as_mesh(&shape).shape_bounds);
         self.add_to_current(
             transform.matrix,
             transform.color_transform,
+            local_bounds,
             |transform_buffer| DrawCommand::RenderShape {
                 shape,
                 transform_buffer,
@@ -715,6 +883,7 @@ impl<'a> WgpuCommandHandler<'a> {
             matrix,
             transform.color_transform,
             uv_scale,
+            Some(Self::UNIT_QUAD),
             |transform_buffer| DrawCommand::RenderBitmap {
                 bitmap,
                 transform_buffer,
@@ -730,6 +899,7 @@ impl<'a> WgpuCommandHandler<'a> {
         matrix: Matrix,
         color_transform: ColorTransform,
         bitmap_uv_scale: [f32; 2],
+        local_bounds: Option<Rectangle<Twips>>,
         command_builder: impl FnOnce(wgpu::DynamicOffset) -> DrawCommand,
     ) {
         let transform = Transforms {
@@ -753,6 +923,9 @@ impl<'a> WgpuCommandHandler<'a> {
                 transform_range.start as wgpu::DynamicOffset,
             ));
         } else {
+            // The chunk being closed here holds everything bounded so far; this command starts the
+            // next one, which is why its own bounds are added below rather than above.
+            let bounds = self.current_bounds.take().to_regions();
             self.result.push(Chunk::Draw {
                 chunk: mem::take(&mut self.current),
                 needs_stencil: self.needs_stencil,
@@ -760,6 +933,7 @@ impl<'a> WgpuCommandHandler<'a> {
                     &mut self.transforms,
                     BufferBuilder::new_for_uniform(&self.descriptors.limits),
                 ),
+                bounds,
             });
             self.transforms
                 .set_buffer_limit(self.dynamic_transforms.buffer.size());
@@ -771,6 +945,9 @@ impl<'a> WgpuCommandHandler<'a> {
                 transform_range.start as wgpu::DynamicOffset,
             ));
         }
+
+        self.current_bounds
+            .add(local_bounds.map(|bounds| matrix * bounds));
     }
 }
 
@@ -799,6 +976,199 @@ pub(crate) fn blend_batching_enabled() -> bool {
     })
 }
 
+/// How far ahead a blend looks for company, in chunks.
+///
+/// The scan is linear per blend, so leaving it unbounded makes a frame that never batches
+/// quadratic. A crowded AQW frame encodes ~500 chunks and wants batches of about four, so this is
+/// far more reach than the measured case needs while keeping the worst case bounded.
+const BLEND_REORDER_SCAN_LIMIT: usize = 64;
+
+/// Whether blends may be moved next to each other before batching. Opt in with
+/// `AETHER_BLEND_REORDER=1`.
+///
+/// **Off by default, on measurement.** It works and it is not worth it: in a crowded Yulgar it
+/// relocated 11 blends a frame out of 296, worth about 1.6% of render passes, and describing draw
+/// chunks with eight boxes instead of one changed nothing.
+///
+/// The reason is worth keeping, because the counter that motivated this reads as though there is
+/// far more to gain. `blend_ideal_batches` first-fits blends while ignoring draw chunks entirely,
+/// so it reports 58 passes where 283 are spent -- but a blend belongs to an avatar, and in a
+/// crowded room the drawing between it and the next compatible blend is other avatars overlapping
+/// it on screen. No correct reordering crosses that. The reachable headroom is roughly 283 to 270,
+/// not 283 to 58. Do not re-plan this from `ideal`.
+///
+/// Kept behind a switch rather than deleted so the measurement can be repeated on other scenes,
+/// where the geometry may be kinder than a packed hub.
+pub(crate) fn blend_reordering_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        matches!(
+            std::env::var("AETHER_BLEND_REORDER").as_deref(),
+            Ok("1") | Ok("on") | Ok("true")
+        )
+    })
+}
+
+/// The facts a batch cares about, for a blend that is allowed to join one.
+type BlendKey = (
+    std::mem::Discriminant<ComplexBlend>,
+    bool,
+    Option<(u32, u32, u32, u32)>,
+);
+
+fn complex_blend_key(chunk: &Chunk) -> Option<BlendKey> {
+    match chunk {
+        Chunk::Blend {
+            blend_mode: ChunkBlendMode::Complex(mode),
+            needs_stencil,
+            region,
+            ..
+            // Alpha and Erase resolve their parent through the nearest layer and may be skipped
+            // outright, which is not something a reordering can reason about.
+        } if !matches!(mode, ComplexBlend::Alpha | ComplexBlend::Erase) => {
+            Some((std::mem::discriminant(mode), *needs_stencil, *region))
+        }
+        _ => None,
+    }
+}
+
+/// Move compatible blends next to each other, where doing so cannot change a pixel.
+///
+/// The batcher in `surface.rs` can only merge blends that are *already* adjacent, and AQW almost
+/// never produces those. Measured on a crowded map: of 114 blends in a frame, 97 were followed by
+/// ordinary drawing and only 4 by an incompatible mode, while a batcher free to reorder would have
+/// needed 29 passes instead of 114. The passes are not lost to blends being incompatible, they are
+/// lost to blends being separated. This separates the fixing of that from the batching itself.
+///
+/// A blend may be moved earlier only when it overlaps nothing it jumps over -- neither the blends
+/// already gathered nor the draws in between. Disjoint operations commute, so the result is the
+/// order the display list asked for. A draw chunk whose extent is unknown (`bounds: None`) stops
+/// the scan rather than being guessed at.
+///
+/// Stencil work is excluded on both sides. A blend's stencil reference comes from the mask state
+/// the chunks before it left behind, so moving one past anything that touches the stencil would
+/// composite it against a different mask. Stencilless blends ignore mask state entirely, which is
+/// what makes them safe to move at all.
+fn reorder_blends_for_batching(chunks: &mut [Chunk]) {
+    if !blend_batching_enabled() || !blend_reordering_enabled() {
+        return;
+    }
+
+    // Planned against a description of the chunks rather than the chunks themselves, so the rule
+    // can be tested without a GPU to build real blend targets on.
+    let mut plan: Vec<ReorderChunk<std::mem::Discriminant<ComplexBlend>>> = chunks
+        .iter()
+        .map(|chunk| match chunk {
+            Chunk::Draw {
+                needs_stencil: true,
+                ..
+            } => ReorderChunk::Barrier,
+            Chunk::Draw { bounds, .. } => match bounds {
+                Some(bounds) => ReorderChunk::Draw(*bounds),
+                None => ReorderChunk::Barrier,
+            },
+            chunk => match complex_blend_key(chunk) {
+                Some((mode, false, region)) => ReorderChunk::Blend { mode, region },
+                _ => ReorderChunk::Barrier,
+            },
+        })
+        .collect();
+
+    let moves = plan_blend_reorder(&mut plan);
+    #[cfg(feature = "aether_metrics")]
+    {
+        let at_capacity = chunks
+            .iter()
+            .filter(|chunk| {
+                matches!(chunk, Chunk::Draw { bounds: Some(bounds), .. }
+                    if bounds.is_at_capacity())
+            })
+            .count() as u64;
+        crate::aether_metrics::record_blend_reorder(moves.len() as u64, at_capacity);
+    }
+    for (insert_at, scan) in moves {
+        chunks[insert_at..=scan].rotate_right(1);
+    }
+}
+
+/// What a chunk looks like to the reorderer.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ReorderChunk<M> {
+    /// A stencilless draw covering a known set of boxes.
+    Draw(DrawRegions),
+    /// Something the scan must stop at: stencil work, an unknown extent, a shader blend, or an
+    /// Alpha/Erase whose parent is resolved elsewhere.
+    Barrier,
+    /// A stencilless complex blend that may join a batch.
+    Blend {
+        mode: M,
+        region: Option<(u32, u32, u32, u32)>,
+    },
+}
+
+/// Plan the moves that bring compatible blends together, and apply them to `chunks`.
+///
+/// Returns each move as the `(insert_at, scan)` range that was rotated right by one, which is
+/// exactly what the caller applies to the real chunk list to match.
+fn plan_blend_reorder<M: Copy + PartialEq>(chunks: &mut [ReorderChunk<M>]) -> Vec<(usize, usize)> {
+    let mut moves = Vec::new();
+    let mut index = 0;
+    while index < chunks.len() {
+        let ReorderChunk::Blend { mode, region } = chunks[index] else {
+            index += 1;
+            continue;
+        };
+
+        // Regions already in the batch, and regions of everything being jumped over. A candidate
+        // has to clear both: the first so the batch can share one snapshot of the parent, the
+        // second so moving it earlier cannot be observed.
+        let mut batch = vec![region];
+        let mut passed: Vec<Option<(u32, u32, u32, u32)>> = Vec::new();
+        let mut passed_draws: Vec<DrawRegions> = Vec::new();
+        let mut insert_at = index + 1;
+        let mut scan = index + 1;
+        let limit = (index + 1 + BLEND_REORDER_SCAN_LIMIT).min(chunks.len());
+
+        while scan < limit {
+            match chunks[scan] {
+                ReorderChunk::Barrier => break,
+                ReorderChunk::Draw(bounds) => {
+                    passed_draws.push(bounds);
+                    scan += 1;
+                }
+                ReorderChunk::Blend {
+                    mode: next_mode,
+                    region: next_region,
+                } => {
+                    let joins = next_mode == mode
+                        && !batch
+                            .iter()
+                            .chain(passed.iter())
+                            .any(|held| blend_regions_overlap(*held, next_region))
+                        && !passed_draws.iter().any(|drawn| drawn.overlaps(next_region));
+
+                    if joins {
+                        // Rotating the span right by one lifts the blend to `insert_at` and pushes
+                        // everything it jumped over one place later, so the next unexamined chunk
+                        // is still at `scan + 1`.
+                        chunks[insert_at..=scan].rotate_right(1);
+                        moves.push((insert_at, scan));
+                        batch.push(next_region);
+                        insert_at += 1;
+                    } else {
+                        passed.push(next_region);
+                    }
+                    scan += 1;
+                }
+            }
+        }
+
+        index = insert_at;
+    }
+
+    moves
+}
+
 /// Whether two blend sub-targets cover any of the same pixels.
 ///
 /// This decides whether a run of blends can share one composite pass. Each complex blend reads the
@@ -821,7 +1191,6 @@ pub(crate) fn blend_regions_overlap(
         && ay < by.saturating_add(bh)
         && by < ay.saturating_add(ah)
 }
-
 
 /// Whether blends and alpha masks render into targets sized to their contents rather than to the
 /// whole surface.
@@ -1063,6 +1432,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 self.add_to_current(
                     transform.matrix,
                     transform.color_transform,
+                    None,
                     |transform_buffer| DrawCommand::RenderTexture {
                         _texture: texture,
                         binds: bind_group,
@@ -1073,6 +1443,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             }
             blend_type => {
                 if !self.current.is_empty() {
+                    let bounds = self.current_bounds.take().to_regions();
                     self.result.push(Chunk::Draw {
                         chunk: mem::take(&mut self.current),
                         needs_stencil: self.needs_stencil,
@@ -1080,6 +1451,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                             &mut self.transforms,
                             BufferBuilder::new_for_uniform(&self.descriptors.limits),
                         ),
+                        bounds,
                     });
                 }
                 self.transforms
@@ -1131,15 +1503,18 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 texture.texture.height() as f32,
             );
         }
-        self.add_to_current(matrix, transform.color_transform, |transform_buffer| {
-            DrawCommand::RenderBitmap {
+        self.add_to_current(
+            matrix,
+            transform.color_transform,
+            Some(Self::UNIT_QUAD),
+            |transform_buffer| DrawCommand::RenderBitmap {
                 bitmap,
                 transform_buffer,
                 smoothing: false,
                 blend_mode: TrivialBlend::Normal,
                 render_stage3d: true,
-            }
-        });
+            },
+        );
     }
 
     fn render_shape(&mut self, shape: ShapeHandle, transform: Transform) {
@@ -1150,6 +1525,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
         self.add_to_current(
             matrix,
             ColorTransform::multiply_from(color),
+            Some(Self::UNIT_QUAD),
             |transform_buffer| DrawCommand::DrawRect { transform_buffer },
         );
     }
@@ -1165,6 +1541,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.add_to_current(
                 matrix,
                 ColorTransform::multiply_from(color),
+                None,
                 |transform_buffer| DrawCommand::DrawLine { transform_buffer },
             );
         }
@@ -1181,6 +1558,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             self.add_to_current(
                 matrix,
                 ColorTransform::multiply_from(color),
+                None,
                 |transform_buffer| DrawCommand::DrawLineRect { transform_buffer },
             );
         }
@@ -1310,7 +1688,7 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 label: None,
             });
 
-        self.add_to_current(matrix, Default::default(), |transform_buffer| {
+        self.add_to_current(matrix, Default::default(), None, |transform_buffer| {
             DrawCommand::RenderAlphaMask {
                 maskee,
                 mask,
@@ -1456,12 +1834,185 @@ mod bitmap_region_tests {
 
 #[cfg(test)]
 mod blend_bypass_tests {
-    use super::{blend_can_be_carried_by_its_draw, sole_bitmap_draw};
+    use super::{
+        DrawRegions, ReorderChunk, blend_can_be_carried_by_its_draw, plan_blend_reorder,
+        sole_bitmap_draw,
+    };
+
+    /// A blend of `mode` covering a 10x10 box at `x`, which is disjoint from any other `x` here.
+    fn blend(mode: u8, x: u32) -> ReorderChunk<u8> {
+        ReorderChunk::Blend {
+            mode,
+            region: Some((x * 100, 0, 10, 10)),
+        }
+    }
+
+    fn draw_at(x: u32) -> ReorderChunk<u8> {
+        let mut regions = DrawRegions::default();
+        regions.push((x * 100, 0, 10, 10));
+        ReorderChunk::Draw(regions)
+    }
+
+    /// Two draws far apart, described separately rather than as the span between them.
+    fn draw_at_both(a: u32, b: u32) -> ReorderChunk<u8> {
+        let mut regions = DrawRegions::default();
+        regions.push((a * 100, 0, 10, 10));
+        regions.push((b * 100, 0, 10, 10));
+        ReorderChunk::Draw(regions)
+    }
+
+    /// The case the whole thing exists for: blends separated by drawing they do not touch.
+    ///
+    /// Measured on a crowded AQW map, 97 of 114 blends were in exactly this position, which is why
+    /// the run-length batcher downstream never fired.
+    #[test]
+    fn blends_separated_by_unrelated_drawing_are_brought_together() {
+        let mut chunks = vec![
+            blend(1, 0),
+            draw_at(5),
+            blend(1, 1),
+            draw_at(6),
+            blend(1, 2),
+        ];
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(
+            chunks,
+            vec![
+                blend(1, 0),
+                blend(1, 1),
+                blend(1, 2),
+                draw_at(5),
+                draw_at(6)
+            ],
+            "disjoint blends must gather so the batcher downstream can share one pass"
+        );
+    }
+
+    /// The safety property. A blend that would land on top of drawing it used to follow has to
+    /// stay put, because moving it there composites it against a backdrop that has not been drawn.
+    #[test]
+    fn a_blend_never_moves_past_drawing_it_overlaps() {
+        let mut chunks = vec![blend(1, 0), draw_at(1), blend(1, 1)];
+        let before = chunks.clone();
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(
+            chunks, before,
+            "the second blend overlaps the draw between them and must not be reordered"
+        );
+    }
+
+    /// Two blends that cover the same pixels have to composite in the order they were issued,
+    /// since the later one reads what the earlier one wrote.
+    #[test]
+    fn overlapping_blends_are_left_in_their_original_order() {
+        let mut chunks = vec![blend(1, 0), draw_at(9), blend(1, 0)];
+        let before = chunks.clone();
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(chunks, before);
+    }
+
+    /// Modes cannot mix in one pass: each carries its own pipeline.
+    #[test]
+    fn a_blend_of_another_mode_is_passed_over_rather_than_gathered() {
+        let mut chunks = vec![blend(1, 0), blend(2, 1), blend(1, 2)];
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(
+            chunks,
+            vec![blend(1, 0), blend(1, 2), blend(2, 1)],
+            "the mismatched mode should be stepped over, not treated as the end of the run"
+        );
+    }
+
+    /// Stencil work, unknown extents and shader blends all arrive as a barrier, and nothing may
+    /// cross one -- a blend's stencil reference depends on the mask state left behind before it.
+    #[test]
+    fn nothing_is_reordered_across_a_barrier() {
+        let mut chunks = vec![blend(1, 0), ReorderChunk::Barrier, blend(1, 1)];
+        let before = chunks.clone();
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(chunks, before);
+    }
+
+    /// A draw with an unknown extent reaches the planner as a barrier, so it is equally opaque.
+    /// The reason a chunk keeps several boxes instead of one union. A chunk that draws at the far
+    /// left and the far right does not draw in the middle, and a blend sitting in the gap has to be
+    /// allowed to cross it -- with a single union it never could, which is what left 246 blend
+    /// passes standing against an ideal of 63.
+    #[test]
+    fn a_blend_may_cross_a_draw_chunk_through_a_gap_between_its_boxes() {
+        let mut chunks = vec![blend(1, 0), draw_at_both(8, 9), blend(1, 4)];
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(
+            chunks,
+            vec![blend(1, 0), blend(1, 4), draw_at_both(8, 9)],
+            "a blend in the gap between a chunk's boxes touches none of its drawing"
+        );
+    }
+
+    /// The same chunk still blocks a blend that lands on one of its boxes.
+    #[test]
+    fn a_blend_landing_on_one_box_of_a_chunk_still_cannot_cross_it() {
+        let mut chunks = vec![blend(1, 0), draw_at_both(8, 9), blend(1, 9)];
+        let before = chunks.clone();
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(chunks, before);
+    }
+
+    #[test]
+    fn an_unbounded_draw_stops_the_scan() {
+        let mut chunks = vec![blend(1, 0), ReorderChunk::Barrier, blend(1, 1)];
+        plan_blend_reorder(&mut chunks);
+        assert_eq!(
+            chunks[0],
+            blend(1, 0),
+            "a draw whose extent is unknown covers everything, so nothing may cross it"
+        );
+        assert_eq!(chunks[2], blend(1, 1));
+    }
+
+    /// The moves handed back have to describe the same permutation the planner applied, since the
+    /// caller replays them against the real chunk list and the two must not drift.
+    #[test]
+    fn the_reported_moves_reproduce_the_planned_order() {
+        let mut planned = vec![
+            blend(1, 0),
+            draw_at(5),
+            blend(1, 1),
+            draw_at(6),
+            blend(1, 2),
+        ];
+        let mut replayed = planned.clone();
+        for (insert_at, scan) in plan_blend_reorder(&mut planned) {
+            replayed[insert_at..=scan].rotate_right(1);
+        }
+        assert_eq!(planned, replayed);
+    }
+
+    /// Every chunk must survive a reorder: this moves work, it never drops or duplicates it.
+    #[test]
+    fn reordering_preserves_every_chunk() {
+        let mut chunks = vec![
+            blend(1, 0),
+            draw_at(5),
+            blend(2, 1),
+            blend(1, 1),
+            draw_at(6),
+            blend(1, 2),
+            ReorderChunk::Barrier,
+            blend(1, 3),
+        ];
+        let mut before = chunks.clone();
+        plan_blend_reorder(&mut chunks);
+        before.sort_by_key(|c| format!("{c:?}"));
+        let mut after = chunks.clone();
+        after.sort_by_key(|c| format!("{c:?}"));
+        assert_eq!(before, after);
+    }
     use crate::blend::{BlendType, ComplexBlend, TrivialBlend};
     use ruffle_render::bitmap::{BitmapHandle, BitmapHandleImpl, PixelSnapping};
     use ruffle_render::commands::{Command, CommandList};
-    use ruffle_render::transform::Transform;
     use ruffle_render::matrix::Matrix;
+    use ruffle_render::transform::Transform;
     use std::sync::Arc;
     use swf::Color;
 
@@ -1518,7 +2069,9 @@ mod blend_bypass_tests {
             TrivialBlend::Subtract,
             TrivialBlend::Screen,
         ] {
-            assert!(blend_can_be_carried_by_its_draw(&BlendType::Trivial(trivial)));
+            assert!(blend_can_be_carried_by_its_draw(&BlendType::Trivial(
+                trivial
+            )));
         }
     }
 
@@ -1537,7 +2090,9 @@ mod blend_bypass_tests {
             ComplexBlend::Overlay,
             ComplexBlend::HardLight,
         ] {
-            assert!(!blend_can_be_carried_by_its_draw(&BlendType::Complex(complex)));
+            assert!(!blend_can_be_carried_by_its_draw(&BlendType::Complex(
+                complex
+            )));
         }
     }
 }

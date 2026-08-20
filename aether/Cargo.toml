@@ -5,13 +5,17 @@ edition.workspace = true
 homepage.workspace = true
 license.workspace = true
 repository.workspace = true
-version = "0.6.31"
+version = "0.6.32"
 
 [lints]
 workspace = true
 
 [dependencies]
 clap = { workspace = true }
+# Not called from here. Named so the binary itself pins `log`'s static max level rather than
+# inheriting it from whichever transitive dependency happens to still want the crate; see the
+# workspace entry for what it costs to leave wgpu's per-draw trace logging compiled in.
+log = { workspace = true }
 cpal = { workspace = true }
 egui = { workspace = true }
 egui_extras = { version = "0.33.3", default-features = false, features = ["image"] }

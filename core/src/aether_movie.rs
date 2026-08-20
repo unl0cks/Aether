@@ -20,9 +20,7 @@
 /// Backslashes count as separators so a Windows path to a local copy resolves the same way a URL
 /// does.
 pub fn url_file_name(url: &str) -> &str {
-    let path = url
-        .split_once(['?', '#'])
-        .map_or(url, |(path, _)| path);
+    let path = url.split_once(['?', '#']).map_or(url, |(path, _)| path);
     path.rsplit_once(['/', '\\'])
         .map_or(path, |(_, file_name)| file_name)
 }
@@ -58,7 +56,8 @@ pub fn is_aqw_game_movie(movie_url: &str) -> bool {
 
 /// The same, and served from AQW itself rather than merely named like it.
 pub fn is_hosted_aqw_game_movie(movie_url: &str) -> bool {
-    contains_ignore_ascii_case(movie_url, "game.aq.com/game/gamefiles/") && is_aqw_game_movie(movie_url)
+    contains_ignore_ascii_case(movie_url, "game.aq.com/game/gamefiles/")
+        && is_aqw_game_movie(movie_url)
 }
 
 /// Whether a URL names a versioned game build, as `.../gamefiles/Game3098r24.swf`.
@@ -180,8 +179,12 @@ mod tests {
             "https://example.invalid/gamefiles/Game3098r24.swf"
         ));
         // The shape without a name, and a name without the rest of the file.
-        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/.swf"));
-        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/Game"));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/.swf"
+        ));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game"
+        ));
         assert!(!is_aqw_game_movie(""));
     }
 }

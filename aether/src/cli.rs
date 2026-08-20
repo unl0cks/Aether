@@ -2,17 +2,32 @@ use crate::AETHER_VERSION;
 use crate::preferences::storage::StorageBackend;
 use anyhow::{Error, anyhow};
 use clap::{Parser, ValueEnum};
+use ruffle_core::aether_compatibility::FocusAuraColour;
+use ruffle_core::aether_performance::BitmapCacheSweep;
 use ruffle_core::backend::navigator::SocketMode;
 use ruffle_core::config::Letterbox;
 use ruffle_core::events::{GamepadButton, KeyCode};
 use ruffle_core::{LoadBehavior, PlayerRuntime, StageAlign, StageScaleMode};
-use ruffle_core::aether_compatibility::FocusAuraColour;
 
 /// Read a `--focus-aura-colour` value, listing what was allowed when it is not one of them.
 fn parse_ui_font(text: &str) -> Result<crate::ui_font::UiFont, String> {
     text.parse().map_err(|_| {
-        let names: Vec<&str> = crate::ui_font::UiFont::ALL.iter().map(|f| f.key()).collect();
+        let names: Vec<&str> = crate::ui_font::UiFont::ALL
+            .iter()
+            .map(|f| f.key())
+            .collect();
         format!("expected one of: {}", names.join(", "))
+    })
+}
+
+fn parse_bitmap_cache_sweep(text: &str) -> Result<BitmapCacheSweep, String> {
+    BitmapCacheSweep::from_name(text).ok_or_else(|| {
+        let names = BitmapCacheSweep::ALL
+            .iter()
+            .map(|choice| choice.name())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("expected one of: {names}")
     })
 }
 
@@ -225,35 +240,59 @@ pub struct Opt {
     pub aether_low_vram_resolved: bool,
 
     /// Put AQW's tooltips above the pointer instead of in the corner.
-    #[clap(long = "tooltips-follow-pointer", conflicts_with = "no_aether_tooltips_follow_pointer")]
+    #[clap(
+        long = "tooltips-follow-pointer",
+        conflicts_with = "no_aether_tooltips_follow_pointer"
+    )]
     pub aether_tooltips_follow_pointer: bool,
 
     /// Leave AQW's tooltips where AQW puts them.
-    #[clap(long = "no-tooltips-follow-pointer", conflicts_with = "aether_tooltips_follow_pointer")]
+    #[clap(
+        long = "no-tooltips-follow-pointer",
+        conflicts_with = "aether_tooltips_follow_pointer"
+    )]
     pub no_aether_tooltips_follow_pointer: bool,
 
     /// Hide the tooltip a skill shows, keeping the ones buffs and auras show.
-    #[clap(long = "hide-skill-tooltips", conflicts_with = "no_aether_hide_skill_tooltips")]
+    #[clap(
+        long = "hide-skill-tooltips",
+        conflicts_with = "no_aether_hide_skill_tooltips"
+    )]
     pub aether_hide_skill_tooltips: bool,
 
     /// Show the tooltip a skill shows.
-    #[clap(long = "no-hide-skill-tooltips", conflicts_with = "aether_hide_skill_tooltips")]
+    #[clap(
+        long = "no-hide-skill-tooltips",
+        conflicts_with = "aether_hide_skill_tooltips"
+    )]
     pub no_aether_hide_skill_tooltips: bool,
 
     /// Always show the tooltip a buff or aura shows, wherever the pointer is.
-    #[clap(long = "always-show-aura-tooltips", conflicts_with = "no_aether_always_show_aura_tooltips")]
+    #[clap(
+        long = "always-show-aura-tooltips",
+        conflicts_with = "no_aether_always_show_aura_tooltips"
+    )]
     pub aether_always_show_aura_tooltips: bool,
 
     /// Leave buff and aura tooltips to AQW.
-    #[clap(long = "no-always-show-aura-tooltips", conflicts_with = "aether_always_show_aura_tooltips")]
+    #[clap(
+        long = "no-always-show-aura-tooltips",
+        conflicts_with = "aether_always_show_aura_tooltips"
+    )]
     pub no_aether_always_show_aura_tooltips: bool,
 
     /// Tint the Focus taunt aura red so a taunt's two identical skulls can be told apart.
-    #[clap(long = "recolour-focus-aura", conflicts_with = "no_aether_recolour_focus_aura")]
+    #[clap(
+        long = "recolour-focus-aura",
+        conflicts_with = "no_aether_recolour_focus_aura"
+    )]
     pub aether_recolour_focus_aura: bool,
 
     /// Leave the Focus taunt aura the colour AQW draws it.
-    #[clap(long = "no-recolour-focus-aura", conflicts_with = "aether_recolour_focus_aura")]
+    #[clap(
+        long = "no-recolour-focus-aura",
+        conflicts_with = "aether_recolour_focus_aura"
+    )]
     pub no_aether_recolour_focus_aura: bool,
 
     /// Round cache texture sizes up to a grid so animating objects stop asking for a new size
@@ -404,16 +443,26 @@ pub struct Opt {
     #[clap(long = "focus-aura-colour", value_parser = parse_focus_aura_colour)]
     pub focus_aura_colour: Option<FocusAuraColour>,
 
+    /// How long an idle cacheAsBitmap surface is kept before its GPU texture is released.
+    #[clap(long = "bitmap-cache-sweep", value_parser = parse_bitmap_cache_sweep)]
+    pub bitmap_cache_sweep: Option<BitmapCacheSweep>,
+
     /// Override the font AQW draws its text with.
     #[clap(long = "ui-font", value_parser = parse_ui_font)]
     pub ui_font: Option<crate::ui_font::UiFont>,
 
     /// Apply the chosen font to every text field, not just chat and nameplates.
-    #[clap(long = "ui-font-all-text", conflicts_with = "no_aether_ui_font_all_text")]
+    #[clap(
+        long = "ui-font-all-text",
+        conflicts_with = "no_aether_ui_font_all_text"
+    )]
     pub aether_ui_font_all_text: bool,
 
     /// Keep the chosen font to chat and nameplates, leaving the rest of the interface alone.
-    #[clap(long = "no-ui-font-all-text", conflicts_with = "aether_ui_font_all_text")]
+    #[clap(
+        long = "no-ui-font-all-text",
+        conflicts_with = "aether_ui_font_all_text"
+    )]
     pub no_aether_ui_font_all_text: bool,
 
     /// Default quality of the movie.

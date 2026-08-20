@@ -1009,16 +1009,28 @@ mod tests {
     #[test]
     fn a_real_resize_is_worth_applying() {
         let current = PhysicalSize::new(1280, 720);
-        assert!(resize_is_worth_applying(current, PhysicalSize::new(1281, 720)));
-        assert!(resize_is_worth_applying(current, PhysicalSize::new(1280, 721)));
+        assert!(resize_is_worth_applying(
+            current,
+            PhysicalSize::new(1281, 720)
+        ));
+        assert!(resize_is_worth_applying(
+            current,
+            PhysicalSize::new(1280, 721)
+        ));
     }
 
     /// Minimising reports a zero dimension, and a swapchain cannot be configured to one.
     #[test]
     fn a_minimised_window_is_not_worth_applying() {
         let current = PhysicalSize::new(1280, 720);
-        assert!(!resize_is_worth_applying(current, PhysicalSize::new(0, 720)));
-        assert!(!resize_is_worth_applying(current, PhysicalSize::new(1280, 0)));
+        assert!(!resize_is_worth_applying(
+            current,
+            PhysicalSize::new(0, 720)
+        ));
+        assert!(!resize_is_worth_applying(
+            current,
+            PhysicalSize::new(1280, 0)
+        ));
         assert!(!resize_is_worth_applying(current, PhysicalSize::new(0, 0)));
     }
 

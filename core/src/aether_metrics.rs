@@ -753,7 +753,10 @@ impl RenderPhase {
 
 #[inline]
 pub fn record_render_phase(phase: RenderPhase, duration: Duration) {
-    record_render_phase_ns(phase, u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX));
+    record_render_phase_ns(
+        phase,
+        u64::try_from(duration.as_nanos()).unwrap_or(u64::MAX),
+    );
 }
 
 #[inline]

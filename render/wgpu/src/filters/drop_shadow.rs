@@ -2,7 +2,7 @@ use crate::buffer_pool::TexturePool;
 use crate::descriptors::Descriptors;
 use crate::filters::FilterSource;
 use crate::filters::blur::BlurFilter;
-use crate::filters::glow::GlowFilter;
+use crate::filters::glow::{GlowFilter, PreBlurred};
 use crate::surface::target::CommandTarget;
 use swf::DropShadowFilter as DropShadowFilterArgs;
 use wgpu::util::StagingBelt;
@@ -23,6 +23,7 @@ impl DropShadowFilter {
         filter: &DropShadowFilterArgs,
         blur_filter: &BlurFilter,
         glow_filter: &GlowFilter,
+        pre_blurred: Option<PreBlurred<'_>>,
     ) -> CommandTarget {
         let distance = filter.distance.to_f32();
         let angle = filter.angle.to_f32();
@@ -39,6 +40,7 @@ impl DropShadowFilter {
             (-x, -y),
             // A drop shadow is one colour, so it takes the plain path through the ramp.
             &[],
+            pre_blurred,
         )
     }
 }

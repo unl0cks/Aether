@@ -158,6 +158,9 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
         if let Some(value) = aether.parse_from_str(cx, "focus_aura_colour") {
             settings.focus_aura_colour = value;
         }
+        if let Some(value) = aether.parse_from_str(cx, "bitmap_cache_sweep") {
+            settings.bitmap_cache_sweep = value;
+        }
 
         if let Some(value) = aether.parse_from_str(cx, "quality") {
             settings.quality = value;

@@ -142,7 +142,10 @@ impl GpuSample {
                 "allocator_largest_free_run_bytes",
                 self.allocator_largest_free_run_bytes,
             ),
-            ("allocator_report_available", self.allocator_report_available),
+            (
+                "allocator_report_available",
+                self.allocator_report_available,
+            ),
         ]
     }
 

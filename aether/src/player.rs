@@ -104,14 +104,25 @@ impl From<&GlobalPreferences> for LaunchOptions {
             tcp_connections: value.cli.tcp_connections,
             gamepad_button_mapping: HashMap::from_iter(value.cli.gamepad_button.iter().cloned()),
             avm2_optimizer_enabled: !value.cli.no_avm2_optimizer,
-            offscreen_texture_pool_policy: if value.cli.aether_bounded_offscreen_pool {
-                OffscreenTexturePoolPolicy::BoundedReuse(if value.cli.aether_low_vram_resolved {
-                    crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
+            offscreen_texture_pool_policy: {
+                // Filter atlasing keeps a group's targets alive together, which measured peak GPU
+                // texture memory at 825 -> 1,286 MB. That is comfortable on the card it was measured
+                // on and is not on the 2 GB cards this mode exists for, so the group shrinks with
+                // the pool rather than being left to find out.
+                ruffle_render_wgpu::backend::set_filter_atlas_low_vram(
+                    value.cli.aether_low_vram_resolved,
+                );
+                if value.cli.aether_bounded_offscreen_pool {
+                    OffscreenTexturePoolPolicy::BoundedReuse(
+                        if value.cli.aether_low_vram_resolved {
+                            crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
+                        } else {
+                            crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
+                        },
+                    )
                 } else {
-                    crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
-                })
-            } else {
-                OffscreenTexturePoolPolicy::Ephemeral
+                    OffscreenTexturePoolPolicy::Ephemeral
+                }
             },
         }
     }

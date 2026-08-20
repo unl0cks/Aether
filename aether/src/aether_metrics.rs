@@ -378,7 +378,9 @@ impl RenderPhaseTotals {
         self.build_commands.add(sample.build_commands);
         self.submit_frame.add(sample.submit_frame);
         self.sweep_idle_uploads.add(sample.sweep_idle_uploads);
-        self.unattributed_ns = self.unattributed_ns.saturating_add(sample.unattributed_ns());
+        self.unattributed_ns = self
+            .unattributed_ns
+            .saturating_add(sample.unattributed_ns());
     }
 
     fn take_report(&mut self) -> RenderPhaseReport {
@@ -499,6 +501,38 @@ struct WgpuTexturePoolTotals {
     /// How many times a frame was handed to the driver part-way through. Zero means the splitter
     /// never engaged, which is worth being able to tell apart from it engaging and not helping.
     submission_splits: u64,
+    /// Why blends are not sharing passes, and how few passes they could take. See
+    /// `blend_batch_census` in the renderer for what each of these means and what it does not.
+    blend_full_surface: u64,
+    blend_adjacent: u64,
+    blend_ideal_batches: u64,
+    blend_break_not_blend: u64,
+    blend_break_mode: u64,
+    blend_break_overlap: u64,
+    draw_chunks: u64,
+    draw_unbounded: u64,
+    bind_group_nanos: u64,
+    blend_reorder_moves: u64,
+    draw_chunks_at_box_capacity: u64,
+    cache_entries_filtered: u64,
+    cache_entries_filterless: u64,
+    cache_entry_filters: u64,
+    /// Cache-entry encoding time split by whether the entry carries a filter. `cache N ms` is the
+    /// largest single item in a crowded frame and these say which half of it is reclaimable.
+    cache_filtered_nanos: u64,
+    cache_filterless_nanos: u64,
+    /// Whether atlasing the frame's filter work could pay. `filter_applications / filter_groups` is
+    /// the batch size an atlas would reach; at 1.0 nothing shares blur parameters and it is worth
+    /// nothing.
+    filter_applications: u64,
+    filter_groups: u64,
+    filter_largest_group: u64,
+    /// Groups actually blurred together, and both sides of the trade atlasing makes: it buys passes
+    /// (`members / groups`) and pays pixels (`atlas_pixels / member_pixels`, the padding).
+    filter_atlas_groups: u64,
+    filter_atlas_members: u64,
+    filter_atlas_pixels: u64,
+    filter_atlas_member_pixels: u64,
 }
 
 impl WgpuTexturePoolTotals {
@@ -531,6 +565,67 @@ impl WgpuTexturePoolTotals {
         self.msaa_resolve_pixels = self
             .msaa_resolve_pixels
             .saturating_add(sample.msaa_resolve_pixels);
+        self.blend_full_surface = self
+            .blend_full_surface
+            .saturating_add(sample.blend_full_surface);
+        self.blend_adjacent = self.blend_adjacent.saturating_add(sample.blend_adjacent);
+        self.blend_ideal_batches = self
+            .blend_ideal_batches
+            .saturating_add(sample.blend_ideal_batches);
+        self.blend_break_not_blend = self
+            .blend_break_not_blend
+            .saturating_add(sample.blend_break_not_blend);
+        self.blend_break_mode = self
+            .blend_break_mode
+            .saturating_add(sample.blend_break_mode);
+        self.blend_break_overlap = self
+            .blend_break_overlap
+            .saturating_add(sample.blend_break_overlap);
+        self.draw_chunks = self.draw_chunks.saturating_add(sample.draw_chunks);
+        self.draw_unbounded = self.draw_unbounded.saturating_add(sample.draw_unbounded);
+        self.bind_group_nanos = self
+            .bind_group_nanos
+            .saturating_add(sample.bind_group_nanos);
+        self.blend_reorder_moves = self
+            .blend_reorder_moves
+            .saturating_add(sample.blend_reorder_moves);
+        self.draw_chunks_at_box_capacity = self
+            .draw_chunks_at_box_capacity
+            .saturating_add(sample.draw_chunks_at_box_capacity);
+        self.cache_entries_filtered = self
+            .cache_entries_filtered
+            .saturating_add(sample.cache_entries_filtered);
+        self.cache_entries_filterless = self
+            .cache_entries_filterless
+            .saturating_add(sample.cache_entries_filterless);
+        self.cache_entry_filters = self
+            .cache_entry_filters
+            .saturating_add(sample.cache_entry_filters);
+        self.cache_filtered_nanos = self
+            .cache_filtered_nanos
+            .saturating_add(sample.cache_filtered_nanos);
+        self.cache_filterless_nanos = self
+            .cache_filterless_nanos
+            .saturating_add(sample.cache_filterless_nanos);
+        self.filter_applications = self
+            .filter_applications
+            .saturating_add(sample.filter_applications);
+        self.filter_groups = self.filter_groups.saturating_add(sample.filter_groups);
+        self.filter_largest_group = self
+            .filter_largest_group
+            .saturating_add(sample.filter_largest_group);
+        self.filter_atlas_groups = self
+            .filter_atlas_groups
+            .saturating_add(sample.filter_atlas_groups);
+        self.filter_atlas_members = self
+            .filter_atlas_members
+            .saturating_add(sample.filter_atlas_members);
+        self.filter_atlas_pixels = self
+            .filter_atlas_pixels
+            .saturating_add(sample.filter_atlas_pixels);
+        self.filter_atlas_member_pixels = self
+            .filter_atlas_member_pixels
+            .saturating_add(sample.filter_atlas_member_pixels);
     }
 
     fn take(&mut self) -> Self {
@@ -1100,9 +1195,12 @@ fn perf_summary_line(
     let rendered_frames = render_frames.max(1) as f64;
     format!(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
-         present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries, \
-         newtex {:.1} ms over {:.0}) per frame | passes {:.0} draws {:.0} blends {:.0} \
-         resolves {:.0}/{:.1} MPx binds {:.0} queue {:.1} ms per frame{}",
+         present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries: {:.0} filtered carrying {:.0} filters,          {:.0} filterless, \
+         newtex {:.1} ms over {:.0}) per frame | passes {:.0} (draw {:.0} blend {:.0}) \
+         draws {:.0} resolves {:.0}/{:.1} MPx binds {:.0} in {:.1} ms queue {:.1} ms per frame | \
+         batching: ideal {:.0} passes, adjacent {:.0}, broke on drawing {:.0} mode {:.0} \
+         overlap {:.0}, full-surface {:.0}, unbounded draws {:.0}, moved {:.0},          chunks at box cap {:.0} | \
+         cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels){}",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -1116,15 +1214,42 @@ fn perf_summary_line(
         submit_nanos as f64 / 1_000_000.0 / rendered_frames,
         cache_entry_nanos as f64 / 1_000_000.0 / rendered_frames,
         cache_entries as f64 / rendered_frames,
+        encoding.cache_entries_filtered as f64 / rendered_frames,
+        encoding.cache_entry_filters as f64 / rendered_frames,
+        encoding.cache_entries_filterless as f64 / rendered_frames,
         texture_create_nanos as f64 / 1_000_000.0 / rendered_frames,
         texture_creations as f64 / rendered_frames,
         encoding.render_passes as f64 / rendered_frames,
-        encoding.draw_commands as f64 / rendered_frames,
+        encoding.draw_chunks as f64 / rendered_frames,
         encoding.blend_chunks as f64 / rendered_frames,
+        encoding.draw_commands as f64 / rendered_frames,
         encoding.msaa_resolves as f64 / rendered_frames,
         encoding.msaa_resolve_pixels as f64 / 1_000_000.0 / rendered_frames,
         encoding.bind_groups as f64 / rendered_frames,
+        encoding.bind_group_nanos as f64 / 1_000_000.0 / rendered_frames,
         encoding.queue_nanos as f64 / 1_000_000.0 / rendered_frames,
+        encoding.blend_ideal_batches as f64 / rendered_frames,
+        encoding.blend_adjacent as f64 / rendered_frames,
+        encoding.blend_break_not_blend as f64 / rendered_frames,
+        encoding.blend_break_mode as f64 / rendered_frames,
+        encoding.blend_break_overlap as f64 / rendered_frames,
+        encoding.blend_full_surface as f64 / rendered_frames,
+        encoding.draw_unbounded as f64 / rendered_frames,
+        encoding.blend_reorder_moves as f64 / rendered_frames,
+        encoding.draw_chunks_at_box_capacity as f64 / rendered_frames,
+        encoding.cache_filtered_nanos as f64 / 1_000_000.0 / rendered_frames,
+        encoding.cache_filterless_nanos as f64 / 1_000_000.0 / rendered_frames,
+        encoding.filter_applications as f64 / rendered_frames,
+        encoding.filter_groups as f64 / rendered_frames,
+        encoding.filter_largest_group as f64 / rendered_frames,
+        // The prize, stated directly: how many filters an atlas pass would cover on average.
+        encoding.filter_applications as f64 / encoding.filter_groups.max(1) as f64,
+        encoding.filter_atlas_groups as f64 / rendered_frames,
+        encoding.filter_atlas_members as f64 / rendered_frames,
+        encoding.filter_atlas_members as f64 / encoding.filter_atlas_groups.max(1) as f64,
+        // Padding overhead. Above 1 is the area atlasing added; the passes it saved have to be
+        // worth that, and this is the number that says whether they were.
+        encoding.filter_atlas_pixels as f64 / encoding.filter_atlas_member_pixels.max(1) as f64,
         complex_blend_breakdown(&encoding.complex_blends, rendered_frames),
     )
 }

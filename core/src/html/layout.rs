@@ -596,8 +596,8 @@ impl<'a, 'gc> LayoutContext<'a, 'gc> {
         // A chosen font may ask for its bold cut throughout; see `aether_compatibility::ui_font_bold`.
         // Only where the override applies, so text the setting is not replacing keeps its own weight.
         #[cfg(feature = "aether_compatibility")]
-        let is_bold =
-            span.style.bold || (override_family.is_some() && crate::aether_compatibility::ui_font_bold());
+        let is_bold = span.style.bold
+            || (override_family.is_some() && crate::aether_compatibility::ui_font_bold());
         #[cfg(not(feature = "aether_compatibility"))]
         let is_bold = span.style.bold;
         for font_name in &font_names {

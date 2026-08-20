@@ -5,6 +5,7 @@ package flash.display {
     import flash.display.DisplayObject;
     import flash.errors.IllegalOperationError;
     import flash.system.LoaderContext;
+    import flash.system.System;
     import flash.utils.ByteArray;
     import flash.net.URLRequest;
     import flash.events.UncaughtErrorEvents;
@@ -31,8 +32,16 @@ package flash.display {
 
         [API("662")]
         public function unloadAndStop(gc:Boolean = true):void {
+            // Still a stub for the "stop" half: unload halts the content's timelines, but not the
+            // sounds or timers it started. The `gc` argument is honoured, which it previously was
+            // not -- AQW calls `petLoader.unloadAndStop(true)` on every pet change, and asking for
+            // a collection right after making a loader's content unreachable is the entire point
+            // of passing it.
             stub_method("flash.display.Loader", "unloadAndStop");
             this.unload();
+            if (gc) {
+                System.gc();
+            }
         }
 
         public function close():void {

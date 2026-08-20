@@ -17,9 +17,10 @@
 //! it is why those controls grey out when the matching flag is present.
 
 use crate::cli::Opt;
-use egui::{Key, Modifiers};
 use crate::ui_font::UiFont;
+use egui::{Key, Modifiers};
 use ruffle_core::aether_compatibility::FocusAuraColour;
+use ruffle_core::aether_performance::BitmapCacheSweep;
 use ruffle_render::quality::StageQuality;
 use std::fmt;
 
@@ -146,6 +147,7 @@ pub struct AetherExplicitFlags {
 
     /// `--focus-aura-colour`, a value rather than a pair for the same reason.
     pub focus_aura_colour: Option<FocusAuraColour>,
+    pub bitmap_cache_sweep: Option<BitmapCacheSweep>,
     /// `--ui-font`, likewise.
     pub ui_font: Option<UiFont>,
     /// `--msaa1x` / `--msaa2x` / `--msaa4x`, read as a sample count.
@@ -231,12 +233,10 @@ impl AetherExplicitFlags {
                 opt.no_aether_aqw_idle_gpu_upload_eviction,
             ),
             crash_report: pair(opt.aether_crash_report, opt.no_aether_crash_report),
-            ui_font_all_text: pair(
-                opt.aether_ui_font_all_text,
-                opt.no_aether_ui_font_all_text,
-            ),
+            ui_font_all_text: pair(opt.aether_ui_font_all_text, opt.no_aether_ui_font_all_text),
             quality: opt.quality,
             focus_aura_colour: opt.focus_aura_colour,
+            bitmap_cache_sweep: opt.bitmap_cache_sweep,
             ui_font: opt.ui_font,
             // Three switches for one setting, and no switch at all means the saved value decides.
             msaa_samples: match (opt.msaa1x, opt.msaa2x, opt.msaa4x) {
@@ -279,6 +279,7 @@ pub struct AetherSettings {
 
     pub quality: StageQuality,
     pub focus_aura_colour: FocusAuraColour,
+    pub bitmap_cache_sweep: BitmapCacheSweep,
     pub ui_font: UiFont,
 
     /// Backend multisampling, independent of Flash's own StageQuality. `None` leaves the renderer
@@ -322,6 +323,7 @@ impl Default for AetherSettings {
             // These three mirror what the AQW preset picks, same as the toggles above.
             quality: StageQuality::High,
             focus_aura_colour: FocusAuraColour::Red,
+            bitmap_cache_sweep: BitmapCacheSweep::Balanced,
             ui_font: UiFont::Default,
             msaa_samples: None,
             max_fps: Some(60.0),
@@ -386,6 +388,7 @@ pub struct ResolvedAetherSettings {
     pub ui_font_all_text: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
     pub focus_aura_colour: Resolved<FocusAuraColour>,
+    pub bitmap_cache_sweep: Resolved<BitmapCacheSweep>,
     pub ui_font: Resolved<UiFont>,
     pub msaa_samples: Resolved<Option<u8>>,
     pub max_fps: Resolved<Option<f64>>,
@@ -465,6 +468,10 @@ impl ResolvedAetherSettings {
                 explicit.focus_aura_colour,
                 saved.focus_aura_colour,
             ),
+            bitmap_cache_sweep: Resolved::resolve(
+                explicit.bitmap_cache_sweep,
+                saved.bitmap_cache_sweep,
+            ),
             ui_font: Resolved::resolve(explicit.ui_font, saved.ui_font),
             msaa_samples: Resolved::resolve(explicit.msaa_samples, saved.msaa_samples),
             max_fps: Resolved::resolve(explicit.max_fps, saved.max_fps),
@@ -522,6 +529,7 @@ pub fn apply_live_settings(
         aqw_mode && settings.recolour_focus_aura.value,
     );
     ruffle_core::aether_compatibility::set_focus_aura_colour(settings.focus_aura_colour.value);
+    ruffle_core::aether_performance::set_bitmap_cache_sweep(settings.bitmap_cache_sweep.value);
     ruffle_core::aether_compatibility::set_ui_font_family(
         settings.ui_font.value.family().map(str::to_owned),
     );
@@ -542,9 +550,13 @@ pub fn apply_live_settings(
     // no multisampling at all, so a moment of slowness leaves every piece of vector art -- which is
     // all of the text -- drawn without antialiasing for hundreds of frames after the slowness has
     // passed. That is the thin, soft text.
-    ruffle_core::aether_compatibility::set_stage_quality_floor(
-        aqw_mode.then(|| settings.quality.value.sample_count().min(u32::from(u8::MAX)) as u8),
-    );
+    ruffle_core::aether_compatibility::set_stage_quality_floor(aqw_mode.then(|| {
+        settings
+            .quality
+            .value
+            .sample_count()
+            .min(u32::from(u8::MAX)) as u8
+    }));
 
     // Quality is a property of the running stage, so it can change without a restart. MSAA and the
     // frame rate are read while the renderer and the player are built, and cannot.

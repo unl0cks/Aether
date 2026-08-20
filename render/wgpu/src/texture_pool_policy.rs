@@ -19,6 +19,29 @@ pub(crate) fn is_amd_vulkan(adapter_info: &wgpu::AdapterInfo) -> bool {
     adapter_info.backend == wgpu::Backend::Vulkan && adapter_info.vendor == AMD_PCI_VENDOR_ID
 }
 
+/// Whether this adapter draws its memory from system RAM rather than from a board of its own.
+///
+/// The distinction matters because every budget in this file was sized against a discrete card
+/// with gigabytes to spare. An integrated adapter has no such headroom: it is spending the same
+/// RAM the player's machine is running on, and it reports a device loss rather than paging when
+/// that runs out. Ruffle carries an open class of exactly this crash on Intel integrated parts --
+/// UHD 630, UHD 600, Iris Xe, Iris Plus 640, HD Gen11, across both Vulkan and Dx12 -- with the
+/// closest report closed as not planned, so nothing is arriving from upstream to help.
+pub(crate) fn is_integrated_gpu(adapter_info: &wgpu::AdapterInfo) -> bool {
+    matches!(
+        adapter_info.device_type,
+        wgpu::DeviceType::IntegratedGpu | wgpu::DeviceType::Cpu | wgpu::DeviceType::Other
+    )
+}
+
+/// What the general pool may cache, for an adapter that is spending the player's system RAM.
+///
+/// A quarter of the discrete budget. Sized to still clear the nested stack of stage-sized targets
+/// that [`GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES`] exists to retain -- an integrated part is not
+/// running a 2560x1440 stage at 4x MSAA, so the pair this has to hold is far smaller than the
+/// ~70 MiB that sizes the discrete budget.
+pub(crate) const INTEGRATED_TEXTURE_POOL_MAX_CACHED_BYTES: u64 = 96 * 1024 * 1024;
+
 /// Budget for the general pool, which holds whole-surface render targets rather than the small
 /// filter intermediates the offscreen pool deals in.
 ///
@@ -49,12 +72,17 @@ pub(crate) const GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES: usize = 1024;
 /// sessions causes GPU memory to grow without a useful bound.
 pub(crate) fn general_texture_pool_policy(
     offscreen_policy: OffscreenTexturePoolPolicy,
+    adapter_info: &wgpu::AdapterInfo,
 ) -> OffscreenTexturePoolPolicy {
     match offscreen_policy {
         OffscreenTexturePoolPolicy::Ephemeral => OffscreenTexturePoolPolicy::Ephemeral,
         OffscreenTexturePoolPolicy::BoundedReuse(limits) => {
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
-                max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
+                max_cached_bytes: if is_integrated_gpu(adapter_info) {
+                    INTEGRATED_TEXTURE_POOL_MAX_CACHED_BYTES
+                } else {
+                    GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES
+                },
                 max_cached_entries: GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES,
                 max_idle_frames: limits.max_idle_frames.min(1),
                 max_cached_globals: limits.max_cached_globals.min(32),
@@ -74,7 +102,15 @@ pub(crate) fn max_cache_entries_per_submission(
 ) -> u32 {
     match policy {
         OffscreenTexturePoolPolicy::Ephemeral => 100,
-        OffscreenTexturePoolPolicy::BoundedReuse(_) if is_amd_vulkan(adapter_info) => 16,
+        // An integrated part gets the same conservative batch AMD Vulkan gets, for the same
+        // measured reason: fewer resources alive at once, and the driver given more chances to
+        // retire the ones that are. That AMD case reported device OOM while resident texture
+        // memory stayed low, which is the shape of the Intel reports too.
+        OffscreenTexturePoolPolicy::BoundedReuse(_)
+            if is_amd_vulkan(adapter_info) || is_integrated_gpu(adapter_info) =>
+        {
+            16
+        }
         OffscreenTexturePoolPolicy::BoundedReuse(_) => 64,
     }
 }
@@ -124,6 +160,48 @@ pub(crate) struct PoolMaintenanceReport {
     pub globals_available_entries: u64,
     pub globals_age_evictions: u64,
     pub globals_budget_evictions: u64,
+}
+
+/// Smallest cell a pooled texture's dimension is rounded up to.
+///
+/// Matches `quantise_cache_texture_size` in core, so a filter target and the cache texture it was
+/// derived from land in the same bucket instead of two adjacent ones.
+const POOL_TEXTURE_SIZE_FLOOR: u32 = 64;
+
+/// How many cells span a dimension, which is what keeps the slack proportional.
+const POOL_TEXTURE_GRID_STEPS: u32 = 16;
+
+/// Round a pooled texture's dimension up so a few pixels of drift reuse the same bucket.
+fn quantise_pool_dimension(value: u32, limit: u32) -> u32 {
+    if value == 0 {
+        return 0;
+    }
+    let cell = (value.next_power_of_two() / POOL_TEXTURE_GRID_STEPS).max(POOL_TEXTURE_SIZE_FLOOR);
+    let rounded = value.div_ceil(cell).saturating_mul(cell).max(value);
+    // Never past what the device can allocate. A size that rounds over the limit stays exact:
+    // failing to allocate is worse than missing the bucket.
+    if rounded > limit { value } else { rounded }
+}
+
+/// Round a pool request out to a grid so near-identical requests share one bucket.
+///
+/// The pool keys buckets on exact dimensions. A filter's target is sized to the region being
+/// filtered, and an animating object's bounds move a pixel or two every frame, so one glow asks for
+/// 231x343, then 232x344, then 230x341. Each is a bucket that is allocated once and never matched
+/// again -- a session census measured 781 GB of offscreen texture creation against 4096 size
+/// buckets, all of them full, with 774 GB thrown away for budget before anything could reuse it.
+///
+/// Growing a texture is safe because the caller keeps its logical size separately and confines
+/// drawing to it with a viewport; see `FilterRegion::for_target`, which exists for exactly this.
+pub(crate) fn quantise_pool_texture_size(
+    size: wgpu::Extent3d,
+    max_dimension: u32,
+) -> wgpu::Extent3d {
+    wgpu::Extent3d {
+        width: quantise_pool_dimension(size.width, max_dimension),
+        height: quantise_pool_dimension(size.height, max_dimension),
+        depth_or_array_layers: size.depth_or_array_layers,
+    }
 }
 
 pub(crate) fn estimate_texture_bytes(
@@ -298,12 +376,90 @@ mod tests {
         }
     }
 
+    /// An Intel UHD on Vulkan, which is the adapter the reports keep naming.
+    fn integrated_adapter_info() -> wgpu::AdapterInfo {
+        wgpu::AdapterInfo {
+            device_type: wgpu::DeviceType::IntegratedGpu,
+            ..adapter_info(0x8086, wgpu::Backend::Vulkan)
+        }
+    }
+
     const LIMITS: BoundedTexturePoolLimits = BoundedTexturePoolLimits {
         max_cached_bytes: 300,
         max_cached_entries: 3,
         max_idle_frames: 2,
         max_cached_globals: 2,
     };
+
+    /// An integrated adapter is spending the player's system RAM, so it must not be handed budgets
+    /// that were sized against a discrete card. Ruffle's own tracker carries this crash on Intel
+    /// UHD, Iris Xe and Iris Plus parts with no fix, so nothing catches it if this does not.
+    #[test]
+    fn an_integrated_adapter_gets_a_smaller_pool_than_a_discrete_one() {
+        let integrated = integrated_adapter_info();
+        let discrete = adapter_info(0x10de, wgpu::Backend::Vulkan);
+
+        let OffscreenTexturePoolPolicy::BoundedReuse(integrated_limits) =
+            general_texture_pool_policy(
+                OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+                &integrated,
+            )
+        else {
+            panic!("bounded offscreen reuse must derive a bounded general pool");
+        };
+        let OffscreenTexturePoolPolicy::BoundedReuse(discrete_limits) = general_texture_pool_policy(
+            OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+            &discrete,
+        ) else {
+            panic!("bounded offscreen reuse must derive a bounded general pool");
+        };
+
+        assert_eq!(
+            integrated_limits.max_cached_bytes,
+            INTEGRATED_TEXTURE_POOL_MAX_CACHED_BYTES
+        );
+        assert!(
+            integrated_limits.max_cached_bytes < discrete_limits.max_cached_bytes,
+            "an integrated adapter caching {} bytes is not spending less than a discrete one at {}",
+            integrated_limits.max_cached_bytes,
+            discrete_limits.max_cached_bytes,
+        );
+    }
+
+    /// Whatever the vendor, memory drawn from system RAM has no headroom to speculate into.
+    #[test]
+    fn integrated_and_software_adapters_are_all_treated_as_sharing_system_memory() {
+        assert!(is_integrated_gpu(&integrated_adapter_info()));
+        for device_type in [wgpu::DeviceType::Cpu, wgpu::DeviceType::Other] {
+            assert!(is_integrated_gpu(&wgpu::AdapterInfo {
+                device_type,
+                ..adapter_info(0x8086, wgpu::Backend::Dx12)
+            }));
+        }
+        assert!(!is_integrated_gpu(&adapter_info(
+            0x10de,
+            wgpu::Backend::Vulkan
+        )));
+    }
+
+    /// The Intel reports span both backends, so this cannot key off Vulkan the way the AMD case does.
+    #[test]
+    fn an_integrated_adapter_splits_submissions_on_either_backend() {
+        for backend in [wgpu::Backend::Vulkan, wgpu::Backend::Dx12] {
+            let integrated = wgpu::AdapterInfo {
+                device_type: wgpu::DeviceType::IntegratedGpu,
+                ..adapter_info(0x8086, backend)
+            };
+            assert_eq!(
+                max_cache_entries_per_submission(
+                    OffscreenTexturePoolPolicy::BoundedReuse(LIMITS),
+                    &integrated,
+                ),
+                16,
+                "integrated adapters must split dense frames on {backend:?} as well"
+            );
+        }
+    }
 
     #[test]
     fn bounded_aqw_work_limits_amd_vulkan_submission_pressure() {
@@ -342,18 +498,22 @@ mod tests {
     #[test]
     fn bounded_offscreen_reuse_derives_a_smaller_general_pool() {
         assert_eq!(
-            general_texture_pool_policy(OffscreenTexturePoolPolicy::Ephemeral),
+            general_texture_pool_policy(
+                OffscreenTexturePoolPolicy::Ephemeral,
+                &adapter_info(0x10de, wgpu::Backend::Vulkan),
+            ),
             OffscreenTexturePoolPolicy::Ephemeral
         );
         assert_eq!(
-            general_texture_pool_policy(OffscreenTexturePoolPolicy::BoundedReuse(
-                BoundedTexturePoolLimits {
+            general_texture_pool_policy(
+                OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
                     max_cached_bytes: 128 * 1024 * 1024,
                     max_cached_entries: 512,
                     max_idle_frames: 3,
                     max_cached_globals: 128,
-                }
-            )),
+                }),
+                &adapter_info(0x10de, wgpu::Backend::Vulkan),
+            ),
             OffscreenTexturePoolPolicy::BoundedReuse(BoundedTexturePoolLimits {
                 max_cached_bytes: GENERAL_TEXTURE_POOL_MAX_CACHED_BYTES,
                 max_cached_entries: GENERAL_TEXTURE_POOL_MAX_CACHED_ENTRIES,
@@ -407,6 +567,7 @@ mod tests {
                 max_idle_frames: 1,
                 max_cached_globals: 128,
             }),
+            &adapter_info(0x10de, wgpu::Backend::Vulkan),
         ) else {
             panic!("bounded offscreen reuse must derive a bounded general pool");
         };
@@ -418,6 +579,94 @@ mod tests {
             msaa,
             resolved,
         );
+    }
+
+    fn extent(width: u32, height: u32) -> wgpu::Extent3d {
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        }
+    }
+
+    /// The measured failure: an animating glow asks for three sizes a pixel apart on consecutive
+    /// frames, and each one is a bucket that is allocated once and never matched again.
+    #[test]
+    fn a_run_of_drifting_sizes_collapses_into_one_bucket() {
+        const LIMIT: u32 = 8192;
+        let snapped: Vec<_> = [(230, 341), (231, 343), (232, 344)]
+            .into_iter()
+            .map(|(w, h)| quantise_pool_texture_size(extent(w, h), LIMIT))
+            .collect();
+
+        assert_eq!(snapped[0], snapped[1]);
+        assert_eq!(snapped[1], snapped[2]);
+
+        // And the big ones, which is where the bytes are: 2326x2371, 2324x2371, 2328x2371 were
+        // 4,434 allocations of 22 MB apiece in a seven minute session.
+        let big: Vec<_> = [(2326, 2371), (2324, 2371), (2328, 2371)]
+            .into_iter()
+            .map(|(w, h)| quantise_pool_texture_size(extent(w, h), LIMIT))
+            .collect();
+        assert_eq!(big[0], big[1]);
+        assert_eq!(big[1], big[2]);
+    }
+
+    /// Rounding may only ever grow a texture. Anything smaller than the region would clip content.
+    #[test]
+    fn quantising_never_returns_a_texture_smaller_than_the_region() {
+        const LIMIT: u32 = 8192;
+        for (width, height) in [
+            (1, 1),
+            (63, 65),
+            (64, 64),
+            (100, 200),
+            (1023, 1025),
+            (2560, 1365),
+            (8192, 8192),
+        ] {
+            let snapped = quantise_pool_texture_size(extent(width, height), LIMIT);
+            assert!(
+                snapped.width >= width && snapped.height >= height,
+                "{snapped:?} is smaller than {width}x{height}",
+            );
+        }
+        assert_eq!(
+            quantise_pool_texture_size(extent(0, 0), LIMIT),
+            extent(0, 0)
+        );
+    }
+
+    /// The slack stays proportional, so a small avatar layer is not rounded out to many times its
+    /// own size the way a flat grid would round it.
+    #[test]
+    fn the_slack_stays_proportional_to_the_region() {
+        const LIMIT: u32 = 8192;
+        for (width, height) in [(231, 343), (700, 500), (2326, 2371)] {
+            let snapped = quantise_pool_texture_size(extent(width, height), LIMIT);
+            let asked = u64::from(width) * u64::from(height);
+            let got = u64::from(snapped.width) * u64::from(snapped.height);
+            assert!(
+                got <= asked * 3 / 2,
+                "{width}x{height} rounded to {snapped:?}, more than half again the pixels",
+            );
+        }
+    }
+
+    /// A size that would round past what the device can allocate has to stay exact: missing the
+    /// bucket costs a texture, failing to allocate costs the frame.
+    ///
+    /// Rounding lands at most on the value's own power-of-two bracket, so with the power-of-two
+    /// limits real drivers report this can never bite -- 8100 against 8192 rounds to exactly the
+    /// limit. The guard is here for a driver that reports something else.
+    #[test]
+    fn quantising_never_rounds_past_the_device_limit() {
+        assert_eq!(
+            quantise_pool_texture_size(extent(8100, 4000), 8192),
+            extent(8192, 4096),
+        );
+        let snapped = quantise_pool_texture_size(extent(5900, 5900), 6000);
+        assert_eq!(snapped, extent(5900, 5900), "{snapped:?} rounded past 6000");
     }
 
     #[test]

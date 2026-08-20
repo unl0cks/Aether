@@ -14,7 +14,7 @@
 use std::fs::File;
 
 use swf::{
-    BlendMode, Color, CharacterId, Compression, Fixed8, Fixed16, FillStyle, Filter, GlowFilter,
+    BlendMode, CharacterId, Color, Compression, FillStyle, Filter, Fixed8, Fixed16, GlowFilter,
     GlowFilterFlags, GradientFilter, GradientFilterFlags, GradientRecord, Header, Matrix,
     PlaceObject, PlaceObjectAction, Point, PointDelta, Rectangle, Shape, ShapeFlag, ShapeRecord,
     ShapeStyles, Sprite, StyleChangeData, Tag, Twips,
@@ -55,7 +55,9 @@ fn main() {
         .next()
         .and_then(|arg| arg.parse().ok())
         .expect("usage: glow_scale_case <scale> <out.swf>");
-    let out = args.next().expect("usage: glow_scale_case <scale> <out.swf>");
+    let out = args
+        .next()
+        .expect("usage: glow_scale_case <scale> <out.swf>");
     let rest: Vec<String> = args.collect();
     let nested = rest.iter().any(|arg| arg == "nested");
     // A cached sprite under a trivial blend reaches the renderer as a blend wrapping exactly one
@@ -263,6 +265,10 @@ fn main() {
 
     let file = File::create(&out).expect("could not create the output file");
     swf::write_swf(&header, &tags, file).expect("could not write the SWF");
-    let shape_of_it = if nested { "glow inside a cached sprite scaled" } else { "glow on a square scaled" };
+    let shape_of_it = if nested {
+        "glow inside a cached sprite scaled"
+    } else {
+        "glow on a square scaled"
+    };
     println!("{out}: {shape_of_it} to {scale}, turned {rotation}deg, 40px glow, {STAGE}px stage");
 }

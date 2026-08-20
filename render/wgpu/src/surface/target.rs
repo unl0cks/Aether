@@ -16,12 +16,12 @@ pub struct ResolveBuffer {
 impl ResolveBuffer {
     pub fn new(
         descriptors: &Descriptors,
-        size: wgpu::Extent3d,
+        texture_size: wgpu::Extent3d,
         format: wgpu::TextureFormat,
         usage: wgpu::TextureUsages,
         pool: &mut TexturePool,
     ) -> Self {
-        let texture = pool.get_texture(descriptors, size, usage, format, 1);
+        let texture = pool.get_texture(descriptors, texture_size, usage, format, 1);
         Self {
             texture: PoolOrArcTexture::Pool(texture),
         }
@@ -87,15 +87,18 @@ impl PoolOrArcTexture {
 }
 
 impl FrameBuffer {
+    /// `size` is the region actually drawn into; `texture_size` is what the pool is asked for, which
+    /// may be larger so that near-identical requests share a bucket.
     pub fn new(
         descriptors: &Descriptors,
         sample_count: u32,
         size: wgpu::Extent3d,
+        texture_size: wgpu::Extent3d,
         format: wgpu::TextureFormat,
         usage: wgpu::TextureUsages,
         pool: &mut TexturePool,
     ) -> Self {
-        let texture = pool.get_texture(descriptors, size, usage, format, sample_count);
+        let texture = pool.get_texture(descriptors, texture_size, usage, format, sample_count);
 
         Self {
             texture: PoolOrArcTexture::Pool(texture),
@@ -144,12 +147,12 @@ pub struct BlendBuffer {
 impl BlendBuffer {
     pub fn new(
         descriptors: &Descriptors,
-        size: wgpu::Extent3d,
+        texture_size: wgpu::Extent3d,
         format: wgpu::TextureFormat,
         usage: wgpu::TextureUsages,
         pool: &mut TexturePool,
     ) -> Self {
-        let texture = pool.get_texture(descriptors, size, usage, format, 1);
+        let texture = pool.get_texture(descriptors, texture_size, usage, format, 1);
 
         Self { texture }
     }
@@ -172,12 +175,12 @@ impl StencilBuffer {
     pub fn new(
         descriptors: &Descriptors,
         msaa_sample_count: u32,
-        size: wgpu::Extent3d,
+        texture_size: wgpu::Extent3d,
         pool: &mut TexturePool,
     ) -> Self {
         let texture = pool.get_texture(
             descriptors,
-            size,
+            texture_size,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
             wgpu::TextureFormat::Stencil8,
             msaa_sample_count,
@@ -202,6 +205,11 @@ pub struct CommandTarget {
     /// matrix is built around it, so any quad drawn over this target has to agree.
     origin: (u32, u32),
     size: wgpu::Extent3d,
+    /// What the pool was actually asked for, which is `size` rounded out to a bucket for targets
+    /// that confine their drawing with a viewport. Everything the target hands out -- attachments,
+    /// stencil, blend buffer -- has to agree on this, because a render pass requires every
+    /// attachment to be the same size.
+    texture_size: wgpu::Extent3d,
     format: wgpu::TextureFormat,
     sample_count: u32,
     whole_frame_bind_group: OnceCell<(wgpu::Buffer, wgpu::BindGroup)>,
@@ -246,9 +254,12 @@ impl ResolveState {
 }
 
 impl CommandTarget {
-    /// A target covering the whole space its commands were recorded in. Filters and the main stage
-    /// surface all want this.
-    #[expect(clippy::too_many_arguments)]
+    /// A target covering the whole space its commands were recorded in, in a texture of exactly
+    /// that size.
+    ///
+    /// Used by the PixelBender path, which addresses its output by absolute pixel rather than
+    /// through a viewport and so cannot be handed a texture larger than its region. Ordinary
+    /// filters want [`Self::new_for_filter`].
     pub fn new(
         descriptors: &Descriptors,
         pool: &mut TexturePool,
@@ -258,10 +269,11 @@ impl CommandTarget {
         render_target_mode: RenderTargetMode,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Self {
-        let target = Self::new_at(
+        let target = Self::new_inner(
             (0, 0),
             descriptors,
             pool,
+            size,
             size,
             format,
             sample_count,
@@ -271,6 +283,45 @@ impl CommandTarget {
         // Filters pass targets between themselves and to the backend with no "finished" point that
         // could own a deferred resolve, so they keep resolving at the end of every pass. They draw
         // one or two passes per target, which is what an attached resolve is priced for.
+        Self {
+            deferred_resolve: false,
+            ..target
+        }
+    }
+
+    /// As [`Self::new`], but the texture may be larger than the region so that near-identical
+    /// requests share a pool bucket.
+    ///
+    /// Every ordinary filter confines its drawing to `size` with `set_viewport` and reads its
+    /// output back through [`crate::filters::FilterRegion::for_target`], both of which already
+    /// carry the texture and the region separately. What was missing was anything ever asking for
+    /// a rounded texture: a session census measured 781 GB of offscreen texture creation across a
+    /// full 4096-bucket size table, because an animating object's glow asks for 231x343, then
+    /// 232x344, then 230x341, and no bucket is ever matched twice.
+    pub fn new_for_filter(
+        descriptors: &Descriptors,
+        pool: &mut TexturePool,
+        size: wgpu::Extent3d,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        render_target_mode: RenderTargetMode,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Self {
+        let texture_size = crate::texture_pool_policy::quantise_pool_texture_size(
+            size,
+            descriptors.limits.max_texture_dimension_2d,
+        );
+        let target = Self::new_inner(
+            (0, 0),
+            descriptors,
+            pool,
+            size,
+            texture_size,
+            format,
+            sample_count,
+            render_target_mode,
+            encoder,
+        );
         Self {
             deferred_resolve: false,
             ..target
@@ -292,6 +343,33 @@ impl CommandTarget {
         render_target_mode: RenderTargetMode,
         encoder: &mut wgpu::CommandEncoder,
     ) -> Self {
+        // Drawing here is placed by the globals view matrix with no viewport to confine it, so the
+        // texture has to be exactly the region.
+        Self::new_inner(
+            origin,
+            descriptors,
+            pool,
+            size,
+            size,
+            format,
+            sample_count,
+            render_target_mode,
+            encoder,
+        )
+    }
+
+    #[expect(clippy::too_many_arguments)]
+    fn new_inner(
+        origin: (u32, u32),
+        descriptors: &Descriptors,
+        pool: &mut TexturePool,
+        size: wgpu::Extent3d,
+        texture_size: wgpu::Extent3d,
+        format: wgpu::TextureFormat,
+        sample_count: u32,
+        render_target_mode: RenderTargetMode,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Self {
         let globals = pool.get_globals(descriptors, origin.0, origin.1, size.width, size.height);
 
         let mut make_pooled_frame_buffer = || {
@@ -299,8 +377,17 @@ impl CommandTarget {
                 descriptors,
                 sample_count,
                 size,
+                texture_size,
                 format,
                 if sample_count > 1 {
+                    // Deliberately NOT `TEXTURE_BINDING`, and this was measured rather than
+                    // assumed. Adding it so a shader could resolve only the region a blend reads
+                    // back took peak GPU texture memory from 1,966 MB to 11,451 MB, with a fifth of
+                    // a session above 4 GB on a 10 GB card, while the median barely moved. A
+                    // multisampled texture that must be shader-readable cannot use the driver's
+                    // compressed MSAA layout, and `chunk_blends` builds every blend sub-target in a
+                    // frame before any of them executes, so they are all alive at once. The
+                    // bandwidth it bought (304 -> 9 MPx of resolve per frame) is not worth that.
                     wgpu::TextureUsages::RENDER_ATTACHMENT
                 } else {
                     wgpu::TextureUsages::RENDER_ATTACHMENT
@@ -332,7 +419,7 @@ impl CommandTarget {
                     make_pooled_frame_buffer(),
                     Some(ResolveBuffer::new(
                         descriptors,
-                        size,
+                        texture_size,
                         format,
                         wgpu::TextureUsages::COPY_SRC
                             | wgpu::TextureUsages::COPY_DST
@@ -346,6 +433,13 @@ impl CommandTarget {
             };
 
         if let RenderTargetMode::FreshWithTexture(texture) = &render_target_mode {
+            // Seeding copies and blits the whole attachment, so this mode cannot be given a texture
+            // larger than its region. Nothing does today; this is here so nothing starts.
+            debug_assert_eq!(
+                (texture_size.width, texture_size.height),
+                (size.width, size.height),
+                "FreshWithTexture cannot seed a rounded-up target",
+            );
             if let Some(resolve_buffer) = &resolve_buffer {
                 encoder.copy_texture_to_texture(
                     texture.as_image_copy(),
@@ -386,6 +480,7 @@ impl CommandTarget {
             globals,
             origin,
             size,
+            texture_size,
             format,
             sample_count,
             whole_frame_bind_group,
@@ -563,9 +658,11 @@ impl CommandTarget {
         pool: &mut TexturePool,
     ) -> Option<wgpu::RenderPassDepthStencilAttachment<'_>> {
         let new_buffer = self.depth.get().is_none();
-        let stencil = self
-            .depth
-            .get_or_init(|| StencilBuffer::new(descriptors, self.sample_count, self.size, pool));
+        // Sized like the colour attachment rather than like the region: a render pass requires
+        // every attachment to be the same size.
+        let stencil = self.depth.get_or_init(|| {
+            StencilBuffer::new(descriptors, self.sample_count, self.texture_size, pool)
+        });
         Some(wgpu::RenderPassDepthStencilAttachment {
             view: stencil.view(),
             depth_ops: None,
@@ -595,7 +692,7 @@ impl CommandTarget {
         let blend_buffer = self.blend_buffer.get_or_init(|| {
             BlendBuffer::new(
                 descriptors,
-                self.size,
+                self.texture_size,
                 self.format,
                 wgpu::TextureUsages::TEXTURE_BINDING
                     | wgpu::TextureUsages::COPY_DST
@@ -606,6 +703,14 @@ impl CommandTarget {
         self.ensure_cleared(encoder);
         // The copy below reads the resolved texture, so this is one of the two points a deferred
         // target has to catch up.
+        //
+        // This resolves the WHOLE target, once per blend chunk, which is expensive: measured at
+        // 2.08 resolve passes and 3.30 MPx per complex blend, against regions that are typically a
+        // few tens of thousands of pixels. Replacing it with a shader that resolves only the region
+        // was tried, was pixel-equivalent, and cut resolve bandwidth by 97% -- and had to be backed
+        // out, because making the multisampled buffer shader-readable took peak GPU texture memory
+        // from 1,966 MB to 11,451 MB. Any second attempt has to solve that first; the blend corpus
+        // in `_evidence/blend_corpus.swf` proves correctness, but correctness was never the problem.
         self.resolve_now(encoder);
         if let Some((origin, extent)) =
             blend_buffer_copy_region(self.origin, self.frame_buffer.size(), region)

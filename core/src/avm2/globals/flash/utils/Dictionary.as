@@ -1,6 +1,4 @@
 package flash.utils {
-    import __ruffle__.stub_constructor;
-
     [Ruffle(InstanceAllocator)]
     public dynamic class Dictionary {
         prototype.toJSON = function(r:String):* {
@@ -10,8 +8,13 @@ package flash.utils {
 
         public function Dictionary(weakKeys:Boolean = false) {
             if (weakKeys) {
-                stub_constructor("flash.utils.Dictionary", "with weak keys");
+                this.initWeakKeys();
             }
         }
+
+        // Called only from the constructor, and only once. Splitting it out is what lets the
+        // argument reach the object at all: the instance allocator runs before any argument
+        // exists, so the flag cannot be set there.
+        private native function initWeakKeys():void;
     }
 }

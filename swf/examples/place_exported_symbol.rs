@@ -23,8 +23,12 @@ const STAGE: f64 = 1200.0;
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let input = args.next().expect("usage: place_exported_symbol <in.swf> <out.swf> [scale]");
-    let output = args.next().expect("usage: place_exported_symbol <in.swf> <out.swf> [scale]");
+    let input = args
+        .next()
+        .expect("usage: place_exported_symbol <in.swf> <out.swf> [scale]");
+    let output = args
+        .next()
+        .expect("usage: place_exported_symbol <in.swf> <out.swf> [scale]");
     let scale: f32 = args.next().and_then(|arg| arg.parse().ok()).unwrap_or(1.0);
 
     let data = std::fs::read(&input).expect("could not read the input movie");
@@ -63,15 +67,13 @@ fn main() {
             .find(|(_, name)| name == wanted)
             .cloned()
             .unwrap_or_else(|| {
-                let mut names: Vec<&str> =
-                    exported.iter().map(|(_, name)| name.as_str()).collect();
+                let mut names: Vec<&str> = exported.iter().map(|(_, name)| name.as_str()).collect();
                 names.sort_unstable();
                 panic!("no symbol named `{wanted}`; this movie exports {names:?}")
             }),
-        None => exported
-            .first()
-            .cloned()
-            .expect("this movie exports no symbol, so there is nothing for the game to instantiate"),
+        None => exported.first().cloned().expect(
+            "this movie exports no symbol, so there is nothing for the game to instantiate",
+        ),
     };
 
     // Everything up to and including the definitions, then the placement. Dropping the original

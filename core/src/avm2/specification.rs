@@ -300,6 +300,12 @@ impl Definition {
                 DynamicKey::Object(object) => {
                     Value::Object(*object).coerce_to_string(activation).unwrap()
                 }
+                // A class prototype is never a weak-keyed `Dictionary`, so this cannot arise; name
+                // it rather than let the match go non-exhaustive and hide a future one.
+                DynamicKey::WeakObject(weak) => match weak.upgrade(activation.gc()) {
+                    Some(object) => Value::Object(object).coerce_to_string(activation).unwrap(),
+                    None => continue,
+                },
             };
             if &name != b"constructor" {
                 Self::add_prototype_value(name, value.value, &mut definition.prototype, activation);

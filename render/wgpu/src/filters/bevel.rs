@@ -198,7 +198,7 @@ impl BevelFilter {
         let angle = filter.angle.to_f32();
         let blur_offset = (angle.cos() * distance, angle.sin() * distance);
 
-        let target = CommandTarget::new(
+        let target = CommandTarget::new_for_filter(
             descriptors,
             texture_pool,
             wgpu::Extent3d {

@@ -114,7 +114,6 @@ impl<'gc> OrphanManager<'gc> {
             keep
         });
     }
-
 }
 
 impl<'gc> Default for OrphanManager<'gc> {

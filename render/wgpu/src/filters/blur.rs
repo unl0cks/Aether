@@ -1,7 +1,9 @@
 use crate::backend::RenderTargetMode;
 use crate::buffer_pool::TexturePool;
 use crate::descriptors::Descriptors;
-use crate::filters::{FilterRegion,FilterSource, FilterVertex, VERTEX_BUFFERS_DESCRIPTION_FILTERS};
+use crate::filters::{
+    FilterRegion, FilterSource, FilterVertex, VERTEX_BUFFERS_DESCRIPTION_FILTERS,
+};
 use crate::surface::target::CommandTarget;
 use crate::utils::SampleCountMap;
 use bytemuck::{Pod, Zeroable};
@@ -170,7 +172,7 @@ impl BlurFilter {
         let format = source.texture.format();
         let pipeline = self.pipeline(descriptors, sample_count);
 
-        let mut flip = CommandTarget::new(
+        let mut flip = CommandTarget::new_for_filter(
             descriptors,
             texture_pool,
             wgpu::Extent3d {
@@ -183,7 +185,7 @@ impl BlurFilter {
             RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
             draw_encoder,
         );
-        let mut flop = CommandTarget::new(
+        let mut flop = CommandTarget::new_for_filter(
             descriptors,
             texture_pool,
             wgpu::Extent3d {
@@ -253,8 +255,13 @@ impl BlurFilter {
                     (
                         flip.color_view(),
                         self.intermediate_vertex_buffer.slice(..),
-                        flip.width() as f32,
-                        flip.height() as f32,
+                        // The TEXTURE's dimensions, not the region's. `direction` below is one
+                        // texel expressed in UV, and UVs normalise against the texture -- which is
+                        // routinely larger than the region now that intermediates are rounded out
+                        // to a pool bucket. Using the region here scales every tap by
+                        // texture/region and smears the blur.
+                        flip.color_texture().width() as f32,
+                        flip.color_texture().height() as f32,
                     )
                 };
 

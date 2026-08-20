@@ -36,9 +36,9 @@ pub mod aether_gpu_timeline;
 // allocator's free space is worth knowing, and totals alone have already failed to explain one.
 pub mod aether_allocator_report;
 // Ungated: this changes how frames are submitted on every build, not just diagnostic ones.
-pub mod submission_splitter;
 #[cfg(feature = "aether_metrics")]
 pub mod aether_metrics;
+pub mod submission_splitter;
 
 mod bitmaps;
 mod context3d;

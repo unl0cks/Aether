@@ -45,7 +45,9 @@ fn multiname_local(abc: &AbcFile, index: Index<Multiname>) -> String {
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let path = args.next().expect("usage: abc_method_names <movie.swf> [class]");
+    let path = args
+        .next()
+        .expect("usage: abc_method_names <movie.swf> [class]");
     let wanted_class = args.next().unwrap_or_else(|| "AvatarMC".to_string());
 
     let file = File::open(&path).expect("could not open the movie");

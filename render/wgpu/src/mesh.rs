@@ -162,6 +162,13 @@ pub struct Mesh {
     pub draws: Vec<Draw>,
     pub vertex_buffer: wgpu::Buffer,
     pub index_buffer: wgpu::Buffer,
+    /// The shape's own extent, before any transform, kept from the `DistilledShape` it came from.
+    ///
+    /// Tessellation discards it, but a shape draw cannot be bounded on screen without it, and
+    /// bounding draws is what lets a blend be reordered past them -- see `chunk_bounds` in
+    /// `surface/commands.rs`. AQW's avatars are vector shapes, so without this nearly every draw
+    /// chunk would be unbounded and the batcher could never move a blend anywhere.
+    pub shape_bounds: swf::Rectangle<swf::Twips>,
 }
 
 impl ShapeHandleImpl for Mesh {}

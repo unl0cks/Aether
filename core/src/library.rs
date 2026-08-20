@@ -21,6 +21,45 @@ use std::collections::HashMap;
 use std::sync::{Arc, Weak};
 use weak_table::{PtrWeakKeyHashMap, WeakValueHashMap, traits::WeakElement};
 
+/// What a library's characters are made of, summed across every resident movie.
+///
+/// Reported over time by the memory census. Counts alone say what is retained; `bitmap_bytes` and
+/// `binary_bytes` say what that retention costs, which is the part a single `characters` figure
+/// cannot distinguish.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CharacterCensus {
+    pub bitmaps: usize,
+    /// Compressed bitmap sources held on the Rust heap. Never released while the library lives.
+    pub bitmap_bytes: usize,
+    /// Bitmaps currently holding a GPU upload as well as their source.
+    pub bitmaps_uploaded: usize,
+    pub graphics: usize,
+    pub morph_shapes: usize,
+    pub fonts: usize,
+    /// Sounds are the one character kind no release path touches, so they are counted separately.
+    pub sounds: usize,
+    pub movie_clips: usize,
+    /// Counted but not measured: a `BinaryData` is a slice into its movie, so its bytes are
+    /// already reported as `swf bytes` and counting them again would double them.
+    pub binary_data: usize,
+    pub other: usize,
+}
+
+impl CharacterCensus {
+    pub fn add(&mut self, other: CharacterCensus) {
+        self.bitmaps += other.bitmaps;
+        self.bitmap_bytes += other.bitmap_bytes;
+        self.bitmaps_uploaded += other.bitmaps_uploaded;
+        self.graphics += other.graphics;
+        self.morph_shapes += other.morph_shapes;
+        self.fonts += other.fonts;
+        self.sounds += other.sounds;
+        self.movie_clips += other.movie_clips;
+        self.binary_data += other.binary_data;
+        self.other += other.other;
+    }
+}
+
 #[derive(Clone)]
 struct MovieSymbol(Arc<SwfMovie>, CharacterId);
 
@@ -162,6 +201,35 @@ impl<'gc> MovieLibrary<'gc> {
                 _ => false,
             })
             .count()
+    }
+
+    /// Split this library's characters by kind, and measure the ones whose cost is knowable.
+    ///
+    /// A single `characters` count cannot distinguish a library of cheap shape definitions from
+    /// one holding thousands of compressed bitmaps, and the two imply completely different work.
+    /// AQW loads a SWF per equipment piece per player and never releases the libraries, so this is
+    /// the breakdown that says which kind of character the resident cost is actually made of.
+    pub fn character_census(&self) -> CharacterCensus {
+        let mut census = CharacterCensus::default();
+        for character in self.characters.values() {
+            match character {
+                Character::Bitmap(bitmap) => {
+                    census.bitmaps += 1;
+                    census.bitmap_bytes += bitmap.compressed().resident_bytes();
+                    if bitmap.has_bitmap_handle() {
+                        census.bitmaps_uploaded += 1;
+                    }
+                }
+                Character::Graphic(_) => census.graphics += 1,
+                Character::MorphShape(_) => census.morph_shapes += 1,
+                Character::Font(_) => census.fonts += 1,
+                Character::Sound(_) => census.sounds += 1,
+                Character::MovieClip(_) => census.movie_clips += 1,
+                Character::BinaryData(_) => census.binary_data += 1,
+                _ => census.other += 1,
+            }
+        }
+        census
     }
 
     /// Evict cached GPU uploads that have not been drawn since the previous sweep,
@@ -495,10 +563,43 @@ pub struct Library<'gc> {
     /// A list of the symbols associated with specific AVM2 constructor
     /// prototypes.
     avm2_class_registry: Avm2ClassRegistry<'gc>,
+
+    /// Movies already parsed, by the URL and loader URL they came from.
+    ///
+    /// AQW loads a SWF per equipment piece per player, and loads the same file again for every
+    /// player wearing it. Measured over 4.8 hours of play: **4,693 resident movies for 1,935
+    /// distinct URLs**, so 2.4 copies of every file, each holding its own decompressed bytes and
+    /// its own decoded characters. None of that can be released, because a shared application
+    /// domain keeps a reference to every movie whose scripts it has ever exported.
+    ///
+    /// So the copies are avoided instead of reclaimed. Weak, because a movie is only worth reusing
+    /// while something still holds it: `movie_libraries` is weak-keyed too, so a movie nobody
+    /// references has already taken its characters with it.
+    #[collect(require_static)]
+    movies_by_url: FnvHashMap<(String, Option<String>), Weak<SwfMovie>>,
 }
 
+/// How many loads have been served an already-resident movie instead of parsing a second copy.
+///
+/// Reported by the memory census. The saving is visible without it -- `movies` should converge on
+/// `distinct urls` rather than sitting at 2.4x it -- but that is a ratio between two slow-moving
+/// totals, and this says outright whether the path is being taken at all.
+static MOVIE_REUSES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The running total behind [`MOVIE_REUSES`].
+pub fn movie_reuses() -> usize {
+    MOVIE_REUSES.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many entries `movies_by_url` may accumulate before dead ones are swept.
+///
+/// The map holds one entry per distinct URL, which a long session measured at under two thousand,
+/// so this is a backstop against a session that outlives that rather than a routine operation.
+const MOVIE_URL_CACHE_SWEEP_AT: usize = 4096;
+
 /// Enough of the alphabet to tell a real face from a subset cut for one caption.
-const EMBEDDED_FONT_COVERAGE_SAMPLE: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,";
+const EMBEDDED_FONT_COVERAGE_SAMPLE: &[u8] =
+    b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789 .,";
 
 impl<'gc> Library<'gc> {
     pub fn empty() -> Self {
@@ -511,7 +612,43 @@ impl<'gc> Library<'gc> {
             default_font_names: Default::default(),
             default_font_cache: Default::default(),
             avm2_class_registry: Default::default(),
+            movies_by_url: Default::default(),
         }
+    }
+
+    /// The movie already parsed from this URL, if one is still resident.
+    ///
+    /// Returns `None` when nothing has been loaded from it, or when what was loaded has since been
+    /// dropped -- in which case its library went with it and there is nothing to share.
+    pub fn resident_movie(&mut self, url: &str, loader_url: Option<&str>) -> Option<Arc<SwfMovie>> {
+        let key = (url.to_owned(), loader_url.map(str::to_owned));
+        match self.movies_by_url.get(&key) {
+            Some(weak) => match weak.upgrade() {
+                Some(movie) => {
+                    MOVIE_REUSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    Some(movie)
+                }
+                None => {
+                    self.movies_by_url.remove(&key);
+                    None
+                }
+            },
+            None => None,
+        }
+    }
+
+    /// Offer a freshly parsed movie for reuse by later loads of the same URL.
+    pub fn remember_movie(&mut self, movie: &Arc<SwfMovie>) {
+        if self.movies_by_url.len() >= MOVIE_URL_CACHE_SWEEP_AT {
+            self.movies_by_url.retain(|_, weak| weak.strong_count() > 0);
+        }
+        self.movies_by_url.insert(
+            (
+                movie.url().to_owned(),
+                movie.loader_url().map(str::to_owned),
+            ),
+            Arc::downgrade(movie),
+        );
     }
 
     pub fn library_for_movie(&self, movie: Arc<SwfMovie>) -> Option<&MovieLibrary<'gc>> {
@@ -978,6 +1115,49 @@ impl<'gc> FontMap<'gc> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point: a second load of a URL already resident gets the first movie back, so it
+    /// does not parse the file again or build a second library of characters from it.
+    #[test]
+    fn a_second_load_of_the_same_url_reuses_the_resident_movie() {
+        let mut library = Library::<'static>::empty();
+        let movie = Arc::new(SwfMovie::empty(32, None));
+        library.remember_movie(&movie);
+
+        let reused = library
+            .resident_movie(movie.url(), movie.loader_url())
+            .expect("a movie still held must be offered back");
+        assert!(Arc::ptr_eq(&movie, &reused));
+    }
+
+    /// The cache must never be what keeps a movie alive, or it becomes the leak it exists to fix.
+    #[test]
+    fn a_dropped_movie_is_not_offered_back() {
+        let mut library = Library::<'static>::empty();
+        let movie = Arc::new(SwfMovie::empty(32, None));
+        let url = movie.url().to_owned();
+        library.remember_movie(&movie);
+        drop(movie);
+
+        assert!(
+            library.resident_movie(&url, None).is_none(),
+            "a weak entry whose movie has gone must not resurrect anything"
+        );
+    }
+
+    /// Two files that merely share a loader are still two files.
+    #[test]
+    fn movies_from_different_urls_are_not_confused() {
+        let mut library = Library::<'static>::empty();
+        let movie = Arc::new(SwfMovie::empty(32, None));
+        library.remember_movie(&movie);
+
+        assert!(
+            library
+                .resident_movie("https://game.aq.com/other.swf", None)
+                .is_none()
+        );
+    }
 
     #[test]
     fn a_movie_library_does_not_keep_its_own_movie_alive() {

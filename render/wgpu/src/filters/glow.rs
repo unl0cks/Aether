@@ -15,6 +15,17 @@ use wgpu::util::StagingBelt;
 /// How many gradient stops a glow may carry. SWF allows fifteen.
 pub const STOP_CAPACITY: usize = 16;
 
+/// A blurred layer produced outside this filter, for glows that were blurred as part of a group.
+///
+/// The glow pass never cared where its blurred input came from -- it binds a view and reads a
+/// region of it -- so an atlas slot serves exactly as well as a texture of its own, and this is the
+/// whole of what atlasing has to hand back.
+#[derive(Clone, Copy)]
+pub struct PreBlurred<'a> {
+    pub view: &'a wgpu::TextureView,
+    pub region: FilterRegion,
+}
+
 #[repr(C)]
 #[derive(Copy, Clone, Debug, Pod, Zeroable, PartialEq)]
 struct GlowUniform {
@@ -176,41 +187,53 @@ impl GlowFilter {
         // with distance -- that is the whole reason it is a different filter -- and collapsing it
         // to one stop keeps the shape and loses the colour.
         gradient: &[swf::GradientRecord],
+        // A blurred layer produced elsewhere, when this glow is part of an atlased group. `None`
+        // means blur here, which is what every path did before atlasing existed.
+        pre_blurred: Option<PreBlurred<'_>>,
     ) -> CommandTarget {
         let sample_count = source.texture.sample_count();
         let format = source.texture.format();
         let pipeline = self.pipeline(descriptors, sample_count);
-        let blurred = blur_filter.apply(
-            descriptors,
-            texture_pool,
-            draw_encoder,
-            staging_belt,
-            source,
-            &filter.inner_blur_filter(),
-        );
-        if let Some(blurred) = &blurred {
+
+        // A group of objects sharing blur parameters can be blurred together in one atlas, in which
+        // case this glow's blurred layer already exists and is a sub-rectangle of it. Everything
+        // after this point is identical either way: the glow pass only ever wanted a view and the
+        // region within it.
+        let owned_blur = match pre_blurred {
+            Some(_) => None,
+            None => blur_filter.apply(
+                descriptors,
+                texture_pool,
+                draw_encoder,
+                staging_belt,
+                source,
+                &filter.inner_blur_filter(),
+            ),
+        };
+        if let Some(blurred) = &owned_blur {
             blurred.ensure_cleared(draw_encoder);
         }
-        let blurred_view = blurred
-            .as_ref()
-            .map(CommandTarget::color_view)
-            .unwrap_or(&source.view);
         // The blurred layer is its own texture covering exactly the filtered region. When the blur
         // was a no-op there is no such texture and the source is bound instead, so the region has
         // to follow whichever one ends up in the bind group.
-        let blur_region = blurred
-            .as_ref()
-            // The blurred layer's own extent, not its texture's: it came from the offscreen pool,
-            // which rounds sizes out to a grid, so the texture is often larger than the image in it.
-            .map(|blurred| {
-                FilterRegion::for_target(
-                    blurred.color_texture(),
-                    (blurred.width(), blurred.height()),
-                )
-            })
-            .unwrap_or_else(|| source.region());
+        let (blurred_view, blur_region) = match pre_blurred {
+            Some(pre) => (pre.view, pre.region),
+            None => match &owned_blur {
+                // The blurred layer's own extent, not its texture's: it came from the offscreen
+                // pool, which rounds sizes out to a grid, so the texture is often larger than the
+                // image in it.
+                Some(blurred) => (
+                    blurred.color_view(),
+                    FilterRegion::for_target(
+                        blurred.color_texture(),
+                        (blurred.width(), blurred.height()),
+                    ),
+                ),
+                None => (&source.view, source.region()),
+            },
+        };
 
-        let target = CommandTarget::new(
+        let target = CommandTarget::new_for_filter(
             descriptors,
             texture_pool,
             wgpu::Extent3d {

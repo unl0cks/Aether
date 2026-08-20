@@ -11,7 +11,9 @@ use std::fs::File;
 use swf::{CharacterId, Tag};
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: edit_text_fonts <movie.swf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: edit_text_fonts <movie.swf>");
     let file = File::open(&path).expect("could not open the movie");
     let buf = swf::decompress_swf(file).expect("could not decompress the movie");
     let swf = swf::parse_swf(&buf).expect("could not parse the movie");
@@ -37,9 +39,10 @@ fn main() {
 
     let mut tally: HashMap<String, (usize, usize)> = HashMap::new();
     for (id, class, height, embedded) in &fields {
-        let name = class.clone().or_else(|| {
-            id.and_then(|id| font_names.get(&id).cloned())
-        }).unwrap_or_else(|| "<none>".into());
+        let name = class
+            .clone()
+            .or_else(|| id.and_then(|id| font_names.get(&id).cloned()))
+            .unwrap_or_else(|| "<none>".into());
         let key = format!("{name} @ {height:.0}pt");
         let entry = tally.entry(key).or_default();
         entry.0 += 1;

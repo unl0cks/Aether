@@ -492,7 +492,10 @@ mod tests {
             .to_vec();
 
         assert_eq!(
-            collapsed.iter().collect::<std::collections::HashSet<_>>().len(),
+            collapsed
+                .iter()
+                .collect::<std::collections::HashSet<_>>()
+                .len(),
             1,
             "these four should share a bucket, got {collapsed:?}"
         );
@@ -502,9 +505,19 @@ mod tests {
     /// ever grow it. Returning something smaller would silently clip content.
     #[test]
     fn quantising_never_returns_a_smaller_texture() {
-        for size in [(1, 1), (37, 25), (128, 128), (960, 550), (2048, 960), (4096, 4096)] {
+        for size in [
+            (1, 1),
+            (37, 25),
+            (128, 128),
+            (960, 550),
+            (2048, 960),
+            (4096, 4096),
+        ] {
             let (width, height) = quantise_pool_texture_size(size);
-            assert!(width >= size.0 && height >= size.1, "{size:?} shrank to {width}x{height}");
+            assert!(
+                width >= size.0 && height >= size.1,
+                "{size:?} shrank to {width}x{height}"
+            );
         }
     }
 

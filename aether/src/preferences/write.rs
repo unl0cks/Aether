@@ -174,10 +174,7 @@ impl<'a> PreferencesWriter<'a> {
                     settings.idle_gpu_upload_eviction,
                 ),
                 ("low_vram", settings.low_vram),
-                (
-                    "tooltips_follow_pointer",
-                    settings.tooltips_follow_pointer,
-                ),
+                ("tooltips_follow_pointer", settings.tooltips_follow_pointer),
                 ("hide_skill_tooltips", settings.hide_skill_tooltips),
                 (
                     "always_show_aura_tooltips",
@@ -191,6 +188,7 @@ impl<'a> PreferencesWriter<'a> {
             }
             table["quality"] = value(settings.quality.to_string());
             table["focus_aura_colour"] = value(settings.focus_aura_colour.to_string());
+            table["bitmap_cache_sweep"] = value(settings.bitmap_cache_sweep.to_string());
             table["ui_font"] = value(settings.ui_font.to_string());
             match settings.msaa_samples {
                 Some(samples) => table["msaa_samples"] = value(i64::from(samples)),
@@ -452,6 +450,7 @@ crash_report = true
 ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+bitmap_cache_sweep = \"balanced\"
 ui_font = \"default\"
 max_fps = 60.0
 ",
@@ -520,6 +519,7 @@ crash_report = true
 ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+bitmap_cache_sweep = \"balanced\"
 ui_font = \"default\"
 ",
         );

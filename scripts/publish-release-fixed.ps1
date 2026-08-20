@@ -98,6 +98,51 @@ try {
     if ($notes -match '[—–]') { throw "$NotesFile contains an em or en dash. Rewrite those lines." }
     Write-Ok "notes: $notesPath"
 
+    # Notes left over from the last release are the one bad input every other check here waves
+    # through: the file exists, it is not empty, it has no em dashes, and it describes something
+    # else entirely. The default notes path never changes name, so forgetting to rewrite it is not
+    # an unlikely mistake -- it published a release describing a fix from eighteen versions earlier.
+    #
+    # Compared against what is actually on the releases page rather than against a remembered copy.
+    # Skipped without complaint when the page cannot be reached: this check exists to catch a slip,
+    # and refusing to publish because GitHub was unreachable would be a worse failure than the one
+    # it prevents.
+    # Matched on the opening line rather than the whole text, and against several past releases rather
+    # than only the last. Reused notes come back lightly edited -- a "A pre-release." prefix added or
+    # dropped -- so comparing every character finds nothing, and the same description went out three
+    # times before anyone noticed. The first line is the summary GitHub shows, and repeating one is
+    # already a mistake whether or not the rest was touched.
+    $firstLine = {
+        param($t)
+        (($t -replace '\r', '') -split "`n" | Where-Object { $_.Trim() } | Select-Object -First 1).Trim()
+    }
+    $notesHead = & $firstLine $notes
+
+    if ($notesHead) {
+        try {
+            $recent = & gh release list --limit 10 --json tagName --jq '.[].tagName' 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                foreach ($past in @($recent)) {
+                    if (-not $past -or $past -eq $tag) { continue }
+                    $body = & gh release view $past --json body --jq '.body' 2>$null
+                    if ($LASTEXITCODE -ne 0 -or -not $body) { continue }
+                    if ((& $firstLine $body) -eq $notesHead) {
+                        throw "PUBLISHED_ALREADY:$past"
+                    }
+                }
+            }
+        }
+        catch {
+            # Only the reuse finding stops a release. A releases page that cannot be reached does not:
+            # this check exists to catch a slip, and refusing to publish because GitHub was unreachable
+            # would be the worse failure.
+            if ($_.Exception.Message -like 'PUBLISHED_ALREADY:*') {
+                $clash = $_.Exception.Message.Split(':')[1]
+                throw "$NotesFile opens with the same line as the description already published as $clash. These look like the previous release's notes. Write the notes for $version, or pass a different file as the first argument."
+            }
+        }
+    }
+
     $distDir = Join-Path $root 'installer\dist'
     $assets = @(
         (Join-Path $distDir "Aether-Setup-$version-win-x64.exe"),

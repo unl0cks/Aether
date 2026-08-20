@@ -895,6 +895,37 @@ impl Hash for Object<'_> {
     }
 }
 
+/// Identity for a weak object handle, by the address it points at.
+///
+/// `GcWeak::as_ptr` keeps answering after the target has been collected, which is what makes a weak
+/// key usable as a hash key at all: the entry can still be found, compared and removed once the
+/// thing it referred to is gone. Downgrading preserves the address, so a live `Object` and the weak
+/// handle taken from it hash alike -- that is what lets `Dictionary` look an entry up from a strong
+/// reference it was handed.
+///
+/// Comparing addresses without checking liveness is deliberate, and safe for a reason worth
+/// recording: `gc_arena`'s sweep drops a weakly-referenced object's *value* but keeps its `GcBox`
+/// allocated until the last weak pointer is gone. So an address cannot be handed to a new object
+/// while a dictionary still holds a weak key to the old one, and there is no risk of a fresh object
+/// colliding with a dead entry. Adding a liveness test here would also break `Eq`'s reflexivity --
+/// a dead key would stop equalling itself -- which a hash table is entitled to rely on.
+///
+/// The flip side is that every un-swept dead key pins a box header, which is why
+/// `DictionaryObject::prune_dead_keys` exists rather than leaving them to accumulate.
+impl PartialEq for WeakObject<'_> {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(self.as_ptr(), other.as_ptr())
+    }
+}
+
+impl Eq for WeakObject<'_> {}
+
+impl Hash for WeakObject<'_> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.as_ptr().hash(state);
+    }
+}
+
 macro_rules! define_weak_enum {
     (
         $(#[$attrs:meta])*
@@ -917,6 +948,16 @@ macro_rules! define_weak_enum {
             $vis fn upgrade(self, mc: &Mutation<'gc>) -> Option<$strong_enum<'gc>> {
                 match self {
                     $( Self::$variant(o) => $strong_enum::$variant($variant(o.0.upgrade(mc)?)).into(), )*
+                }
+            }
+
+            /// Whether the object this refers to has already been collected.
+            ///
+            /// Unlike `upgrade`, this needs no `Mutation`, which is what lets a collection of weak
+            /// handles be swept from places that only hold a shared reference.
+            $vis fn is_dropped(self) -> bool {
+                match self {
+                    $( Self::$variant(o) => o.0.is_dropped(), )*
                 }
             }
         }

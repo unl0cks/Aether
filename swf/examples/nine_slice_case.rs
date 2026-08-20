@@ -49,7 +49,9 @@ fn main() {
         .next()
         .and_then(|arg| arg.parse().ok())
         .expect("usage: nine_slice_case <scale> <out.swf> [nogrid]");
-    let out = args.next().expect("usage: nine_slice_case <scale> <out.swf>");
+    let out = args
+        .next()
+        .expect("usage: nine_slice_case <scale> <out.swf>");
     let rest: Vec<String> = args.collect();
     let no_grid = rest.iter().any(|arg| arg == "nogrid");
     // `cached` is the case that mattered: a cached object's draw replays a finished image and reads
@@ -162,50 +164,50 @@ fn main() {
 
     // The grid goes on a sprite, because that is what a scaling grid can be set on.
     let mut inner_tags = vec![
-            Tag::PlaceObject(Box::new(PlaceObject {
-                version: 2,
-                action: PlaceObjectAction::Place(CharacterId::from(1u16)),
-                depth: 1,
-                matrix: Some(Matrix::translate(
-                    Twips::from_pixels(-origin),
-                    Twips::from_pixels(-origin),
-                )),
-                color_transform: None,
-                ratio: None,
-                name: None,
-                clip_depth: None,
-                class_name: None,
-                filters: None,
-                background_color: None,
-                blend_mode: None,
-                clip_actions: None,
-                has_image: false,
-                is_bitmap_cached: None,
-                is_visible: None,
-                amf_data: None,
-            })),
-            Tag::PlaceObject(Box::new(PlaceObject {
-                version: 2,
-                action: PlaceObjectAction::Place(CharacterId::from(3u16)),
-                depth: 2,
-                matrix: Some(Matrix::translate(
-                    Twips::from_pixels(BORDER - origin),
-                    Twips::from_pixels(BORDER - origin),
-                )),
-                color_transform: None,
-                ratio: None,
-                name: None,
-                clip_depth: None,
-                class_name: None,
-                filters: None,
-                background_color: None,
-                blend_mode: None,
-                clip_actions: None,
-                has_image: false,
-                is_bitmap_cached: None,
-                is_visible: None,
-                amf_data: None,
-            })),
+        Tag::PlaceObject(Box::new(PlaceObject {
+            version: 2,
+            action: PlaceObjectAction::Place(CharacterId::from(1u16)),
+            depth: 1,
+            matrix: Some(Matrix::translate(
+                Twips::from_pixels(-origin),
+                Twips::from_pixels(-origin),
+            )),
+            color_transform: None,
+            ratio: None,
+            name: None,
+            clip_depth: None,
+            class_name: None,
+            filters: None,
+            background_color: None,
+            blend_mode: None,
+            clip_actions: None,
+            has_image: false,
+            is_bitmap_cached: None,
+            is_visible: None,
+            amf_data: None,
+        })),
+        Tag::PlaceObject(Box::new(PlaceObject {
+            version: 2,
+            action: PlaceObjectAction::Place(CharacterId::from(3u16)),
+            depth: 2,
+            matrix: Some(Matrix::translate(
+                Twips::from_pixels(BORDER - origin),
+                Twips::from_pixels(BORDER - origin),
+            )),
+            color_transform: None,
+            ratio: None,
+            name: None,
+            clip_depth: None,
+            class_name: None,
+            filters: None,
+            background_color: None,
+            blend_mode: None,
+            clip_actions: None,
+            has_image: false,
+            is_bitmap_cached: None,
+            is_visible: None,
+            amf_data: None,
+        })),
     ];
     if label {
         inner_tags.push(Tag::PlaceObject(Box::new(PlaceObject {

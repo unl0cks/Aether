@@ -230,10 +230,23 @@ if (-not $SkipCargo) {
     # CARGO_ENCODED_RUSTFLAGS rather than RUSTFLAGS: RUSTFLAGS splits on spaces, and the account
     # name that prompted this fix has spaces in it, so the plain form would mangle the very path it
     # is meant to remove. The encoded form separates on U+001F and has no such problem.
+    # Three prefixes, because the account name reaches the binary by three different routes and
+    # only two of them were being covered. `.rustup` is the one that was missed: with debug info on,
+    # rustc rewrites the standard library's `/rustc/<hash>/library/...` paths to wherever the
+    # `rust-src` component actually lives, so every `unwrap` message in `std` carries the toolchain
+    # path, and the toolchain lives under the user's profile. That is 528 copies of the account name
+    # in a build that was otherwise clean, and the check below is what caught it.
+    #
+    # Both separator forms are supplied for the toolchain: the paths land in the binary mixed
+    # (`...\.rustup\toolchains\...\lib/rustlib/src/rust\library`), and matching costs nothing when
+    # the prefix does not apply.
     $cargoHome = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+    $rustupHome = if ($env:RUSTUP_HOME) { $env:RUSTUP_HOME } else { Join-Path $env:USERPROFILE '.rustup' }
     $remap = @(
         "--remap-path-prefix=$($cargoHome -replace '\\', '/')=/cargo"
         "--remap-path-prefix=$($root -replace '\\', '/')=/aether"
+        "--remap-path-prefix=$($rustupHome -replace '\\', '/')=/rust"
+        "--remap-path-prefix=$rustupHome=/rust"
     )
     $previousRustFlags = $env:CARGO_ENCODED_RUSTFLAGS
     $env:CARGO_ENCODED_RUSTFLAGS = $remap -join "`u{001f}"

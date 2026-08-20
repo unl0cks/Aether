@@ -6,7 +6,9 @@ use std::fs::File;
 use swf::Tag;
 
 fn main() {
-    let path = std::env::args().nth(1).expect("usage: font_census <movie.swf>");
+    let path = std::env::args()
+        .nth(1)
+        .expect("usage: font_census <movie.swf>");
     let file = File::open(&path).expect("could not open the movie");
     let buf = swf::decompress_swf(file).expect("could not decompress the movie");
     let swf = swf::parse_swf(&buf).expect("could not parse the movie");

@@ -9,7 +9,6 @@ use crate::filters::FilterSource;
 use crate::mesh::Mesh;
 use crate::pixel_bender::{ShaderMode, run_pixelbender_shader_impl};
 use crate::surface::commands::{Chunk, CommandRenderer, chunk_blends};
-use crate::utils::supported_sample_count;
 use crate::{Descriptors, MaskState, Pipelines};
 use ruffle_render::commands::CommandList;
 use ruffle_render::pixel_bender_support::{ImageInputTexture, PixelBenderShaderArgument};
@@ -26,6 +25,17 @@ pub use crate::surface::commands::LayerRef;
 use self::commands::ChunkBlendMode;
 
 const LARGE_TARGET_MSAA_PIXEL_THRESHOLD: u64 = 2560 * 1440;
+
+/// Whether to report every complex blend as it is encoded. Set `AETHER_BLENDCHECK=1`.
+///
+/// A measurement aid, not a feature: it says what blend shapes a given SWF actually reaches, which
+/// is how you find out whether an offline corpus can verify a change to blend compositing before
+/// making one. Measured on `_evidence/Game3098r24.swf`: four Overlay blends, all stencil-less, none
+/// overlapping -- enough to catch gross breakage, not enough to sign off on a rewrite.
+fn blendcheck_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("AETHER_BLENDCHECK").is_ok())
+}
 
 static BACKEND_MSAA_OVERRIDE: AtomicU8 = AtomicU8::new(0);
 
@@ -90,8 +100,7 @@ impl Surface {
             depth_or_array_layers: 1,
         };
 
-        let sample_count = supported_sample_count(
-            &descriptors.adapter,
+        let sample_count = descriptors.supported_sample_count(
             backend_sample_count_for_target(quality, width, height, backend_msaa_override()),
             frame_buffer_format,
         );
@@ -221,6 +230,9 @@ impl Surface {
             texture_pool,
         );
 
+        #[cfg(feature = "aether_metrics")]
+        crate::aether_metrics::record_blend_batch_census(blend_batch_census(&chunks));
+
         // Peekable so a complex blend can gather the run of blends that follow it, which is what
         // lets a batch of them share one pass.
         let mut chunks = chunks.into_iter().peekable();
@@ -230,6 +242,9 @@ impl Surface {
                     chunk,
                     needs_stencil,
                     transforms,
+                    // Consumed by `reorder_blends_for_batching` before execution begins; drawing
+                    // itself does not care where it draws.
+                    bounds: _,
                 } => {
                     #[cfg(feature = "aether_metrics")]
                     crate::aether_metrics::record_encoded_chunk(chunk.len() as u64, false);
@@ -340,6 +355,20 @@ impl Surface {
                         _ => &target,
                     };
 
+                    // What a corpus actually exercises, for deciding whether a change to blend
+                    // compositing is verifiable offline at all. `_evidence/filtercheck` proved the
+                    // filter path byte-identical; the blend path has no such corpus, and this is
+                    // what measures whether one would cover anything. Cached, because a crowded
+                    // frame reaches here ~94 times and `env::var` allocates and takes a lock.
+                    if blendcheck_enabled() {
+                        eprintln!(
+                            "BLENDCHECK complex {:?} stencil={} region={:?} samples={}",
+                            blend_mode,
+                            needs_stencil,
+                            region,
+                            target.sample_count()
+                        );
+                    }
                     // Gather the run of blends this one can share a pass with.
                     //
                     // Frame time on this renderer is render passes, not draws, and a crowded AQW
@@ -378,7 +407,10 @@ impl Surface {
                                 break;
                             }
 
-                            let Some(Chunk::Blend { texture, region, .. }) = chunks.next() else {
+                            let Some(Chunk::Blend {
+                                texture, region, ..
+                            }) = chunks.next()
+                            else {
                                 unreachable!("peek just matched a complex blend")
                             };
                             batch.push((texture, region));
@@ -409,6 +441,8 @@ impl Surface {
                     let parent_blend_buffer =
                         parent_blend_buffer.expect("a batch always holds at least one blend");
 
+                    #[cfg(feature = "aether_metrics")]
+                    let bind_groups_started = std::time::Instant::now();
                     let blend_bind_groups = batch
                         .iter()
                         .map(|(texture, _)| {
@@ -453,6 +487,8 @@ impl Surface {
                                 })
                         })
                         .collect::<Vec<_>>();
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_bind_group_nanos(bind_groups_started.elapsed());
 
                     // A child covering only part of the target needs its quad placed there and its
                     // own UV remap; a full-surface child keeps the cached whole-frame group.
@@ -541,11 +577,17 @@ impl Surface {
             // point in the loop where the command buffer can be handed over. A crowded map encodes
             // hundreds of passes here and every one of them used to reach the driver as a single
             // submission; see `submission_splitter` for why that is suspected of losing the device.
-            crate::submission_splitter::note_pass_and_maybe_split(
+            //
+            // It is also the only point at which a device lost mid-frame can be noticed in time to
+            // do anything about it, so a `false` here means stop rather than keep feeding a device
+            // that is already gone.
+            if !crate::submission_splitter::note_pass_and_maybe_split(
                 descriptors,
                 draw_encoder,
                 staging_belt,
-            );
+            ) {
+                break;
+            }
         }
 
         // If nothing happened, ensure it's cleared so we don't operate on garbage data
@@ -571,6 +613,91 @@ impl Surface {
     pub fn size(&self) -> wgpu::Extent3d {
         self.size
     }
+}
+
+/// Why a target's blends are not sharing passes, and how few passes they could take.
+///
+/// The run-length batcher above only ever sees the chunk that comes next, so `blend_chunks` on its
+/// own cannot distinguish "batching is failing" from "there was nothing adjacent to batch". This
+/// separates the two. `break_not_blend` counts blends followed by ordinary drawing, which is the
+/// case a run-length batcher can never reach however compatible the blends themselves are.
+///
+/// `ideal_batches` is deliberately optimistic: it first-fits each blend into any earlier batch of
+/// its own mode that it does not overlap, which can reorder two overlapping blends that a sound
+/// batcher would have to keep apart. It is a floor on the pass count, not a plan. Its only job is
+/// to say whether the prize is large enough to justify building the sound version.
+#[cfg(feature = "aether_metrics")]
+fn blend_batch_census(chunks: &[Chunk]) -> crate::aether_metrics::BlendBatchCensus {
+    use crate::surface::commands::blend_regions_overlap;
+    use std::mem::{Discriminant, discriminant};
+
+    type Region = Option<(u32, u32, u32, u32)>;
+
+    let mut census = crate::aether_metrics::BlendBatchCensus::default();
+    let mut blends: Vec<(Discriminant<ComplexBlend>, bool, Region)> = Vec::new();
+
+    for (index, chunk) in chunks.iter().enumerate() {
+        if let Chunk::Draw { bounds: None, .. } = chunk {
+            census.draw_unbounded += 1;
+        }
+        let Chunk::Blend {
+            blend_mode: ChunkBlendMode::Complex(mode),
+            needs_stencil,
+            region,
+            ..
+        } = chunk
+        else {
+            continue;
+        };
+        // Excluded from batching upstream, so excluded from the accounting for it.
+        if matches!(mode, ComplexBlend::Alpha | ComplexBlend::Erase) {
+            continue;
+        }
+
+        if region.is_none() {
+            census.full_surface += 1;
+        }
+        blends.push((discriminant(mode), *needs_stencil, *region));
+
+        match chunks.get(index + 1) {
+            Some(Chunk::Blend {
+                blend_mode: ChunkBlendMode::Complex(next_mode),
+                needs_stencil: next_needs_stencil,
+                region: next_region,
+                ..
+            }) => {
+                census.adjacent += 1;
+                if discriminant(next_mode) != discriminant(mode)
+                    || next_needs_stencil != needs_stencil
+                {
+                    census.break_mode += 1;
+                } else if blend_regions_overlap(*region, *next_region) {
+                    census.break_overlap += 1;
+                }
+            }
+            _ => census.break_not_blend += 1,
+        }
+    }
+
+    let mut batches: Vec<(Discriminant<ComplexBlend>, bool, Vec<Region>)> = Vec::new();
+    for (mode, needs_stencil, region) in blends {
+        let fits = batches
+            .iter_mut()
+            .find(|(batch_mode, batch_needs_stencil, regions)| {
+                *batch_mode == mode
+                    && *batch_needs_stencil == needs_stencil
+                    && !regions
+                        .iter()
+                        .any(|held| blend_regions_overlap(*held, region))
+            });
+        match fits {
+            Some((_, _, regions)) => regions.push(region),
+            None => batches.push((mode, needs_stencil, vec![region])),
+        }
+    }
+    census.ideal_batches = batches.len() as u64;
+
+    census
 }
 
 #[cfg(test)]

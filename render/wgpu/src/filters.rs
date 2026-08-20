@@ -1,3 +1,4 @@
+pub mod atlas;
 mod bevel;
 mod blur;
 mod color_matrix;
@@ -17,6 +18,7 @@ use crate::filters::color_matrix::ColorMatrixFilter;
 use crate::filters::displacement_map::DisplacementMapFilter;
 use crate::filters::drop_shadow::DropShadowFilter;
 use crate::filters::glow::GlowFilter;
+pub use crate::filters::glow::PreBlurred;
 use crate::filters::shader::ShaderFilter;
 use crate::surface::target::CommandTarget;
 use bytemuck::{Pod, Zeroable};
@@ -192,6 +194,52 @@ fn gradient_glow_fallback(filter: &swf::GradientFilter) -> (swf::GlowFilter, (f3
     )
 }
 
+/// The blur a filter would run internally, if that blur can be shared with other filters.
+///
+/// Returns the kernel as `(blur_x, blur_y, num_passes)`, which is the whole of what decides whether
+/// two filters run the same passes. `None` means this filter must blur for itself: either it has no
+/// blur, or its blur is a no-op the shared path would have to special-case, or -- for `BevelFilter`
+/// -- it consumes the blurred layer differently enough that sharing it has not been worked through.
+///
+/// A glow and a gradient glow with the same kernel DO share, even though they composite differently
+/// afterwards. `inner_blur_filter()` copies `blur_x`, `blur_y` and the pass count straight across,
+/// and `gradient_glow_fallback` preserves all three, so the blur really is the same one.
+pub fn filter_shares_a_blur(filter: &Filter) -> Option<(f32, f32, u8)> {
+    let (blur_x, blur_y, passes) = match filter {
+        Filter::GlowFilter(f) => (f.blur_x.to_f32(), f.blur_y.to_f32(), f.num_passes()),
+        Filter::DropShadowFilter(f) => (f.blur_x.to_f32(), f.blur_y.to_f32(), f.num_passes()),
+        Filter::GradientGlowFilter(f) => (f.blur_x.to_f32(), f.blur_y.to_f32(), f.num_passes()),
+        _ => return None,
+    };
+
+    // `blur.rs` skips a kernel of 1 or less as a no-op and returns no layer at all, and the glow
+    // then binds the source instead. There is nothing to share, and pretending otherwise would hand
+    // the glow an atlas slot where it expects its own source.
+    if passes == 0 || (blur_x.min(255.0) <= 1.0 && blur_y.min(255.0) <= 1.0) {
+        return None;
+    }
+
+    Some((blur_x, blur_y, passes))
+}
+
+/// The exact blur a filter runs internally, for a group that will run it once for all of them.
+///
+/// Taken from the filter rather than rebuilt from the `f32` radii [`filter_shares_a_blur`] reports.
+/// Those radii are fixed-point in the SWF, and a round trip out to `f32` and back is not guaranteed
+/// to land on the same `Fixed16` -- which would run a kernel one step away from the one the
+/// ungrouped path runs, and make the atlas a visible change instead of an invisible one.
+pub fn filter_inner_blur(filter: &Filter) -> Option<swf::BlurFilter> {
+    match filter {
+        Filter::GlowFilter(f) => Some(f.inner_blur_filter()),
+        Filter::DropShadowFilter(f) => Some(f.inner_glow_filter().inner_blur_filter()),
+        Filter::GradientGlowFilter(f) => {
+            let (fallback, _) = gradient_glow_fallback(f);
+            Some(fallback.inner_blur_filter())
+        }
+        _ => None,
+    }
+}
+
 impl<'a> FilterSource<'a> {
     pub fn for_entire_texture(texture: &'a wgpu::Texture) -> Self {
         Self {
@@ -263,6 +311,55 @@ impl Filters {
         source: FilterSource,
         filter: Filter,
     ) -> CommandTarget {
+        self.apply_with_pre_blurred(
+            descriptors,
+            draw_encoder,
+            texture_pool,
+            staging_belt,
+            source,
+            filter,
+            None,
+        )
+    }
+
+    /// Run one blur over a whole atlas, for a group of filters that all wanted the same one.
+    ///
+    /// `None` means the kernel was a no-op and produced no layer, exactly as it would per object.
+    pub fn blur_together(
+        &self,
+        descriptors: &Descriptors,
+        texture_pool: &mut TexturePool,
+        draw_encoder: &mut wgpu::CommandEncoder,
+        staging_belt: &mut StagingBelt,
+        source: &FilterSource,
+        blur: &swf::BlurFilter,
+    ) -> Option<CommandTarget> {
+        self.blur.apply(
+            descriptors,
+            texture_pool,
+            draw_encoder,
+            staging_belt,
+            source,
+            blur,
+        )
+    }
+
+    /// As [`Filters::apply`], for a filter whose blur was already done as part of an atlased group.
+    ///
+    /// `pre_blurred` is only honoured by the filters [`filter_shares_a_blur`] admits. Passing it for
+    /// any other filter is harmless -- that filter blurs for itself as usual -- but it means an
+    /// atlas slot was produced for nothing, which is why the grouping asks first.
+    #[expect(clippy::too_many_arguments)]
+    pub fn apply_with_pre_blurred(
+        &self,
+        descriptors: &Descriptors,
+        draw_encoder: &mut wgpu::CommandEncoder,
+        texture_pool: &mut TexturePool,
+        staging_belt: &mut StagingBelt,
+        source: FilterSource,
+        filter: Filter,
+        pre_blurred: Option<PreBlurred<'_>>,
+    ) -> CommandTarget {
         let target = match filter {
             Filter::ColorMatrixFilter(filter) => Some(descriptors.filters.color_matrix.apply(
                 descriptors,
@@ -297,6 +394,7 @@ impl Filters {
                 &self.blur,
                 (0.0, 0.0),
                 &[],
+                pre_blurred,
             )),
             Filter::DropShadowFilter(filter) => Some(DropShadowFilter::apply(
                 descriptors,
@@ -307,6 +405,7 @@ impl Filters {
                 &filter,
                 &self.blur,
                 &self.glow,
+                pre_blurred,
             )),
             Filter::BevelFilter(filter) => Some(descriptors.filters.bevel.apply(
                 descriptors,
@@ -329,6 +428,7 @@ impl Filters {
                     &self.blur,
                     blur_offset,
                     &filter.colors,
+                    pre_blurred,
                 ))
             }
             Filter::DisplacementMapFilter(filter) => descriptors.filters.displacement_map.apply(

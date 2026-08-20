@@ -1650,15 +1650,54 @@ impl<'gc> MovieLoader<'gc> {
 
         let movie = match sniffed_type {
             ContentType::Swf => {
-                let mut movie = SwfMovie::from_data(data, url.clone(), loader_url.clone())?;
+                // Share the copy already resident, where there is one.
+                //
+                // AQW loads the same equipment SWF once for every player wearing it, and each load
+                // used to parse it again and keep its own decoded characters -- measured at 2.4
+                // copies of every URL over a long session, none of them reclaimable because a
+                // shared application domain holds a reference to every movie it has exported from.
+                //
+                // Two conditions make sharing safe, and both are enforced rather than assumed:
+                //
+                // * AVM2 only. An AVM1 load calls `set_force_avm1` below, which mutates the movie,
+                //   and a movie already inside an `Arc` cannot be mutated.
+                // * The same application domain. A movie's library records the domain its symbols
+                //   resolve against, and reusing the movie reuses that library -- so handing it to
+                //   a load that wanted a different domain would silently resolve its classes
+                //   against the wrong one. AQW passes `ApplicationDomain.currentDomain` throughout,
+                //   which is exactly why its duplicates are pure waste.
+                let shared = if matches!(vm_data, MovieLoaderVMData::Avm2 { .. }) {
+                    uc.library
+                        .resident_movie(&url, loader_url.as_deref())
+                        .filter(|movie| {
+                            uc.library
+                                .library_for_movie(movie.clone())
+                                .and_then(|library| library.try_avm2_domain())
+                                // `Domain`'s `PartialEq` is pointer identity, not structural.
+                                .is_none_or(|resident| resident == domain)
+                        })
+                } else {
+                    None
+                };
 
-                if matches!(vm_data, MovieLoaderVMData::Avm1 { .. }) {
-                    // If AVM1 loads a SWF, that SWF is always interpreted as
-                    // AVM1, regardless of what it declares in its header.
-                    movie.set_force_avm1();
+                match shared {
+                    Some(movie) => movie,
+                    None => {
+                        let mut movie = SwfMovie::from_data(data, url.clone(), loader_url.clone())?;
+
+                        if matches!(vm_data, MovieLoaderVMData::Avm1 { .. }) {
+                            // If AVM1 loads a SWF, that SWF is always interpreted as
+                            // AVM1, regardless of what it declares in its header.
+                            movie.set_force_avm1();
+                        }
+
+                        let movie = Arc::new(movie);
+                        if matches!(vm_data, MovieLoaderVMData::Avm2 { .. }) {
+                            uc.library.remember_movie(&movie);
+                        }
+                        movie
+                    }
                 }
-
-                Arc::new(movie)
             }
             ContentType::Gif | ContentType::Jpeg | ContentType::JpegXr | ContentType::Png => {
                 let (width, height) =

@@ -171,7 +171,11 @@ mod tests {
         // bold-text bug rather than a font choice, so this stays a named exception.
         assert!(UiFont::CourierNew.force_bold());
         for font in UiFont::ALL.into_iter().filter(|f| *f != UiFont::CourierNew) {
-            assert!(!font.force_bold(), "{} must keep its own weight", font.name());
+            assert!(
+                !font.force_bold(),
+                "{} must keep its own weight",
+                font.name()
+            );
         }
     }
 

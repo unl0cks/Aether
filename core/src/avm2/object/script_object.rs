@@ -337,6 +337,10 @@ impl<'gc> ScriptObjectWrapper<'gc> {
             DynamicKey::String(name) => Value::String(*name),
             DynamicKey::Object(obj) => Value::Object(*obj),
             DynamicKey::Uint(val) => Value::Number(*val as f64),
+            // Only a weak-keyed `Dictionary` stores these, and it overrides this method with one
+            // that can reach a `Mutation` and upgrade the handle. Reaching here means a weak key
+            // on something that is not a dictionary, which nothing creates.
+            DynamicKey::WeakObject(_) => Value::Null,
         })
     }
 

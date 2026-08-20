@@ -283,6 +283,44 @@ enum RunState {
     Stepping,
 }
 
+/// Idle cache surfaces released, or zero in a build without the sweep compiled in.
+#[cfg(feature = "aether_performance")]
+fn bitmap_caches_swept() -> usize {
+    crate::aether_performance::bitmap_caches_swept()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn bitmap_caches_swept() -> usize {
+    0
+}
+
+/// Sprites a deduped movie's re-preload skipped, or zero without the counter compiled in.
+#[cfg(feature = "aether_performance")]
+fn preload_sprites_already_defined() -> usize {
+    crate::aether_performance::preload_sprites_already_defined()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn preload_sprites_already_defined() -> usize {
+    0
+}
+
+/// Weak-keyed dictionaries created, how many of them hold a key that is really weak, and dead keys
+/// swept out of them.
+#[cfg(feature = "aether_performance")]
+fn weak_dictionary_counts() -> (usize, usize, usize) {
+    (
+        crate::aether_performance::weak_dictionaries_created(),
+        crate::aether_performance::weak_dictionaries_with_object_keys(),
+        crate::aether_performance::dictionary_keys_pruned(),
+    )
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn weak_dictionary_counts() -> (usize, usize, usize) {
+    (0, 0, 0)
+}
+
 /// A count of what the core is holding, taken periodically so growth is visible.
 ///
 /// See [`Player::aether_core_census`] for what each number rules in or out.
@@ -293,6 +331,11 @@ pub struct CoreCensus {
     pub movies: usize,
     /// Characters across every resident library: shapes, bitmaps, fonts and sounds.
     pub characters: usize,
+    /// The same characters split by kind, with bytes for the kinds whose cost is measurable.
+    ///
+    /// `characters` says how many are retained; this says what they are, which is what decides
+    /// whether the retention is worth attacking and which kind to attack first.
+    pub character_census: crate::library::CharacterCensus,
     /// Detached display objects still being ticked.
     pub orphans: usize,
     /// Bytes the garbage collector is holding, and how many objects that is.
@@ -304,6 +347,31 @@ pub struct CoreCensus {
     pub gc_objects: usize,
     /// How many times a movie has been unloaded from a `Loader`.
     pub unloads: usize,
+    /// How many loads were served a movie already resident rather than parsing a second copy.
+    pub movie_reuses: usize,
+    /// Collections AQW asked for via `System.gc`, and the megabytes they gave back.
+    ///
+    /// Zero requests means the game's own memory management is not reaching us at all, which is
+    /// the state this was in before `System.gc` stopped being an empty function.
+    pub collections_run: usize,
+    pub collection_reclaimed_bytes: u64,
+    /// The worst single collection, in microseconds. A collection runs inside a frame, so this is
+    /// the frame it cost.
+    pub collection_worst_micros: u64,
+    /// Idle `cacheAsBitmap` surfaces released. Invisible in every other counter.
+    pub bitmap_caches_swept: usize,
+    /// Sprites a deduped movie's re-preload skipped because the character already existed. Each of
+    /// these used to end the preload pass, costing a whole frame apiece.
+    pub preload_sprites_already_defined: usize,
+    /// `flash.utils.Dictionary` instances asked to hold their keys weakly, and dead keys since
+    /// swept out of them. Both were structurally zero while `weakKeys` was a stub.
+    pub weak_dictionaries: usize,
+    /// How many of those were then given a key that is genuinely held weakly. `weakKeys` weakens
+    /// object keys only, and four of AQW's weak dictionaries -- `World.avatars`, `uoTree`,
+    /// `invTree`, `waveTree` -- are keyed by uid, name or item id, so they can never contribute a
+    /// collectable key and skip the sweep entirely.
+    pub weak_dictionaries_object_keyed: usize,
+    pub dictionary_keys_pruned: usize,
     /// What the renderer is holding on the GPU, if the backend can say.
     pub render: Option<ruffle_render::backend::RenderResourceCensus>,
     /// Uncompressed SWF bytes held across every resident movie, and how many of those bytes are
@@ -859,6 +927,9 @@ impl Player {
             let mut urls = std::collections::HashSet::new();
             let mut movie_bytes = 0usize;
             let mut duplicate_movie_bytes = 0usize;
+            let mut character_census = crate::library::CharacterCensus::default();
+            let collection_totals =
+                crate::avm2::globals::flash::system::system::collection_totals();
             for movie in context.library.known_movies() {
                 movies += 1;
                 let bytes = movie.data().len();
@@ -869,16 +940,27 @@ impl Player {
                 }
                 if let Some(library) = context.library.library_for_movie(movie) {
                     characters += library.characters().len();
+                    character_census.add(library.character_census());
                 }
             }
             let metrics = context.gc_context.metrics();
             CoreCensus {
                 movies,
                 characters,
+                character_census,
                 orphans: context.orphan_manager.len(),
                 gc_bytes: metrics.total_gc_allocation(),
                 gc_objects: metrics.total_gc_count(),
                 unloads: crate::avm2::object::movie_unloads(),
+                movie_reuses: crate::library::movie_reuses(),
+                bitmap_caches_swept: bitmap_caches_swept(),
+                preload_sprites_already_defined: preload_sprites_already_defined(),
+                weak_dictionaries: weak_dictionary_counts().0,
+                weak_dictionaries_object_keyed: weak_dictionary_counts().1,
+                dictionary_keys_pruned: weak_dictionary_counts().2,
+                collections_run: collection_totals.0,
+                collection_reclaimed_bytes: collection_totals.1,
+                collection_worst_micros: collection_totals.2,
                 distinct_urls: urls.len(),
                 movie_bytes,
                 duplicate_movie_bytes,
@@ -2405,6 +2487,22 @@ impl Player {
             if released > 0 {
                 tracing::debug!("Evicted {released} idle GPU uploads");
             }
+
+            // `cacheAsBitmap` surfaces live on display objects, not in the library, so the sweep
+            // above cannot see one. Reached from the two roots that can still draw: the stage, and
+            // the orphans, which keep advancing after being detached and so keep their caches.
+            let sweeps_before_release =
+                crate::aether_performance::bitmap_cache_sweep().sweeps_before_release();
+            let mut caches = context
+                .stage
+                .sweep_idle_bitmap_caches(sweeps_before_release);
+            crate::orphan_manager::OrphanManager::each_orphan_obj(context, |dobj, _| {
+                caches += dobj.sweep_idle_bitmap_caches(sweeps_before_release);
+            });
+            if caches > 0 {
+                tracing::debug!("Evicted {caches} idle bitmap cache surfaces");
+            }
+            crate::aether_performance::note_bitmap_caches_swept(caches);
         });
     }
 
@@ -2831,8 +2929,41 @@ impl Player {
         });
         self.update_mouse_state(EnumSet::empty(), false, &mut false);
 
-        // GC
-        self.gc_arena.borrow_mut().collect_debt();
+        // GC. Incremental by default; a full cycle only when content has asked for one.
+        //
+        // AQW asks at the two points where it has just made a large amount of its own memory
+        // unreachable -- dropping the player domains and swapping in a fresh child
+        // `ApplicationDomain` in `clearLoaders`, and again in `cleanupMap`. Paying for a full
+        // collection there is the whole reason it asks, and both are map changes rather than
+        // per-frame work. Anywhere else, `collect_debt` keeps the cost spread across frames.
+        if crate::avm2::globals::flash::system::system::take_collection_request() {
+            // Bounded, not exhaustive. `finish_cycle` was tried first and it was the wrong
+            // instrument: 26 requests over twelve minutes produced 110-144 ms frames, and because
+            // it *restarts* the cycle rather than advancing it, every incremental collection after
+            // one had to re-mark from scratch -- average tick went from 1-3 ms to 6-18 ms. Content
+            // asking for a collection is asking for it to happen soon, not for the frame to stop.
+            //
+            // `cycle_debt` pays off the debt accumulated since the last collection and stops at the
+            // end of a cycle, so a request still buys far more than the ordinary `collect_debt`
+            // while staying bounded by how much was actually allocated.
+            //
+            // Timed because the cost scales with how much the arena is holding, and the arena is
+            // the thing under investigation. A full cycle over tens of millions of objects is a
+            // visible hitch, and if that shows up it is worth knowing whether the collection is
+            // slow or the arena is simply too large by the time content gets around to asking.
+            let before = self.gc_arena.borrow().metrics().total_gc_allocation();
+            let started = Instant::now();
+            self.gc_arena.borrow_mut().cycle_debt();
+            let elapsed = started.elapsed();
+            let reclaimed =
+                before.saturating_sub(self.gc_arena.borrow().metrics().total_gc_allocation());
+            crate::avm2::globals::flash::system::system::note_collection_ran(
+                reclaimed as u64,
+                elapsed,
+            );
+        } else {
+            self.gc_arena.borrow_mut().collect_debt();
+        }
 
         rval
     }

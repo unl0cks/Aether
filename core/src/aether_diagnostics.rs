@@ -1018,7 +1018,8 @@ impl BlendAttributionState {
 
     fn take_report(&mut self, limit: usize) -> BlendAttributionReport {
         let mut report = BlendAttributionReport::default();
-        let mut ranked: Vec<(&BlendSiteKey, &BlendSiteRecord)> = Vec::with_capacity(self.sites.len());
+        let mut ranked: Vec<(&BlendSiteKey, &BlendSiteRecord)> =
+            Vec::with_capacity(self.sites.len());
 
         for (key, record) in &self.sites {
             if record.blends == 0 {
@@ -3979,7 +3980,7 @@ mod tests {
             movement_stop_guard_state_decline(
                 &MovementTraceRuntime {
                     walk_started_at: None,
-                    ..ready.clone()
+                    ..ready
                 },
                 Some(owner)
             ),
@@ -4081,9 +4082,8 @@ mod tests {
 /// Switched on with `AETHER_GLOW_ANCESTRY=1`, off otherwise, and each object reports only once.
 pub fn filter_ancestry_enabled() -> bool {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        std::env::var_os("AETHER_GLOW_ANCESTRY").is_some_and(|value| value != "0")
-    })
+    *ENABLED
+        .get_or_init(|| std::env::var_os("AETHER_GLOW_ANCESTRY").is_some_and(|value| value != "0"))
 }
 
 // The login screen and UI alone spend dozens of these before a map is even loaded, so the cap has

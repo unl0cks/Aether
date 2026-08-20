@@ -1,5 +1,6 @@
 //! Narrow compatibility repairs used by Aether without enabling diagnostic instrumentation.
 
+use crate::aether_movie::{is_aqw_game_movie, is_aqw_loader_movie, is_hosted_aqw_game_movie};
 use crate::avm2::{
     Activation as Avm2Activation, FunctionArgs as Avm2FunctionArgs, Multiname as Avm2Multiname,
     TObject as _, Value as Avm2Value,
@@ -8,12 +9,11 @@ use crate::context::UpdateContext;
 use crate::display_object::{
     Avm2LifecycleTraversal, DisplayObject, MovieClip, TDisplayObject, TDisplayObjectContainer,
 };
-use crate::aether_movie::{is_aqw_game_movie, is_aqw_loader_movie, is_hosted_aqw_game_movie};
 use crate::locale::get_current_date_time;
 use crate::string::{AvmString, WStr};
-use swf::Twips;
 use crate::timer::TimerCallback;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicUsize, Ordering};
+use swf::Twips;
 
 static TIMELINE_CHILD_REBIND_ENABLED: AtomicBool = AtomicBool::new(false);
 
@@ -585,7 +585,10 @@ pub(crate) fn recolour_aqw_focus_aura_icon<'gc>(
     let Some(aura_name) = aura_name else {
         return Ok(false);
     };
-    if !aura_name.as_wstr().eq_ignore_case(WStr::from_units(b"Focus")) {
+    if !aura_name
+        .as_wstr()
+        .eq_ignore_case(WStr::from_units(b"Focus"))
+    {
         return Ok(false);
     }
 
@@ -622,7 +625,8 @@ fn aqw_aura_icon_name<'gc>(
         }
     }
 
-    let aura = icon.get_public_property(AvmString::new_utf8(activation.gc(), "aura"), activation)?;
+    let aura =
+        icon.get_public_property(AvmString::new_utf8(activation.gc(), "aura"), activation)?;
     if aura.as_object().is_some() {
         let value =
             aura.get_public_property(AvmString::new_utf8(activation.gc(), "nam"), activation)?;
@@ -795,10 +799,7 @@ pub fn set_focus_aura_colour(colour: FocusAuraColour) {
 
 pub fn focus_aura_colour() -> FocusAuraColour {
     let index = FOCUS_AURA_COLOUR.load(Ordering::Relaxed) as usize;
-    FocusAuraColour::ALL
-        .get(index)
-        .copied()
-        .unwrap_or_default()
+    FocusAuraColour::ALL.get(index).copied().unwrap_or_default()
 }
 
 /// The chosen colour, as a transform to hang on the icon.
@@ -833,8 +834,14 @@ mod focus_aura_colour_tests {
 
     #[test]
     fn a_name_is_read_whatever_its_case_or_spacing() {
-        assert_eq!(FocusAuraColour::from_str("  MAGENTA "), Ok(FocusAuraColour::Magenta));
-        assert_eq!(FocusAuraColour::from_str("Indigo"), Ok(FocusAuraColour::Indigo));
+        assert_eq!(
+            FocusAuraColour::from_str("  MAGENTA "),
+            Ok(FocusAuraColour::Magenta)
+        );
+        assert_eq!(
+            FocusAuraColour::from_str("Indigo"),
+            Ok(FocusAuraColour::Indigo)
+        );
     }
 
     #[test]
@@ -849,7 +856,10 @@ mod focus_aura_colour_tests {
         let mut seen = Vec::new();
         for colour in FocusAuraColour::ALL {
             let multipliers = colour.multipliers();
-            assert!(!seen.contains(&multipliers), "{colour} duplicates another colour");
+            assert!(
+                !seen.contains(&multipliers),
+                "{colour} duplicates another colour"
+            );
             seen.push(multipliers);
         }
     }
@@ -870,7 +880,10 @@ pub fn set_focus_aura_recoloured(recoloured: bool) {
     // Logged because the alternative failure -- the setting never reaching the core -- looks
     // exactly like the feature not working, and the two need different fixes.
     if FOCUS_AURA_RECOLOURED.swap(recoloured, Ordering::Relaxed) != recoloured {
-        tracing::info!("AQW Focus aura recolour is {}", if recoloured { "on" } else { "off" });
+        tracing::info!(
+            "AQW Focus aura recolour is {}",
+            if recoloured { "on" } else { "off" }
+        );
     }
 }
 
@@ -1032,9 +1045,7 @@ fn is_timeline_child_rebind_target(
     class_local_name: &str,
     has_nonempty_class_namespace: bool,
 ) -> bool {
-    is_aqw_game_movie(movie_url)
-        && class_local_name == "mcOption"
-        && !has_nonempty_class_namespace
+    is_aqw_game_movie(movie_url) && class_local_name == "mcOption" && !has_nonempty_class_namespace
 }
 
 fn is_aqw_crafting_frame_target(
@@ -1530,8 +1541,12 @@ mod tests {
             "https://example.invalid/gamefiles/Game3098r24.swf"
         ));
         // The shape without the name, and the name without the file.
-        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/.swf"));
-        assert!(!is_aqw_game_movie("https://game.aq.com/game/gamefiles/Game"));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/.swf"
+        ));
+        assert!(!is_aqw_game_movie(
+            "https://game.aq.com/game/gamefiles/Game"
+        ));
     }
 
     #[test]

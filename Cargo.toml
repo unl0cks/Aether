@@ -63,7 +63,15 @@ futures = "0.3.32"
 image = { version = "0.25.10", default-features = false }
 js-sys = "0.3.97"
 web-sys = "0.3.97"
-log = "0.4"
+# `release_max_level_info` compiles out every `log::trace!` and `log::debug!` in the dependency
+# graph, which in practice means wgpu-core's `api_log!`. That macro fires on set_pipeline,
+# set_bind_group, set_vertex_buffer, set_index_buffer, set_viewport and draw_indexed -- roughly six
+# per draw command, several of which format an allocating `error_ident()` first. A measured AQW
+# frame encodes ~2,300 draw commands, so at 44 fps that is on the order of 600,000 formatted log
+# records per second, all of them built, dispatched through tracing-log's bridge, evaluated by
+# EnvFilter and thrown away. It also accounts for the ~775k allocations/sec a heap census measured
+# and could not attribute to anything in Ruffle. Errors, warnings and info still reach the log.
+log = { version = "0.4", features = ["release_max_level_info"] }
 num-derive = "0.4.2"
 num-traits = "0.2.19"
 serde = "1.0.228"

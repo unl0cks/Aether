@@ -110,6 +110,11 @@ impl<'gc> BitmapCharacter<'gc> {
     pub fn release_bitmap_handle(&self) -> bool {
         self.handle.borrow_mut().take().is_some()
     }
+
+    /// Whether this bitmap is currently holding a GPU upload alongside its compressed source.
+    pub fn has_bitmap_handle(&self) -> bool {
+        self.handle.borrow().is_some()
+    }
 }
 
 /// Holds a bitmap from an SWF tag, plus the decoded width/height.
@@ -128,6 +133,22 @@ pub enum CompressedBitmap {
 }
 
 impl CompressedBitmap {
+    /// Bytes this source occupies on the Rust heap for as long as its library is resident.
+    ///
+    /// The compressed source is deliberately never dropped -- releasing a bitmap frees its GPU
+    /// upload and re-decodes from here on the next draw -- so this is the part of a bitmap
+    /// character that a session keeps paying for. `characters` alone cannot say whether tens of
+    /// thousands of them amount to megabytes or gigabytes, which is the question the census exists
+    /// to answer.
+    pub fn resident_bytes(&self) -> usize {
+        match self {
+            CompressedBitmap::Jpeg { data, alpha, .. } => {
+                data.len() + alpha.as_ref().map_or(0, Vec::len)
+            }
+            CompressedBitmap::Lossless(define_bits_lossless) => define_bits_lossless.data.len(),
+        }
+    }
+
     pub fn size(&self) -> BitmapSize {
         match self {
             CompressedBitmap::Jpeg { width, height, .. } => BitmapSize {
