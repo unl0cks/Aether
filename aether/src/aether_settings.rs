@@ -22,6 +22,7 @@ use egui::{Key, Modifiers};
 use ruffle_core::aether_compatibility::FocusAuraColour;
 use ruffle_core::aether_performance::BitmapCacheSweep;
 use ruffle_render::quality::StageQuality;
+use ruffle_render_wgpu::aether_switches as switches;
 use std::fmt;
 
 /// The key that opens the options window.
@@ -159,6 +160,16 @@ pub struct AetherExplicitFlags {
 /// Read a `--x` / `--no-x` pair as one three-state answer.
 ///
 /// Clap already rejects passing both, so the order of these two tests never decides anything.
+/// Resolve a renderer switch, letting its environment variable pin it exactly as a command-line
+/// flag pins anything else.
+///
+/// The options window already greys out a pinned setting and shows the value that actually applies,
+/// so routing the variable through the same type means that behaviour comes for free rather than
+/// being reimplemented for this tab.
+fn resolve_switch(switch: &switches::RuntimeSwitch, saved: bool) -> ResolvedSetting {
+    ResolvedSetting::resolve(switch.pinned_by_env().then(|| switch.enabled()), saved)
+}
+
 fn pair(enabled: bool, disabled: bool) -> Explicit {
     match (enabled, disabled) {
         (true, _) => Some(true),
@@ -277,6 +288,23 @@ pub struct AetherSettings {
     /// Whether the chosen UI font reaches every text field, rather than only chat and nameplates.
     pub ui_font_all_text: bool,
 
+    /// Renderer switches offered under Experimental & Debugging.
+    ///
+    /// These have no command-line pair of their own: each is backed by an environment variable the
+    /// renderer already honoured, and that variable still wins so a measurement run cannot be
+    /// overridden by a saved preference.
+    pub filter_atlas: bool,
+    pub cache_texture_pool: bool,
+    pub blend_batching: bool,
+    pub blend_reordering: bool,
+    pub blendcheck: bool,
+
+    /// Whether the update check offers pre-releases as well as stable builds.
+    ///
+    /// Applies to the check at startup and to the button in the options window, so the two cannot
+    /// disagree about which channel this install is on.
+    pub prerelease_updates: bool,
+
     pub quality: StageQuality,
     pub focus_aura_colour: FocusAuraColour,
     pub bitmap_cache_sweep: BitmapCacheSweep,
@@ -317,6 +345,17 @@ impl Default for AetherSettings {
             cache_texture_grid: true,
             idle_gpu_upload_eviction: true,
             crash_report: true,
+            // Measured: cost per filtered cache entry fell 71%.
+            filter_atlas: true,
+            // Measured: 74% of cache surfaces reused rather than allocated.
+            cache_texture_pool: true,
+            blend_batching: true,
+            // Off, on measurement: worth about 1.6% of render passes in a crowded map.
+            blend_reordering: false,
+            // A measurement aid, and noisy in the log.
+            blendcheck: false,
+            // Off: a pre-release is for people who have agreed to test one.
+            prerelease_updates: false,
             // Off: the chosen font reaches chat and nameplates by default. Widening it to the menus,
             // server list and buttons is the deliberate choice, not the other way round.
             ui_font_all_text: false,
@@ -386,6 +425,12 @@ pub struct ResolvedAetherSettings {
     pub idle_gpu_upload_eviction: ResolvedSetting,
     pub crash_report: ResolvedSetting,
     pub ui_font_all_text: ResolvedSetting,
+    pub filter_atlas: ResolvedSetting,
+    pub cache_texture_pool: ResolvedSetting,
+    pub blend_batching: ResolvedSetting,
+    pub blend_reordering: ResolvedSetting,
+    pub blendcheck: ResolvedSetting,
+    pub prerelease_updates: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
     pub focus_aura_colour: Resolved<FocusAuraColour>,
     pub bitmap_cache_sweep: Resolved<BitmapCacheSweep>,
@@ -459,6 +504,15 @@ impl ResolvedAetherSettings {
                 saved.idle_gpu_upload_eviction,
             ),
             crash_report: ResolvedSetting::resolve(explicit.crash_report, saved.crash_report),
+            filter_atlas: resolve_switch(&switches::FILTER_ATLAS, saved.filter_atlas),
+            cache_texture_pool: resolve_switch(
+                &switches::CACHE_TEXTURE_POOL,
+                saved.cache_texture_pool,
+            ),
+            blend_batching: resolve_switch(&switches::BLEND_BATCHING, saved.blend_batching),
+            blend_reordering: resolve_switch(&switches::BLEND_REORDERING, saved.blend_reordering),
+            blendcheck: resolve_switch(&switches::BLENDCHECK, saved.blendcheck),
+            prerelease_updates: ResolvedSetting::resolve(None, saved.prerelease_updates),
             ui_font_all_text: ResolvedSetting::resolve(
                 explicit.ui_font_all_text,
                 saved.ui_font_all_text,
@@ -513,6 +567,16 @@ pub fn apply_live_settings(
     } else {
         4
     });
+
+    // The renderer switches. Each takes effect on the next frame, which is the point of them
+    // being runtime switches at all: comparing one on against off inside a single session is far
+    // more trustworthy than comparing two sessions, because scene composition dominates every
+    // measurement here. A switch pinned by its environment variable ignores these.
+    switches::FILTER_ATLAS.set(settings.filter_atlas.value);
+    switches::CACHE_TEXTURE_POOL.set(settings.cache_texture_pool.value);
+    switches::BLEND_BATCHING.set(settings.blend_batching.value);
+    switches::BLEND_REORDERING.set(settings.blend_reordering.value);
+    switches::BLENDCHECK.set(settings.blendcheck.value);
 
     // Nothing is cached from this, so it takes effect on the next tooltip rather than the next
     // launch.

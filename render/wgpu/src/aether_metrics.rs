@@ -127,6 +127,9 @@ pub struct WgpuMetricsSnapshot {
     pub filter_largest_group: u64,
     /// Groups that really were blurred together, and both sides of the trade. `members / groups` is
     /// the passes bought; `atlas_pixels / member_pixels` is the padding paid for them.
+    /// `cacheAsBitmap` surfaces served from the pool against those that reached the driver.
+    pub cache_texture_pool_hits: u64,
+    pub cache_texture_pool_misses: u64,
     pub filter_atlas_groups: u64,
     pub filter_atlas_members: u64,
     pub filter_atlas_pixels: u64,
@@ -543,6 +546,23 @@ fn count_signature_groups(signatures: &mut [u64]) -> (u64, u64) {
     (groups, largest.max(run))
 }
 
+static CACHE_TEXTURE_POOL_HITS: AtomicU64 = AtomicU64::new(0);
+static CACHE_TEXTURE_POOL_MISSES: AtomicU64 = AtomicU64::new(0);
+
+/// Record whether a `cacheAsBitmap` surface came from the pool or from the driver.
+///
+/// A miss is a `device.create_texture` on the render thread, and a burst of them is the measured
+/// cause of frame-time spikes: 108 allocations in the worst seconds against 12 in the rest, with
+/// the render baseline unchanged. The hit rate is how that gets confirmed as fixed rather than
+/// assumed, and the offscreen pool it copies reaches 99.6%.
+pub fn record_cache_texture_pool(hit: bool) {
+    if hit {
+        saturating_atomic_add(&CACHE_TEXTURE_POOL_HITS, 1);
+    } else {
+        saturating_atomic_add(&CACHE_TEXTURE_POOL_MISSES, 1);
+    }
+}
+
 static FILTER_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
 static FILTER_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
 static FILTER_ATLAS_PIXELS: AtomicU64 = AtomicU64::new(0);
@@ -647,6 +667,8 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         filter_applications: FILTER_APPLICATIONS.swap(0, Ordering::Relaxed),
         filter_groups: FILTER_GROUPS.swap(0, Ordering::Relaxed),
         filter_largest_group: FILTER_LARGEST_GROUP.swap(0, Ordering::Relaxed),
+        cache_texture_pool_hits: CACHE_TEXTURE_POOL_HITS.swap(0, Ordering::Relaxed),
+        cache_texture_pool_misses: CACHE_TEXTURE_POOL_MISSES.swap(0, Ordering::Relaxed),
         filter_atlas_groups: FILTER_ATLAS_GROUPS.swap(0, Ordering::Relaxed),
         filter_atlas_members: FILTER_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
         filter_atlas_pixels: FILTER_ATLAS_PIXELS.swap(0, Ordering::Relaxed),

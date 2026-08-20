@@ -123,6 +123,12 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
                 &mut settings.idle_gpu_upload_eviction,
             ),
             ("low_vram", &mut settings.low_vram),
+            ("filter_atlas", &mut settings.filter_atlas),
+            ("cache_texture_pool", &mut settings.cache_texture_pool),
+            ("blend_batching", &mut settings.blend_batching),
+            ("blend_reordering", &mut settings.blend_reordering),
+            ("blendcheck", &mut settings.blendcheck),
+            ("prerelease_updates", &mut settings.prerelease_updates),
             (
                 "tooltips_follow_pointer",
                 &mut settings.tooltips_follow_pointer,

@@ -80,6 +80,9 @@ pub struct WgpuRenderBackend<T: RenderTarget> {
     viewport_scale_factor: f64,
     texture_pool: TexturePool,
     offscreen_texture_pool: TexturePool,
+    /// Recycles `cacheAsBitmap` textures. Held by `Arc` because each texture keeps a `Weak` to it
+    /// so it can return itself when its owner finally drops it.
+    cache_texture_pool: Arc<crate::cache_texture_pool::CacheTexturePool>,
     pub(crate) offscreen_buffer_pool: Arc<BufferPool<wgpu::Buffer, BufferDimensions>>,
     dynamic_transforms: DynamicTransforms,
     active_frame: ActiveFrame,
@@ -277,6 +280,7 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
                 #[cfg(feature = "aether_metrics")]
                 crate::aether_metrics::TexturePoolKind::General,
             ),
+            cache_texture_pool: Arc::new(crate::cache_texture_pool::CacheTexturePool::new()),
             offscreen_texture_pool: TexturePool::new(
                 offscreen_texture_pool_policy,
                 // Where the 1,450 size buckets lived. Its textures are mostly filter
@@ -1172,6 +1176,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             bind_linear: Default::default(),
             bind_nearest: Default::default(),
             copy_count: Cell::new(0),
+            recycler: None,
         }));
 
         Ok(handle)
@@ -1447,6 +1452,7 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                     bind_linear: Default::default(),
                     bind_nearest: Default::default(),
                     copy_count: Cell::new(0),
+                    recycler: None,
                 }))
             }
         };
@@ -1582,28 +1588,39 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             depth_or_array_layers: 1,
         };
 
-        let texture_label = create_debug_label!("Bitmap");
+        // An idle surface of exactly this size, if the pool has one. This is the whole point: a
+        // room filling up asks for dozens of these in a single frame, and every one that has to go
+        // to the driver is part of a measured 8.7x spike in allocations during the worst seconds.
+        //
+        // The texture arrives with its previous contents. Safe here because the sole caller is the
+        // bitmap cache, which pairs every allocation with a rebuild that clears.
         let texture = self
-            .descriptors
-            .device
-            .create_texture(&wgpu::TextureDescriptor {
-                label: texture_label.as_deref(),
-                size: extent,
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format: wgpu::TextureFormat::Rgba8Unorm,
-                view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
-                usage: wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_DST
-                    | wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::COPY_SRC,
+            .cache_texture_pool
+            .take(width, height)
+            .unwrap_or_else(|| {
+                let texture_label = create_debug_label!("Bitmap");
+                self.descriptors
+                    .device
+                    .create_texture(&wgpu::TextureDescriptor {
+                        label: texture_label.as_deref(),
+                        size: extent,
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        view_formats: &[wgpu::TextureFormat::Rgba8Unorm],
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING
+                            | wgpu::TextureUsages::COPY_DST
+                            | wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
+                    })
             });
         Ok(BitmapHandle(Arc::new(Texture {
             texture,
             bind_linear: Default::default(),
             bind_nearest: Default::default(),
             copy_count: Cell::new(0),
+            recycler: Some(Arc::downgrade(&self.cache_texture_pool)),
         })))
     }
 
@@ -2207,13 +2224,7 @@ fn filter_atlas_max_group() -> usize {
 /// before, which is the control for measuring it again and the switch to reach for if filtered
 /// content ever looks wrong.
 fn filter_atlas_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("AETHER_FILTER_ATLAS").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    })
+    crate::aether_switches::FILTER_ATLAS.enabled()
 }
 
 /// The blur this entry would run, if it is one that can be shared.

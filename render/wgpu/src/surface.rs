@@ -33,8 +33,7 @@ const LARGE_TARGET_MSAA_PIXEL_THRESHOLD: u64 = 2560 * 1440;
 /// making one. Measured on `_evidence/Game3098r24.swf`: four Overlay blends, all stencil-less, none
 /// overlapping -- enough to catch gross breakage, not enough to sign off on a rewrite.
 fn blendcheck_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| std::env::var("AETHER_BLENDCHECK").is_ok())
+    crate::aether_switches::BLENDCHECK.enabled()
 }
 
 static BACKEND_MSAA_OVERRIDE: AtomicU8 = AtomicU8::new(0);

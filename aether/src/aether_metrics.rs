@@ -529,6 +529,10 @@ struct WgpuTexturePoolTotals {
     filter_largest_group: u64,
     /// Groups actually blurred together, and both sides of the trade atlasing makes: it buys passes
     /// (`members / groups`) and pays pixels (`atlas_pixels / member_pixels`, the padding).
+    /// Cache surfaces served from the pool against those that reached the driver. A miss is a
+    /// texture creation on the render thread, which is what the frame-time spikes were made of.
+    cache_texture_pool_hits: u64,
+    cache_texture_pool_misses: u64,
     filter_atlas_groups: u64,
     filter_atlas_members: u64,
     filter_atlas_pixels: u64,
@@ -614,6 +618,12 @@ impl WgpuTexturePoolTotals {
         self.filter_largest_group = self
             .filter_largest_group
             .saturating_add(sample.filter_largest_group);
+        self.cache_texture_pool_hits = self
+            .cache_texture_pool_hits
+            .saturating_add(sample.cache_texture_pool_hits);
+        self.cache_texture_pool_misses = self
+            .cache_texture_pool_misses
+            .saturating_add(sample.cache_texture_pool_misses);
         self.filter_atlas_groups = self
             .filter_atlas_groups
             .saturating_add(sample.filter_atlas_groups);
@@ -885,10 +895,88 @@ pub fn wgpu_resource_census(
     })
 }
 
+/// The renderer switch an alternating A/B is driving, if any.
+///
+/// Comparing a switch on against off is the only way to know what it bought, and comparing two
+/// *sessions* barely works: scene composition dominates every measurement in this client, and two
+/// runs down the same route still differed by 2.3x in the one counter under test. Flipping the
+/// switch inside a single session removes that entirely, because both halves see the same rooms.
+fn ab_switch_name() -> Option<String> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        std::env::var("AETHER_AB_SWITCH")
+            .ok()
+            .filter(|s| !s.is_empty())
+    })
+    .clone()
+}
+
+/// How long each half lasts. Long enough to cover a stretch of play, short enough that a session
+/// contains many of each.
+fn ab_period_seconds() -> f64 {
+    static PERIOD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    *PERIOD.get_or_init(|| {
+        std::env::var("AETHER_AB_PERIOD")
+            .ok()
+            .and_then(|value| value.parse::<f64>().ok())
+            .filter(|seconds| *seconds >= 1.0)
+            .unwrap_or(60.0)
+    })
+}
+
+/// Put the named switch into the half this moment belongs to, and report which half that is.
+///
+/// Says what it is doing exactly once. An A/B that quietly declines to run is worse than one that
+/// fails: a whole session gets played, sent in, and only then turns out to hold one condition. That
+/// happened, which is why the name is validated out loud rather than by returning `None`.
+fn drive_ab_switch(elapsed_seconds: f64) -> Option<bool> {
+    let name = ab_switch_name()?;
+    let Some(switch) = ruffle_render_wgpu::aether_switches::by_env_name(&name) else {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| {
+            let known: Vec<&str> = ruffle_render_wgpu::aether_switches::ALL
+                .iter()
+                .map(|switch| switch.env_name())
+                .collect();
+            tracing::warn!(
+                "AETHER_AB_SWITCH is set to {name:?}, which is not a switch. No A/B will run.                  Known switches: {}",
+                known.join(", ")
+            );
+        });
+        return None;
+    };
+
+    let on = ((elapsed_seconds / ab_period_seconds()) as u64).is_multiple_of(2);
+    let overriding_env = switch.set_ab(on);
+
+    static ANNOUNCED: std::sync::Once = std::sync::Once::new();
+    ANNOUNCED.call_once(|| {
+        tracing::info!(
+            "A/B running on {name}, alternating every {:.0}s. Every metrics sample is stamped              with `ab_on`.",
+            ab_period_seconds()
+        );
+        if overriding_env {
+            tracing::warn!(
+                "{name} is also set in this environment. The A/B overrides it for this run;                  unset it to avoid confusion."
+            );
+        }
+    });
+    Some(on)
+}
+
 #[derive(Debug, Serialize)]
 struct MetricsLine {
     unix_time_ms: u128,
     elapsed_seconds: f64,
+    /// Which half of an alternating A/B this sample belongs to, when one is running.
+    ///
+    /// `None` when no A/B is configured. Otherwise the switch is flipped every
+    /// `AETHER_AB_PERIOD` seconds and every sample is stamped with the state that was in force,
+    /// so both halves are measured against the *same* rooms, crowds and route.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ab_switch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ab_on: Option<bool>,
     interval_us: u64,
     tick: Distribution,
     player_render: Distribution,
@@ -1070,6 +1158,8 @@ impl AetherMetrics {
                 .map(|duration| duration.as_millis())
                 .unwrap_or_default(),
             elapsed_seconds: self.started_at.elapsed().as_secs_f64(),
+            ab_switch: ab_switch_name(),
+            ab_on: drive_ab_switch(self.started_at.elapsed().as_secs_f64()),
             interval_us,
             tick: distribution(&self.tick_ms),
             player_render: distribution(&self.player_render_ms),
@@ -1200,7 +1290,7 @@ fn perf_summary_line(
          draws {:.0} resolves {:.0}/{:.1} MPx binds {:.0} in {:.1} ms queue {:.1} ms per frame | \
          batching: ideal {:.0} passes, adjacent {:.0}, broke on drawing {:.0} mode {:.0} \
          overlap {:.0}, full-surface {:.0}, unbounded draws {:.0}, moved {:.0},          chunks at box cap {:.0} | \
-         cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels){}",
+         cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels) |          cache textures: {:.1} reused, {:.1} created ({:.0}% reuse){}",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -1250,6 +1340,10 @@ fn perf_summary_line(
         // Padding overhead. Above 1 is the area atlasing added; the passes it saved have to be
         // worth that, and this is the number that says whether they were.
         encoding.filter_atlas_pixels as f64 / encoding.filter_atlas_member_pixels.max(1) as f64,
+        encoding.cache_texture_pool_hits as f64 / rendered_frames,
+        encoding.cache_texture_pool_misses as f64 / rendered_frames,
+        100.0 * encoding.cache_texture_pool_hits as f64
+            / (encoding.cache_texture_pool_hits + encoding.cache_texture_pool_misses).max(1) as f64,
         complex_blend_breakdown(&encoding.complex_blends, rendered_frames),
     )
 }

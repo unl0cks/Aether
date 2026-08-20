@@ -174,6 +174,12 @@ impl<'a> PreferencesWriter<'a> {
                     settings.idle_gpu_upload_eviction,
                 ),
                 ("low_vram", settings.low_vram),
+                ("filter_atlas", settings.filter_atlas),
+                ("cache_texture_pool", settings.cache_texture_pool),
+                ("blend_batching", settings.blend_batching),
+                ("blend_reordering", settings.blend_reordering),
+                ("blendcheck", settings.blendcheck),
+                ("prerelease_updates", settings.prerelease_updates),
                 ("tooltips_follow_pointer", settings.tooltips_follow_pointer),
                 ("hide_skill_tooltips", settings.hide_skill_tooltips),
                 (
@@ -418,7 +424,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn set_aether_settings() {
         test(
             "",
@@ -442,6 +447,12 @@ bounded_offscreen_pool = true
 cache_texture_grid = false
 idle_gpu_upload_eviction = true
 low_vram = false
+filter_atlas = true
+cache_texture_pool = true
+blend_batching = true
+blend_reordering = false
+blendcheck = false
+prerelease_updates = false
 tooltips_follow_pointer = false
 hide_skill_tooltips = false
 always_show_aura_tooltips = true
@@ -511,6 +522,12 @@ bounded_offscreen_pool = true
 cache_texture_grid = true
 idle_gpu_upload_eviction = true
 low_vram = false
+filter_atlas = true
+cache_texture_pool = true
+blend_batching = true
+blend_reordering = false
+blendcheck = false
+prerelease_updates = false
 tooltips_follow_pointer = false
 hide_skill_tooltips = false
 always_show_aura_tooltips = true

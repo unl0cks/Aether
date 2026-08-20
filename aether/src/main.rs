@@ -197,7 +197,7 @@ fn default_log_filter(avm_trace: bool) -> String {
 /// Bounded at three seconds because this sits in front of the window. A slow or blocked connection
 /// must cost a moment, not a wait: an update check that delays every launch is a worse feature than
 /// no update check.
-fn check_for_update() -> Option<self_update::Release> {
+fn check_for_update(include_prereleases: bool) -> Option<self_update::Release> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -206,7 +206,7 @@ fn check_for_update() -> Option<self_update::Release> {
     let release = runtime.block_on(async {
         tokio::time::timeout(
             std::time::Duration::from_secs(3),
-            self_update::fetch_latest_release(),
+            self_update::fetch_latest_release(include_prereleases),
         )
         .await
         .ok()
@@ -254,7 +254,7 @@ fn main() -> Result<(), Error> {
             env!("CARGO_PKG_VERSION"),
             env!("CFG_RELEASE_CHANNEL"),
         ))
-        && let Some(release) = check_for_update()
+        && let Some(release) = check_for_update(preferences.aether().prerelease_updates.value)
         && let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
             .enable_all()
             .build()

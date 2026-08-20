@@ -105,26 +105,114 @@ impl From<&GlobalPreferences> for LaunchOptions {
             gamepad_button_mapping: HashMap::from_iter(value.cli.gamepad_button.iter().cloned()),
             avm2_optimizer_enabled: !value.cli.no_avm2_optimizer,
             offscreen_texture_pool_policy: {
+                // The RESOLVED setting, not `cli.aether_low_vram_resolved`. That field is filled in
+                // by the preset from the `--low-vram` flag alone, before saved preferences are even
+                // read, so for most of this mode's life the checkbox in the options window saved a
+                // value that nothing ever consumed: a player who ticked it got the full budget
+                // anyway. `ResolvedSetting` puts the command line first and the saved value second,
+                // which is what every other setting here already does.
+                let low_vram = value.aether().low_vram.value;
+
                 // Filter atlasing keeps a group's targets alive together, which measured peak GPU
                 // texture memory at 825 -> 1,286 MB. That is comfortable on the card it was measured
-                // on and is not on the 2 GB cards this mode exists for, so the group shrinks with
+                // on and is not on the small cards this mode exists for, so the group shrinks with
                 // the pool rather than being left to find out.
-                ruffle_render_wgpu::backend::set_filter_atlas_low_vram(
-                    value.cli.aether_low_vram_resolved,
-                );
-                if value.cli.aether_bounded_offscreen_pool {
-                    OffscreenTexturePoolPolicy::BoundedReuse(
-                        if value.cli.aether_low_vram_resolved {
-                            crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
-                        } else {
-                            crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
-                        },
-                    )
-                } else {
-                    OffscreenTexturePoolPolicy::Ephemeral
-                }
+                ruffle_render_wgpu::backend::set_filter_atlas_low_vram(low_vram);
+                // The idle cache-texture set is held to 32 MB rather than 192 MB on a small card.
+                // Keeping spare textures around to avoid allocation stalls is the right trade at
+                // 10 GB and the wrong one at 4.
+                ruffle_render_wgpu::cache_texture_pool::set_low_vram(low_vram);
+
+                offscreen_pool_policy(value.cli.aether_bounded_offscreen_pool, low_vram)
             },
         }
+    }
+}
+
+/// The offscreen texture pool these settings ask for.
+///
+/// Split out so the choice can be tested. It was wrong in a way no test could have caught while it
+/// was written inline: it read a field the options window never wrote to.
+fn offscreen_pool_policy(bounded: bool, low_vram: bool) -> OffscreenTexturePoolPolicy {
+    if !bounded {
+        return OffscreenTexturePoolPolicy::Ephemeral;
+    }
+    OffscreenTexturePoolPolicy::BoundedReuse(if low_vram {
+        crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
+    } else {
+        crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
+    })
+}
+
+#[cfg(test)]
+mod low_vram_tests {
+    use super::*;
+    use crate::aether_settings::{AetherExplicitFlags, AetherSettings, ResolvedAetherSettings};
+
+    /// The bug this guards: Low VRAM mode was driven by a field the preset filled in from the
+    /// `--low-vram` flag alone, before saved preferences were read. Ticking the box in the options
+    /// window saved a value nothing consumed, so a player on a small card got the full budget and
+    /// had no way to tell.
+    #[test]
+    fn the_saved_setting_decides_when_the_command_line_is_silent() {
+        let saved = AetherSettings {
+            low_vram: true,
+            ..Default::default()
+        };
+        let resolved = ResolvedAetherSettings::resolve(AetherExplicitFlags::default(), saved);
+        assert!(
+            resolved.low_vram.value,
+            "the saved setting has to reach here"
+        );
+        assert!(
+            resolved.low_vram.is_editable(),
+            "and stay editable, since no flag pinned it"
+        );
+
+        assert_eq!(
+            offscreen_pool_policy(true, resolved.low_vram.value),
+            OffscreenTexturePoolPolicy::BoundedReuse(
+                crate::aether_preset::AQW_LOW_VRAM_TEXTURE_POOL_LIMITS
+            ),
+            "and choose the smaller budget"
+        );
+    }
+
+    /// The command line still wins, which is the whole reason the resolved form exists.
+    #[test]
+    fn the_command_line_overrides_the_saved_setting_both_ways() {
+        let saved_on = AetherSettings {
+            low_vram: true,
+            ..Default::default()
+        };
+        let forced_off = AetherExplicitFlags {
+            low_vram: Some(false),
+            ..Default::default()
+        };
+        let resolved = ResolvedAetherSettings::resolve(forced_off, saved_on);
+        assert!(!resolved.low_vram.value);
+        assert!(!resolved.low_vram.is_editable(), "shown as pinned");
+
+        let forced_on = AetherExplicitFlags {
+            low_vram: Some(true),
+            ..Default::default()
+        };
+        let resolved = ResolvedAetherSettings::resolve(forced_on, AetherSettings::default());
+        assert!(resolved.low_vram.value);
+    }
+
+    #[test]
+    fn an_unbounded_pool_ignores_the_budget_entirely() {
+        assert_eq!(
+            offscreen_pool_policy(false, true),
+            OffscreenTexturePoolPolicy::Ephemeral
+        );
+        assert_eq!(
+            offscreen_pool_policy(true, false),
+            OffscreenTexturePoolPolicy::BoundedReuse(
+                crate::aether_preset::AQW_OFFSCREEN_TEXTURE_POOL_LIMITS
+            )
+        );
     }
 }
 

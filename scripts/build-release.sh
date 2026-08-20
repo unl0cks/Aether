@@ -18,8 +18,14 @@
 #   scripts/build-release.sh --features metrics
 set -euo pipefail
 
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# `pwd -W` where it exists: under Git Bash a plain `pwd` yields an MSYS path like /e/CLAUDE/Aether,
+# which rustc never compares against, so the remap silently did nothing.
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && { pwd -W 2>/dev/null || pwd; })"
 cargo_home="${CARGO_HOME:-${USERPROFILE:-$HOME}/.cargo}"
+# The toolchain lives under the user profile too, and with debug info on, rustc rewrites the
+# standard library's paths to point at it. That leaked the account name 528 times into a build the
+# other two prefixes had already cleaned.
+rustup_home="${RUSTUP_HOME:-${USERPROFILE:-$HOME}/.rustup}"
 
 # Forward slashes: this is what rustc compares against, even on Windows.
 to_rustc_path() { printf '%s' "${1//\\//}"; }
@@ -28,6 +34,8 @@ separator=$'\x1f'
 flags=(
     "--remap-path-prefix=$(to_rustc_path "$cargo_home")=/cargo"
     "--remap-path-prefix=$(to_rustc_path "$repo_root")=/aether"
+    "--remap-path-prefix=$(to_rustc_path "$rustup_home")=/rust"
+    "--remap-path-prefix=${rustup_home}=/rust"
 )
 
 encoded=""
@@ -41,3 +49,4 @@ CARGO_ENCODED_RUSTFLAGS="$encoded" \
 printf '\nBuilt with paths remapped:\n'
 printf '  %s -> /cargo\n' "$cargo_home"
 printf '  %s -> /aether\n' "$repo_root"
+printf '  %s -> /rust\n' "$rustup_home"

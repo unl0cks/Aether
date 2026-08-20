@@ -70,6 +70,7 @@ enum OptionsTab {
     Gameplay,
     Visuals,
     Advanced,
+    Experimental,
 }
 
 /// One row of the Advanced tab.
@@ -98,6 +99,24 @@ pub struct AetherOptionsDialog {
     applied_at_open: AetherSettings,
 
     aqw_mode: bool,
+
+    /// Where the manual update check has got to.
+    update_check: UpdateCheck,
+}
+
+/// The state of the "Check for updates" button between frames.
+///
+/// The check talks to GitHub, so it cannot run on the UI thread: a slow or blocked connection would
+/// freeze the window for as long as the timeout. It runs on its own thread and reports back through
+/// a channel, which the window polls while it is open.
+enum UpdateCheck {
+    Idle,
+    Checking(std::sync::mpsc::Receiver<Option<crate::self_update::Release>>),
+    /// Nothing newer, or the check could not be made. Both are just a line of text.
+    Reported(String),
+    /// Something newer was found and the player has not been asked yet. Handled outside the window
+    /// body, because offering it opens a modal dialog and then downloads.
+    Found(crate::self_update::Release),
 }
 
 impl AetherOptionsDialog {
@@ -111,6 +130,7 @@ impl AetherOptionsDialog {
             rebinding: false,
             tab: OptionsTab::Gameplay,
             aqw_mode: preferences.aqw_mode(),
+            update_check: UpdateCheck::Idle,
             preferences,
         }
     }
@@ -133,6 +153,7 @@ impl AetherOptionsDialog {
         if self.rebinding {
             self.capture_rebind(egui_ctx);
         }
+        self.poll_update_check();
 
         Window::new("Aether Options")
             .open(&mut keep_open)
@@ -152,6 +173,11 @@ impl AetherOptionsDialog {
                         "Visuals & Performance",
                     );
                     ui.selectable_value(&mut self.tab, OptionsTab::Advanced, "Advanced");
+                    ui.selectable_value(
+                        &mut self.tab,
+                        OptionsTab::Experimental,
+                        "Experimental & Debugging",
+                    );
                 });
                 ui.separator();
 
@@ -159,6 +185,7 @@ impl AetherOptionsDialog {
                     OptionsTab::Gameplay => self.show_gameplay_tab(ui),
                     OptionsTab::Visuals => self.show_visuals_tab(ui),
                     OptionsTab::Advanced => self.show_advanced_tab(ui),
+                    OptionsTab::Experimental => self.show_experimental_tab(ui),
                 }
 
                 ui.separator();
@@ -186,6 +213,14 @@ impl AetherOptionsDialog {
 
         if saving {
             self.save(player);
+        }
+
+        // Outside the window body on purpose: offering an update opens a modal dialog and then
+        // downloads, neither of which belongs inside a borrow of the UI.
+        if let UpdateCheck::Found(release) =
+            std::mem::replace(&mut self.update_check, UpdateCheck::Idle)
+        {
+            self.offer_found_update(release);
         }
 
         keep_open && !should_close
@@ -452,6 +487,204 @@ impl AetherOptionsDialog {
         );
     }
 
+    /// Switches that were previously reachable only by setting an environment variable and
+    /// restarting.
+    ///
+    /// They live apart from Advanced on purpose. Advanced holds settled work-arounds for faults in
+    /// how AQW drives Flash; these are measurements in progress, and two of them exist so that a
+    /// change can be compared against its own absence. Mixing the two would suggest the ones here
+    /// are as settled as the ones there.
+    ///
+    /// Every one of these takes effect on the next frame, which is the point: comparing a switch on
+    /// against off inside a single session is far more trustworthy than comparing two sessions,
+    /// because scene composition dominates every measurement in this client.
+    fn show_experimental_tab(&mut self, ui: &mut Ui) {
+        ui.label(
+            RichText::new(
+                "Switches for testing and for measuring one change against its own absence. These apply immediately, without a restart. Anything set by an environment variable on the command line is shown here but cannot be changed, so a measurement run cannot be overridden by a saved preference.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(4.0);
+
+        for (heading, rows) in self.experimental_groups() {
+            ui.label(heading);
+            for (value, resolved, label, hint) in rows {
+                toggle(ui, value, resolved, label, hint);
+            }
+            ui.add_space(8.0);
+        }
+
+        ui.label(
+            RichText::new(
+                "The ActionScript trace stays on the command line. It prints what the game itself logs, which includes login and session data, so it is not something to leave a button for.",
+            )
+            .small()
+            .weak(),
+        );
+
+        ui.separator();
+        self.show_update_section(ui);
+    }
+
+    /// The update channel and a button to check now.
+    ///
+    /// Sits here rather than in Advanced because opting into pre-releases is opting into exactly
+    /// the sort of half-measured change the rest of this tab exposes.
+    fn show_update_section(&mut self, ui: &mut Ui) {
+        ui.label("Updates");
+        toggle(
+            ui,
+            &mut self.settings.prerelease_updates,
+            self.resolved.prerelease_updates,
+            "Include pre-releases",
+            "Offers test builds as well as finished ones, both when Aether starts and when you press the button below. A pre-release is published to be tried out and may be worse than the release before it.",
+        );
+        ui.label(
+            RichText::new(
+                "Saved with the rest of these settings. The button below uses whichever channel is currently saved, so save first if you have just changed it.",
+            )
+            .small()
+            .weak(),
+        );
+        ui.add_space(4.0);
+
+        ui.horizontal(|ui| {
+            let checking = matches!(self.update_check, UpdateCheck::Checking(_));
+            if ui
+                .add_enabled(!checking, Button::new("Check for updates"))
+                .clicked()
+            {
+                self.begin_update_check();
+            }
+            match &self.update_check {
+                UpdateCheck::Checking(_) => {
+                    ui.spinner();
+                    ui.label("Checking...");
+                }
+                UpdateCheck::Reported(message) => {
+                    ui.label(message.clone());
+                }
+                UpdateCheck::Idle | UpdateCheck::Found(_) => {}
+            }
+        });
+    }
+
+    /// Start the check on its own thread.
+    fn begin_update_check(&mut self) {
+        let include_prereleases = self.preferences.aether().prerelease_updates.value;
+        let (sender, receiver) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let found = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .ok()
+                .and_then(|runtime| {
+                    runtime.block_on(crate::self_update::fetch_latest_release(
+                        include_prereleases,
+                    ))
+                });
+            // The receiver is gone if the window was closed mid-check, which is not a failure.
+            let _ = sender.send(found);
+        });
+        self.update_check = UpdateCheck::Checking(receiver);
+    }
+
+    /// Move the check along, if one is running.
+    fn poll_update_check(&mut self) {
+        let UpdateCheck::Checking(receiver) = &self.update_check else {
+            return;
+        };
+        match receiver.try_recv() {
+            Ok(Some(release))
+                if crate::self_update::is_newer(&release.version, env!("CARGO_PKG_VERSION")) =>
+            {
+                self.update_check = UpdateCheck::Found(release);
+            }
+            Ok(Some(_)) => {
+                self.update_check =
+                    UpdateCheck::Reported(format!("Up to date ({})", env!("CARGO_PKG_VERSION")));
+            }
+            // A reply that parsed to nothing and a dead sender are the same thing to a player:
+            // the check could not be completed. Rate limiting lands here too.
+            Ok(None) | Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                self.update_check = UpdateCheck::Reported("Could not check for updates".to_owned());
+            }
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+        }
+    }
+
+    /// Ask whether to install what the check found, and restart if it was installed.
+    fn offer_found_update(&mut self, release: crate::self_update::Release) {
+        let Ok(runtime) = tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+        else {
+            self.update_check = UpdateCheck::Reported("Could not check for updates".to_owned());
+            return;
+        };
+        if crate::self_update::offer_update(&release, &runtime) {
+            crate::self_update::restart();
+            std::process::exit(0);
+        }
+        // Declined, or the download failed and already said so.
+        self.update_check =
+            UpdateCheck::Reported(format!("Aether {} is available", release.version));
+    }
+
+    /// The Experimental tab's contents, as headings and the rows under them.
+    fn experimental_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 3] {
+        let settings = &mut self.settings;
+        let resolved = &self.resolved;
+
+        [
+            (
+                "Filters and caching",
+                vec![
+                    (
+                        &mut settings.filter_atlas,
+                        resolved.filter_atlas,
+                        "Blur filters together (AETHER_FILTER_ATLAS)",
+                        "Objects that share a glow are packed into one texture and blurred once instead of separately. Measured to cut the cost of a filtered cache surface by 71%. Turning it off blurs each object on its own, which is the control for measuring it.",
+                    ),
+                    (
+                        &mut settings.cache_texture_pool,
+                        resolved.cache_texture_pool,
+                        "Recycle cache textures (AETHER_CACHE_TEXTURE_POOL)",
+                        "Reuses the texture behind a cached object instead of asking the driver for a new one. Allocation bursts as a room fills up are what frame-time spikes are made of. Turn this off if a cached object ever shows content that is not its own.",
+                    ),
+                ],
+            ),
+            (
+                "Blending",
+                vec![
+                    (
+                        &mut settings.blend_batching,
+                        resolved.blend_batching,
+                        "Share render passes between blends (AETHER_BLEND_BATCH)",
+                        "Runs of compatible blends that do not overlap share one pass. Turn it off if blended content ever looks wrong.",
+                    ),
+                    (
+                        &mut settings.blend_reordering,
+                        resolved.blend_reordering,
+                        "Move blends together first (AETHER_BLEND_REORDER)",
+                        "Tries to bring compatible blends next to each other so more of them can share a pass. Off by default because it was measured at about 1.6% of render passes in a crowded map. Kept because another scene's geometry may be kinder.",
+                    ),
+                ],
+            ),
+            (
+                "Diagnostics",
+                vec![(
+                    &mut settings.blendcheck,
+                    resolved.blendcheck,
+                    "Log every complex blend (AETHER_BLENDCHECK)",
+                    "Writes a line per complex blend as it is encoded. Useful for finding out what a given map actually draws, and noisy enough that it is not something to leave on.",
+                )],
+            ),
+        ]
+    }
+
     /// The Advanced tab's contents, as headings and the rows under them.
     ///
     /// Built as data so the ordering is one readable list rather than a run of near-identical
@@ -607,6 +840,10 @@ impl AetherOptionsDialog {
             || before.avm2_broadcast_fast_path != after.avm2_broadcast_fast_path
             || before.mouse_motion_coalescing != after.mouse_motion_coalescing
             || before.bounded_offscreen_pool != after.bounded_offscreen_pool
+            // The pool budget and the atlas group cap are both chosen while the player is built,
+            // so this needs a restart. It was missing from this list for as long as the setting
+            // did nothing at all, which is why nobody noticed.
+            || before.low_vram != after.low_vram
             || before.cache_texture_grid != after.cache_texture_grid
             || before.idle_gpu_upload_eviction != after.idle_gpu_upload_eviction
             || before.crash_report != after.crash_report

@@ -48,11 +48,13 @@ mod pixel_bender;
 pub mod target;
 pub mod texture_pool_policy;
 
+pub mod aether_switches;
 pub mod backend;
 mod blend;
 pub mod blend_region;
 mod buffer_builder;
 mod buffer_pool;
+pub mod cache_texture_pool;
 #[cfg(feature = "clap")]
 pub mod clap;
 pub mod descriptors;
@@ -272,6 +274,27 @@ pub struct Texture {
     bind_linear: OnceCell<BitmapBinds>,
     bind_nearest: OnceCell<BitmapBinds>,
     copy_count: Cell<u8>,
+    /// Where this texture goes when its last owner lets go, for the textures that are worth
+    /// recycling.
+    ///
+    /// Only `cacheAsBitmap` surfaces set this. They are created and destroyed constantly as players
+    /// come and go, at measured rates of 108 in a bad second against 12 in a good one, and that is
+    /// the frame-time spike. Bitmaps registered from actual image data have no such churn and are
+    /// left alone.
+    ///
+    /// Weak on purpose: the pool belongs to the renderer, and a texture outliving it must not keep
+    /// it alive, nor try to return to it during shutdown.
+    pub(crate) recycler: Option<std::sync::Weak<crate::cache_texture_pool::CacheTexturePool>>,
+}
+
+impl Drop for Texture {
+    fn drop(&mut self) {
+        if let Some(pool) = self.recycler.as_ref().and_then(std::sync::Weak::upgrade) {
+            // `wgpu::Texture` is reference counted, so handing a clone to the pool keeps the GPU
+            // resource alive past this drop rather than copying anything.
+            pool.give_back(self.texture.clone());
+        }
+    }
 }
 
 impl Texture {

@@ -967,13 +967,7 @@ const SHRINK_COMPLEX_BLEND_TARGETS: bool = true;
 /// the control for measuring what batching actually bought and the switch to reach for if blended
 /// content ever looks wrong.
 pub(crate) fn blend_batching_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        !matches!(
-            std::env::var("AETHER_BLEND_BATCH").as_deref(),
-            Ok("0") | Ok("off") | Ok("false")
-        )
-    })
+    crate::aether_switches::BLEND_BATCHING.enabled()
 }
 
 /// How far ahead a blend looks for company, in chunks.
@@ -1000,13 +994,7 @@ const BLEND_REORDER_SCAN_LIMIT: usize = 64;
 /// Kept behind a switch rather than deleted so the measurement can be repeated on other scenes,
 /// where the geometry may be kinder than a packed hub.
 pub(crate) fn blend_reordering_enabled() -> bool {
-    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ENABLED.get_or_init(|| {
-        matches!(
-            std::env::var("AETHER_BLEND_REORDER").as_deref(),
-            Ok("1") | Ok("on") | Ok("true")
-        )
-    })
+    crate::aether_switches::BLEND_REORDERING.enabled()
 }
 
 /// The facts a batch cares about, for a blend that is allowed to join one.

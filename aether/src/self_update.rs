@@ -19,6 +19,14 @@ use std::path::{Path, PathBuf};
 /// Where releases are published.
 const RELEASES_API: &str = "https://api.github.com/repos/unl0cks/Aether/releases/latest";
 
+/// The list endpoint, for the pre-release channel.
+///
+/// This is a separate route rather than a filter: GitHub's `releases/latest` **never** returns a
+/// pre-release, by design, so no amount of parsing the stable reply can find one. The list is
+/// newest-first by publication date, but the pick is made by version number, because a patch to an
+/// older line can be published after a newer pre-release.
+const RELEASES_LIST_API: &str = "https://api.github.com/repos/unl0cks/Aether/releases?per_page=20";
+
 /// The asset carrying the client, and the file listing its hash.
 const CLIENT_ASSET_PREFIX: &str = "Aether-Portable-";
 const CLIENT_ASSET_SUFFIX: &str = "-win-x64.zip";
@@ -50,10 +58,39 @@ pub struct Release {
 /// a GitHub outage or a change to their JSON must not be able to stop Aether from opening.
 pub fn parse_latest_release(json: &str) -> Option<Release> {
     let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    parse_release(&value, false)
+}
 
-    // A draft or a prerelease is not something to hand a player.
-    if value.get("draft").and_then(serde_json::Value::as_bool) == Some(true)
-        || value.get("prerelease").and_then(serde_json::Value::as_bool) == Some(true)
+/// Pick the newest release from the list endpoint, optionally including pre-releases.
+///
+/// Chosen by version rather than by position. The list arrives newest-first by publication date,
+/// which is not the same ordering: a fix published to an older line after a pre-release would
+/// otherwise be offered as an upgrade to someone already ahead of it.
+pub fn parse_release_list(json: &str, include_prereleases: bool) -> Option<Release> {
+    let value: serde_json::Value = serde_json::from_str(json).ok()?;
+    value
+        .as_array()?
+        .iter()
+        .filter_map(|entry| parse_release(entry, include_prereleases))
+        .max_by(|a, b| {
+            if is_newer(&a.version, &b.version) {
+                std::cmp::Ordering::Greater
+            } else if is_newer(&b.version, &a.version) {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+}
+
+/// Read one release, or `None` if it is not something to hand this player.
+fn parse_release(value: &serde_json::Value, allow_prerelease: bool) -> Option<Release> {
+    // A draft is never offered. A pre-release is offered only to someone who asked for them.
+    if value.get("draft").and_then(serde_json::Value::as_bool) == Some(true) {
+        return None;
+    }
+    if !allow_prerelease
+        && value.get("prerelease").and_then(serde_json::Value::as_bool) == Some(true)
     {
         return None;
     }
@@ -253,7 +290,10 @@ pub fn install_downloaded(current: &Path, staged: &Path) -> std::io::Result<()> 
 }
 
 /// Ask GitHub what the newest release is.
-pub async fn fetch_latest_release() -> Option<Release> {
+///
+/// `include_prereleases` switches endpoint rather than filtering, for the reason on
+/// [`RELEASES_LIST_API`].
+pub async fn fetch_latest_release(include_prereleases: bool) -> Option<Release> {
     let client = reqwest::Client::builder()
         // GitHub rejects requests with no user agent.
         .user_agent(concat!("Aether/", env!("CARGO_PKG_VERSION")))
@@ -261,14 +301,24 @@ pub async fn fetch_latest_release() -> Option<Release> {
         .build()
         .ok()?;
 
-    let response = client.get(RELEASES_API).send().await.ok()?;
+    let url = if include_prereleases {
+        RELEASES_LIST_API
+    } else {
+        RELEASES_API
+    };
+    let response = client.get(url).send().await.ok()?;
     if !response.status().is_success() {
         // Rate limiting and outages both land here. Neither is worth telling a player about.
         tracing::debug!("update check returned {}", response.status());
         return None;
     }
 
-    parse_latest_release(&response.text().await.ok()?)
+    let body = response.text().await.ok()?;
+    if include_prereleases {
+        parse_release_list(&body, true)
+    } else {
+        parse_latest_release(&body)
+    }
 }
 
 /// How many times one route is tried before moving on to the next.
@@ -522,6 +572,71 @@ mod tests {
         for json in ["", "not json", "[]", "{}", r#"{"tag_name":""}"#] {
             assert_eq!(parse_latest_release(json), None, "{json}");
         }
+    }
+
+    /// The pre-release channel is a different endpoint, and its list has to be picked by version
+    /// rather than by position: GitHub lists newest-published first, and a patch to an older line
+    /// can be published after a newer pre-release.
+    #[test]
+    fn the_prerelease_channel_picks_the_highest_version_not_the_first_entry() {
+        let list = format!(
+            "[{}, {}, {}]",
+            release_json("v0.6.30", false),
+            release_json("v0.6.32", true),
+            release_json("v0.6.31", false)
+        );
+
+        let picked = parse_release_list(&list, true).expect("a pre-release should be offered");
+        assert_eq!(picked.version, "0.6.32");
+
+        // The same list on the stable channel skips the pre-release entirely.
+        let picked = parse_release_list(&list, false).expect("a stable release should be offered");
+        assert_eq!(picked.version, "0.6.31");
+    }
+
+    /// Ordering by version, not by where GitHub put it in the array.
+    #[test]
+    fn a_later_published_older_version_does_not_win() {
+        let list = format!(
+            "[{}, {}]",
+            release_json("v0.6.9", false),
+            release_json("v0.6.31", false)
+        );
+        let picked = parse_release_list(&list, false).expect("one of these should be offered");
+        assert_eq!(
+            picked.version, "0.6.31",
+            "0.6.9 sorts above 0.6.31 as text, which is exactly the trap"
+        );
+    }
+
+    /// A draft is never handed to anyone, on either channel.
+    #[test]
+    fn drafts_are_refused_even_on_the_prerelease_channel() {
+        let mut draft: serde_json::Value =
+            serde_json::from_str(&release_json("v0.9.0", true)).unwrap();
+        draft["draft"] = serde_json::Value::Bool(true);
+        let list = format!("[{}, {}]", draft, release_json("v0.6.31", false));
+
+        let picked = parse_release_list(&list, true).expect("the non-draft should be offered");
+        assert_eq!(picked.version, "0.6.31");
+    }
+
+    #[test]
+    fn an_empty_or_malformed_list_is_no_release_rather_than_a_failure() {
+        assert!(parse_release_list("[]", true).is_none());
+        assert!(parse_release_list("not json", true).is_none());
+        assert!(parse_release_list("{}", true).is_none());
+    }
+
+    /// One release as GitHub serves it, with both assets the updater needs.
+    fn release_json(tag: &str, prerelease: bool) -> String {
+        let version = tag.trim_start_matches('v');
+        format!(
+            r#"{{"tag_name":"{tag}","draft":false,"prerelease":{prerelease},
+             "assets":[
+               {{"name":"Aether-Portable-{version}-win-x64.zip","browser_download_url":"https://example/p.zip","url":"https://api/1"}},
+               {{"name":"SHA256SUMS.txt","browser_download_url":"https://example/s.txt","url":"https://api/2"}}]}}"#
+        )
     }
 
     #[test]
