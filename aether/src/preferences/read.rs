@@ -128,6 +128,10 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
             ("blend_batching", &mut settings.blend_batching),
             ("blend_reordering", &mut settings.blend_reordering),
             ("blendcheck", &mut settings.blendcheck),
+            (
+                "frame_construction_retry",
+                &mut settings.frame_construction_retry,
+            ),
             ("prerelease_updates", &mut settings.prerelease_updates),
             (
                 "tooltips_follow_pointer",

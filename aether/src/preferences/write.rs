@@ -179,6 +179,10 @@ impl<'a> PreferencesWriter<'a> {
                 ("blend_batching", settings.blend_batching),
                 ("blend_reordering", settings.blend_reordering),
                 ("blendcheck", settings.blendcheck),
+                (
+                    "frame_construction_retry",
+                    settings.frame_construction_retry,
+                ),
                 ("prerelease_updates", settings.prerelease_updates),
                 ("tooltips_follow_pointer", settings.tooltips_follow_pointer),
                 ("hide_skill_tooltips", settings.hide_skill_tooltips),
@@ -448,10 +452,11 @@ cache_texture_grid = false
 idle_gpu_upload_eviction = true
 low_vram = false
 filter_atlas = true
-cache_texture_pool = true
+cache_texture_pool = false
 blend_batching = true
 blend_reordering = false
 blendcheck = false
+frame_construction_retry = false
 prerelease_updates = false
 tooltips_follow_pointer = false
 hide_skill_tooltips = false
@@ -523,10 +528,11 @@ cache_texture_grid = true
 idle_gpu_upload_eviction = true
 low_vram = false
 filter_atlas = true
-cache_texture_pool = true
+cache_texture_pool = false
 blend_batching = true
 blend_reordering = false
 blendcheck = false
+frame_construction_retry = false
 prerelease_updates = false
 tooltips_follow_pointer = false
 hide_skill_tooltips = false

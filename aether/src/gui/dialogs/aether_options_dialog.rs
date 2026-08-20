@@ -634,7 +634,7 @@ impl AetherOptionsDialog {
     }
 
     /// The Experimental tab's contents, as headings and the rows under them.
-    fn experimental_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 3] {
+    fn experimental_groups(&mut self) -> [(&'static str, Vec<AdvancedRow<'_>>); 4] {
         let settings = &mut self.settings;
         let resolved = &self.resolved;
 
@@ -672,6 +672,15 @@ impl AetherOptionsDialog {
                         "Tries to bring compatible blends next to each other so more of them can share a pass. Off by default because it was measured at about 1.6% of render passes in a crowded map. Kept because another scene's geometry may be kinder.",
                     ),
                 ],
+            ),
+            (
+                "Compatibility",
+                vec![(
+                    &mut settings.frame_construction_retry,
+                    resolved.frame_construction_retry,
+                    "Retry building panel contents (--frame-construction-retry)",
+                    "AQW's scripts reach for a panel's children by name and assume Flash has already built them. When one is not ready the script stops with a null reference and the panel is left with its border drawn and its contents missing, which can flicker. This builds them first and runs the script again. Try it if a panel such as the world map opens blank.",
+                )],
             ),
             (
                 "Diagnostics",

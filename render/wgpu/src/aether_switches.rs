@@ -102,10 +102,10 @@ pub static FILTER_ATLAS: RuntimeSwitch = RuntimeSwitch::new("AETHER_FILTER_ATLAS
 
 /// Recycle `cacheAsBitmap` textures instead of asking the driver for a new one each time.
 ///
-/// Measured: 74% reuse, and texture creations per frame essentially eliminated in the band where
-/// two sessions could be compared.
+/// Off, on measurement: an alternating A/B in one session found no effect on frame stability once
+/// scene size and allocation pressure were controlled for, and it holds up to 192 MB idle.
 pub static CACHE_TEXTURE_POOL: RuntimeSwitch =
-    RuntimeSwitch::new("AETHER_CACHE_TEXTURE_POOL", true);
+    RuntimeSwitch::new("AETHER_CACHE_TEXTURE_POOL", false);
 
 /// Let runs of compatible complex blends share one render pass.
 pub static BLEND_BATCHING: RuntimeSwitch = RuntimeSwitch::new("AETHER_BLEND_BATCH", true);

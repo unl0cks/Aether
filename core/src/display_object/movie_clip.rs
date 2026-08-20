@@ -1109,6 +1109,41 @@ impl<'gc> MovieClip<'gc> {
         best.map(|(s, fnum)| (s.clone(), fnum))
     }
 
+    /// Describe this clip well enough to identify a frame script that threw.
+    ///
+    /// The bare "Error running AVM2 frame script" line names neither the clip nor the frame, which
+    /// makes a run of them impossible to tell apart: 77 identical lines could be one clip failing
+    /// 77 times or 77 clips failing once. `playing` is the field that decides it. A frame script
+    /// that throws before reaching its `stop()` leaves the playhead advancing, and from then on the
+    /// clip walks its own timeline running every other frame's script in turn, which is
+    /// indistinguishable in the log from an unrelated burst of errors.
+    ///
+    /// Only ever called from the error path, which is already `#[cold]`, so the allocation and the
+    /// label scan cost nothing in the normal case.
+    fn frame_script_error_context(self) -> String {
+        let label = match self.current_label() {
+            Some((label, frame)) if frame == self.current_frame() => format!(" label={label}"),
+            Some((label, frame)) => format!(" label={label}+{}", self.current_frame() - frame),
+            None => String::new(),
+        };
+        let class = self
+            .object2()
+            .map(|object| object.instance_class().name().local_name().to_string())
+            .unwrap_or_default();
+        let class = if class.is_empty() {
+            String::new()
+        } else {
+            format!(" class={class}")
+        };
+
+        format!(
+            "{}{class} frame={}{label} playing={}",
+            self.path(),
+            self.current_frame(),
+            self.playing(),
+        )
+    }
+
     /// Yield a list of labels and frame-numbers in the current scene.
     ///
     /// Labels are returned sorted by frame number.
@@ -2615,12 +2650,11 @@ impl<'gc> MovieClip<'gc> {
                                 Some(format!("{e:?}")),
                             );
                         }
-                        Avm2::uncaught_error(
-                            &mut activation,
-                            Some(self.into()),
-                            e,
-                            "Error running AVM2 frame script",
+                        let where_ = format!(
+                            "Error running AVM2 frame script [{}]",
+                            self.frame_script_error_context()
                         );
+                        Avm2::uncaught_error(&mut activation, Some(self.into()), e, &where_);
                     }
 
                     self.0

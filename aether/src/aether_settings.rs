@@ -142,6 +142,9 @@ pub struct AetherExplicitFlags {
     pub crash_report: Explicit,
     /// Whether the chosen UI font reaches every text field rather than just chat and nameplates.
     pub ui_font_all_text: Explicit,
+    /// Whether `--frame-construction-retry` was passed. It has no negative form, so this is a
+    /// plain bool rather than an `Explicit` pair.
+    pub frame_construction_retry: bool,
 
     /// `--quality`, which is already a value rather than a pair.
     pub quality: Option<StageQuality>,
@@ -245,6 +248,7 @@ impl AetherExplicitFlags {
             ),
             crash_report: pair(opt.aether_crash_report, opt.no_aether_crash_report),
             ui_font_all_text: pair(opt.aether_ui_font_all_text, opt.no_aether_ui_font_all_text),
+            frame_construction_retry: opt.aether_aqw_frame_construction_retry,
             quality: opt.quality,
             focus_aura_colour: opt.focus_aura_colour,
             bitmap_cache_sweep: opt.bitmap_cache_sweep,
@@ -299,6 +303,14 @@ pub struct AetherSettings {
     pub blend_reordering: bool,
     pub blendcheck: bool,
 
+    /// Retry constructing a clip's children when its frame script is about to run and some are
+    /// still unconstructed.
+    ///
+    /// AQW's scripts assume Flash's construction order and reach straight for children by name. If
+    /// one is not there yet the script throws `#1009` and stops half way, which leaves a panel with
+    /// its chrome drawn and its contents missing.
+    pub frame_construction_retry: bool,
+
     /// Whether the update check offers pre-releases as well as stable builds.
     ///
     /// Applies to the check at startup and to the button in the options window, so the two cannot
@@ -347,13 +359,21 @@ impl Default for AetherSettings {
             crash_report: true,
             // Measured: cost per filtered cache entry fell 71%.
             filter_atlas: true,
-            // Measured: 74% of cache surfaces reused rather than allocated.
-            cache_texture_pool: true,
+            // Off, on measurement. It reuses about two thirds to three quarters of cache surfaces,
+            // but an alternating A/B inside one session -- flipping it every 60 seconds so both
+            // halves saw the same rooms -- found no effect on frame stability once scene size and
+            // allocation pressure were controlled for. It holds up to 192 MB of idle textures, and
+            // paying video memory for nothing is the wrong default. Kept because a slower storage
+            // or driver combination may yet make it worth it.
+            cache_texture_pool: false,
             blend_batching: true,
             // Off, on measurement: worth about 1.6% of render passes in a crowded map.
             blend_reordering: false,
             // A measurement aid, and noisy in the log.
             blendcheck: false,
+            // Off: it re-runs construction, so it is a compatibility repair to reach for rather
+            // than something to pay for on every frame script.
+            frame_construction_retry: false,
             // Off: a pre-release is for people who have agreed to test one.
             prerelease_updates: false,
             // Off: the chosen font reaches chat and nameplates by default. Widening it to the menus,
@@ -430,6 +450,7 @@ pub struct ResolvedAetherSettings {
     pub blend_batching: ResolvedSetting,
     pub blend_reordering: ResolvedSetting,
     pub blendcheck: ResolvedSetting,
+    pub frame_construction_retry: ResolvedSetting,
     pub prerelease_updates: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
     pub focus_aura_colour: Resolved<FocusAuraColour>,
@@ -441,6 +462,7 @@ pub struct ResolvedAetherSettings {
 
 impl ResolvedAetherSettings {
     pub fn resolve(explicit: AetherExplicitFlags, saved: AetherSettings) -> Self {
+        let explicit_flag = explicit.frame_construction_retry;
         Self {
             number_separators: ResolvedSetting::resolve(
                 explicit.number_separators,
@@ -513,6 +535,11 @@ impl ResolvedAetherSettings {
             blend_reordering: resolve_switch(&switches::BLEND_REORDERING, saved.blend_reordering),
             blendcheck: resolve_switch(&switches::BLENDCHECK, saved.blendcheck),
             prerelease_updates: ResolvedSetting::resolve(None, saved.prerelease_updates),
+            frame_construction_retry: ResolvedSetting::resolve(
+                // The flag only ever turns it on, so it pins only when passed.
+                explicit_flag.then_some(true),
+                saved.frame_construction_retry,
+            ),
             ui_font_all_text: ResolvedSetting::resolve(
                 explicit.ui_font_all_text,
                 saved.ui_font_all_text,
@@ -577,6 +604,13 @@ pub fn apply_live_settings(
     switches::BLEND_BATCHING.set(settings.blend_batching.value);
     switches::BLEND_REORDERING.set(settings.blend_reordering.value);
     switches::BLENDCHECK.set(settings.blendcheck.value);
+
+    // Only in AQW mode, matching how the command line flag is applied: it repairs an assumption
+    // AQW's own scripts make about construction order, and has no business altering an arbitrary
+    // movie's timing.
+    ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(
+        aqw_mode && settings.frame_construction_retry.value,
+    );
 
     // Nothing is cached from this, so it takes effect on the next tooltip rather than the next
     // launch.
