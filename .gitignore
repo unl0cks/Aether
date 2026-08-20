@@ -29,3 +29,11 @@ RECOVER_*.fla
 
 # Local release staging and metrics captures
 /dist/
+
+# Local tooling state. Never belongs in the repository, and one of these carries wording that
+# has no business in a public file.
+.claude/
+.serena/
+**/.claude/
+*.mv2
+*.mv2.lock
