@@ -367,23 +367,6 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    #[cfg(feature = "diagnostics")]
-    {
-        let retry_enabled = aqw_mode && preferences.cli.aether_aqw_frame_construction_retry;
-        ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(retry_enabled);
-        if retry_enabled {
-            tracing::warn!(
-                "Experimental AQW frame-construction retry is enabled; use only for A/B compatibility testing"
-            );
-        }
-    }
-    #[cfg(not(feature = "diagnostics"))]
-    if preferences.cli.aether_aqw_frame_construction_retry {
-        tracing::warn!(
-            "--frame-construction-retry was requested, but this binary was built without the `diagnostics` feature"
-        );
-    }
-
     let cache_texture_grid = aqw_mode && preferences.cli.aether_aqw_cache_texture_grid;
     ruffle_core::aether_performance::set_cache_texture_grid_enabled(cache_texture_grid);
 
@@ -419,10 +402,45 @@ fn main() -> Result<(), Error> {
         );
     }
 
-    ruffle_core::aether_performance::set_filterless_hot_cache_bypass_enabled(aqw_mode);
-    if aqw_mode {
+    // Both of these default on and are only switchable so that the world map flicker can be
+    // bisected: they are the two paths that change what a huge, repeatedly invalidated cache
+    // actually draws, and the map is the object both were written for. Logged when turned off so a
+    // diagnostic run cannot be mistaken for a normal one in the log.
+    let filterless_direct_render =
+        aqw_mode && !preferences.cli.no_aether_aqw_filterless_direct_render;
+    ruffle_core::aether_performance::set_filterless_hot_cache_bypass_enabled(
+        filterless_direct_render,
+    );
+    if filterless_direct_render {
         tracing::info!(
             "AQW adaptive direct rendering for repeatedly invalidated filterless caches is enabled"
+        );
+    } else if aqw_mode {
+        tracing::warn!(
+            "AQW adaptive direct rendering is DISABLED by --no-filterless-direct-render (bisect run)"
+        );
+    }
+
+    if preferences.cli.aether_trace_panel_churn {
+        ruffle_core::aether_diagnostics::set_panel_churn_enabled(true);
+        tracing::warn!(
+            "Timeline jumps and visibility flips are being traced by --trace-panel-churn (bisect run)"
+        );
+    }
+
+    let bitmap_cache = !preferences.cli.no_aether_bitmap_cache;
+    ruffle_core::aether_performance::set_bitmap_cache_enabled(bitmap_cache);
+    if !bitmap_cache {
+        tracing::warn!(
+            "cacheAsBitmap is DISABLED by --no-bitmap-cache (bisect run); everything redraws from vectors every frame"
+        );
+    }
+
+    let cache_viewport_clip = !preferences.cli.no_aether_aqw_cache_viewport_clip;
+    ruffle_core::aether_performance::set_cache_viewport_clip_enabled(cache_viewport_clip);
+    if !cache_viewport_clip {
+        tracing::warn!(
+            "Viewport clipping of oversized caches is DISABLED by --no-cache-viewport-clip (bisect run); expect much more offscreen drawing"
         );
     }
 
@@ -488,7 +506,6 @@ fn main() -> Result<(), Error> {
     {
         ruffle_core::aether_diagnostics::shutdown_input_trace();
         ruffle_core::aether_diagnostics::shutdown_timeline_trace();
-        ruffle_core::aether_diagnostics::set_frame_construction_retry_enabled(false);
 
         // The census used to print only on a fault, which made the pool's own reuse figures
         // reachable only by crashing -- so a session that survived taught us nothing. Emit it at

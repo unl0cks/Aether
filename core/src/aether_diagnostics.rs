@@ -46,7 +46,6 @@ static CACHE_OFFENDER_ENABLED: AtomicBool = AtomicBool::new(false);
 static ENTER_FRAME_HANDLER_ATTRIBUTION_ENABLED: AtomicBool = AtomicBool::new(false);
 static INPUT_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
 static TIMELINE_TRACE_ENABLED: AtomicBool = AtomicBool::new(false);
-static FRAME_CONSTRUCTION_RETRY_ENABLED: AtomicBool = AtomicBool::new(false);
 static MOVEMENT_STOP_GUARD_ENABLED: AtomicBool = AtomicBool::new(false);
 static RENDER_FRAME_ID: AtomicU64 = AtomicU64::new(0);
 
@@ -494,16 +493,6 @@ pub fn construction_snapshot(clip: MovieClip<'_>) -> ConstructionSnapshot {
     }
 
     snapshot
-}
-
-#[inline]
-pub fn set_frame_construction_retry_enabled(enabled: bool) {
-    FRAME_CONSTRUCTION_RETRY_ENABLED.store(enabled, Ordering::Relaxed);
-}
-
-#[inline]
-pub fn frame_construction_retry_enabled() -> bool {
-    FRAME_CONSTRUCTION_RETRY_ENABLED.load(Ordering::Relaxed)
 }
 
 #[inline]
@@ -1268,6 +1257,117 @@ pub fn shutdown_timeline_trace() {
 #[inline]
 pub fn timeline_trace_enabled() -> bool {
     TIMELINE_TRACE_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Every timeline jump and every visibility flip, with the object's path.
+///
+/// For faults that are visible on screen and silent in the log. The world map flicker is a panel
+/// appearing and disappearing at frame rate with no error of any kind, and after the AQW paths and
+/// the bitmap cache were both eliminated there was nothing left to read but what the display list is
+/// actually being told to do. Whatever oscillates shows up here as an obvious repeating pair.
+///
+/// Budgeted rather than rate limited: a flood truncated in the middle of a cycle is useless, so this
+/// records the FIRST `PANEL_CHURN_BUDGET` events and then stops for good. That is enough to cover a
+/// reproduction that takes under a minute, and it cannot fill a disk if one takes longer.
+static PANEL_CHURN_ENABLED: AtomicBool = AtomicBool::new(false);
+static PANEL_CHURN_REMAINING: AtomicU64 = AtomicU64::new(0);
+const PANEL_CHURN_BUDGET: u64 = 40_000;
+
+pub fn set_panel_churn_enabled(enabled: bool) {
+    PANEL_CHURN_ENABLED.store(enabled, Ordering::Relaxed);
+    PANEL_CHURN_REMAINING.store(
+        if enabled { PANEL_CHURN_BUDGET } else { 0 },
+        Ordering::Relaxed,
+    );
+}
+
+#[inline]
+pub fn panel_churn_enabled() -> bool {
+    PANEL_CHURN_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Claim one event from the budget. False once it is spent, which also stops path construction.
+fn claim_panel_churn_budget() -> bool {
+    PANEL_CHURN_REMAINING
+        .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |remaining| {
+            remaining.checked_sub(1).filter(|_| remaining > 0)
+        })
+        .is_ok()
+}
+
+/// Identify an object well enough to tell two of them apart.
+///
+/// NOT `DisplayObject::path()`. That walks `avm1_parent()`, which is `None` for AVM2 content, so it
+/// degrades to `_level{depth}` for every object in an AS3 movie. Five different objects that happen
+/// to share a depth then log as five identical lines, which is exactly how the first attempt at this
+/// probe wasted a run. `build_display_path` walks real `parent()` links and uses instance names, and
+/// the pointer makes identity unambiguous even when two objects have the same path.
+fn panel_churn_identity(object: DisplayObject<'_>) -> String {
+    let class = object
+        .object2()
+        .map(|avm2_object| {
+            avm2_object
+                .instance_class()
+                .name()
+                .local_name()
+                .to_utf8_lossy()
+                .into_owned()
+        })
+        .unwrap_or_default();
+    format!(
+        "#{:x} {} [{}]",
+        object.as_ptr() as usize,
+        build_display_path(object),
+        class,
+    )
+}
+
+pub fn record_panel_goto(clip: MovieClip<'_>, from: u16, to: u16, stop: bool) {
+    if !panel_churn_enabled() || !claim_panel_churn_budget() {
+        return;
+    }
+
+    tracing::info!(
+        target: "aether::panel_churn",
+        "goto {} {} -> {} ({})",
+        panel_churn_identity(clip.into()),
+        from,
+        to,
+        if stop { "Stop" } else { "Play" },
+    );
+}
+
+/// Display-list membership, the third way an object stops being drawn.
+///
+/// The first run of this probe watched only gotos and visibility and saw well under one event per
+/// frame, which cannot account for a per-frame flicker. `mcPopup.loadMap` does
+/// `mcMap.removeChildAt(0)` followed by `addChild(new Loader())` every time it runs, so add/remove
+/// was the obvious hole.
+pub fn record_panel_child(parent: DisplayObject<'_>, child: DisplayObject<'_>, action: &str) {
+    if !panel_churn_enabled() || !claim_panel_churn_budget() {
+        return;
+    }
+
+    tracing::info!(
+        target: "aether::panel_churn",
+        "{} {} <- {}",
+        action,
+        panel_churn_identity(parent),
+        panel_churn_identity(child),
+    );
+}
+
+pub fn record_panel_visible(object: DisplayObject<'_>, value: bool) {
+    if !panel_churn_enabled() || !claim_panel_churn_budget() {
+        return;
+    }
+
+    tracing::info!(
+        target: "aether::panel_churn",
+        "visible {} = {}",
+        panel_churn_identity(object),
+        value,
+    );
 }
 
 #[expect(clippy::too_many_arguments)]

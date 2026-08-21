@@ -293,6 +293,10 @@ pub trait TDisplayObjectContainer<'gc>:
         index: usize,
     ) {
         let this: DisplayObject<'_> = (*self).into();
+
+        #[cfg(feature = "aether_diagnostics")]
+        crate::aether_diagnostics::record_panel_child(this, child, "add");
+
         let parent_changed = if let Some(old_parent) = child.parent() {
             if !DisplayObject::ptr_eq(old_parent, this) {
                 if let Some(mut old_parent) = old_parent.as_container() {
@@ -347,6 +351,9 @@ pub trait TDisplayObjectContainer<'gc>:
     #[no_dynamic]
     fn remove_child(&mut self, context: &mut UpdateContext<'gc>, child: DisplayObject<'gc>) {
         let this: DisplayObject<'_> = (*self).into();
+
+        #[cfg(feature = "aether_diagnostics")]
+        crate::aether_diagnostics::record_panel_child(this, child, "remove");
 
         // We should always be the parent of this child
         debug_assert!(DisplayObject::ptr_eq(

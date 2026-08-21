@@ -111,13 +111,6 @@ pub struct Opt {
     #[clap(long = "timeline-trace-file", alias = "aether-timeline-trace-file")]
     pub aether_timeline_trace_file: Option<std::path::PathBuf>,
 
-    /// Experimentally retry construction of missing AQW timeline children before a frame script runs.
-    #[clap(
-        long = "frame-construction-retry",
-        alias = "aether-aqw-frame-construction-retry"
-    )]
-    pub aether_aqw_frame_construction_retry: bool,
-
     /// Enable AQW's targeted Settings timeline-child compatibility repair.
     #[clap(
         long = "timeline-child-rebind",
@@ -160,6 +153,35 @@ pub struct Opt {
     /// Resolved launch-mode setting; populated by the AQW preset.
     #[clap(skip)]
     pub aether_aqw_idle_gpu_upload_eviction: bool,
+
+    /// Disable adaptive direct rendering for repeatedly invalidated filterless caches.
+    ///
+    /// Bisect aid for the world map flicker. Both this and `--no-cache-viewport-clip` change what a
+    /// huge, frequently invalidated `cacheAsBitmap` surface draws, and the map is the object both
+    /// were written for. Neither is a fix; they exist to tell one suspect from the other.
+    #[clap(long = "no-filterless-direct-render")]
+    pub no_aether_aqw_filterless_direct_render: bool,
+
+    /// Disable confining a cache several times the viewport to its visible part.
+    ///
+    /// Bisect aid for the world map flicker; see `--no-filterless-direct-render`. Expect offscreen
+    /// drawing to rise sharply with this off, so it is for a diagnostic run and not for playing.
+    #[clap(long = "no-cache-viewport-clip")]
+    pub no_aether_aqw_cache_viewport_clip: bool,
+
+    /// Log every timeline jump and every visibility flip, with the object's path.
+    ///
+    /// For the world map flicker, which is visible on screen and silent in the log. Records the
+    /// first few thousand events and then stops, so a one minute reproduction is fully covered.
+    #[clap(long = "trace-panel-churn")]
+    pub aether_trace_panel_churn: bool,
+
+    /// Ignore `cacheAsBitmap` entirely, drawing every object from its vectors each frame.
+    ///
+    /// The broad half of the world map flicker bisect: it answers "is this the cache subsystem at
+    /// all" in one run. Not an optimization and not for playing; expect it to be much slower.
+    #[clap(long = "no-bitmap-cache")]
+    pub no_aether_bitmap_cache: bool,
 
     /// Disable stale live-entry pruning in AQW's AVM2 broadcast registry.
     #[clap(
@@ -762,7 +784,6 @@ mod aether_cli_tests {
             "--metrics",
             "--input-trace",
             "--timeline-trace",
-            "--frame-construction-retry",
             "--timeline-child-rebind",
             "--adaptive-avatar-cache",
             "--no-idle-gpu-upload-eviction",
@@ -784,7 +805,6 @@ mod aether_cli_tests {
         assert!(opt.aether_metrics);
         assert!(opt.aether_input_trace);
         assert!(opt.aether_timeline_trace);
-        assert!(opt.aether_aqw_frame_construction_retry);
         assert!(opt.aether_aqw_timeline_child_rebind);
         assert!(opt.aether_aqw_adaptive_avatar_cache);
         assert!(opt.no_aether_aqw_idle_gpu_upload_eviction);
@@ -807,7 +827,6 @@ mod aether_cli_tests {
             "--aether-metrics",
             "--aether-input-trace",
             "--aether-timeline-trace",
-            "--aether-aqw-frame-construction-retry",
             "--aether-aqw-adaptive-avatar-cache",
             "--aether-aqw-cache-texture-grid",
             "--no-aether-aqw-mouse-motion-coalescing",
@@ -820,7 +839,6 @@ mod aether_cli_tests {
         assert!(opt.aether_metrics);
         assert!(opt.aether_input_trace);
         assert!(opt.aether_timeline_trace);
-        assert!(opt.aether_aqw_frame_construction_retry);
         assert!(opt.aether_aqw_adaptive_avatar_cache);
         assert!(opt.aether_aqw_cache_texture_grid);
         assert!(opt.no_aether_aqw_mouse_motion_coalescing);

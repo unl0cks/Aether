@@ -325,6 +325,44 @@ fn aether_trait_method_name(method: Method<'_>) -> Option<String> {
 /// the path of every AVM2 call; these classes carry a couple of dozen traits between them and are
 /// touched rarely.
 #[cfg(feature = "aether_compatibility")]
+/// Cheap gate for every AQW method hook in `exec`.
+///
+/// `exec` is the entry point for EVERY AVM2 method call in the VM, and each hook below used to
+/// build its class, receiver and method names as heap Strings before discovering, almost always,
+/// that the call was not its target: up to fifteen allocations per call across the seven hooks,
+/// at hundreds of thousands of calls a second, which priced the whole game and priced fights
+/// worst. Every matcher arm across all seven hooks requires either a bound class in this set or
+/// a published method name ending in one of these names, so rejecting on allocation-free
+/// comparisons here cannot change what any hook matches. Extend BOTH lists when adding a hook.
+#[cfg(feature = "aether_compatibility")]
+fn aether_method_hooks_may_apply(method: Method<'_>) -> bool {
+    if let Some(class) = method.bound_class() {
+        let local = class.name().local_name().as_wstr();
+        if local == b"World"
+            || local == b"playerAuras"
+            || local == b"targetAuras"
+            || local == b"Avatar"
+            || local == b"scGame_1"
+            || local == b"SpellW"
+        {
+            return true;
+        }
+    }
+
+    let published = method.method_name();
+    let published = published.as_ref();
+    !published.is_empty()
+        && (published.ends_with("updateAuraData")
+            || published.ends_with("showAuraChange")
+            || published.ends_with("handleAura")
+            || published.ends_with("countDownAct")
+            || published.ends_with("initAvatar")
+            || published.ends_with("frame6")
+            || published.ends_with("DragStop")
+            || published.ends_with("trackTC"))
+}
+
+#[cfg(feature = "aether_compatibility")]
 fn aether_hook_method_name(method: Method<'_>, bound_class_local_name: Option<&str>) -> String {
     /// Every class an AQW compatibility hook matches a method on.
     const HOOKED_CLASSES: [&str; 5] =
@@ -368,8 +406,14 @@ pub fn exec<'gc>(
 ) -> Result<Value<'gc>, Error<'gc>> {
     let mc = activation.gc();
 
+    // One allocation-free check covers every method hook below; see `aether_method_hooks_may_apply`.
     #[cfg(feature = "aether_compatibility")]
-    let aether_aura_refresh_arguments = {
+    let aether_method_hooks_apply = aether_method_hooks_may_apply(method);
+
+    #[cfg(feature = "aether_compatibility")]
+    let aether_aura_refresh_arguments = if !aether_method_hooks_apply {
+        None
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -391,7 +435,9 @@ pub fn exec<'gc>(
     };
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_aura_insertion_argument = {
+    let aether_aura_insertion_argument = if !aether_method_hooks_apply {
+        None
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -424,7 +470,9 @@ pub fn exec<'gc>(
     }
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_aura_countdown_event = {
+    let aether_aura_countdown_event = if !aether_method_hooks_apply {
+        None
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -466,7 +514,9 @@ pub fn exec<'gc>(
     }
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_equipment_initialization = {
+    let aether_equipment_initialization = if !aether_method_hooks_apply {
+        false
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -487,7 +537,9 @@ pub fn exec<'gc>(
     };
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_spellcraft_drag_timer_setup = {
+    let aether_spellcraft_drag_timer_setup = if !aether_method_hooks_apply {
+        false
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -508,7 +560,9 @@ pub fn exec<'gc>(
     };
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_spellcraft_effect_target = {
+    let aether_spellcraft_effect_target = if !aether_method_hooks_apply {
+        None
+    } else {
         let bound_class = method.bound_class();
         let bound_class_local_name = bound_class.map(|class| {
             class
@@ -541,7 +595,9 @@ pub fn exec<'gc>(
     };
 
     #[cfg(feature = "aether_compatibility")]
-    let aether_valiance_tracking = {
+    let aether_valiance_tracking = if !aether_method_hooks_apply {
+        false
+    } else {
         let bound_class_local_name = method.bound_class().map(|class| {
             class
                 .name()

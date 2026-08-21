@@ -287,6 +287,31 @@ fn aqw_bounded_cache_texture_reuse() -> bool {
     false
 }
 
+/// Whether a cache several times the viewport is confined to its visible part.
+///
+/// On unless a build without `aether_performance` or a bisect run turns it off, since the
+/// unclipped path is what measured 627 megapixels a second on AQW's map layers.
+#[cfg(feature = "aether_performance")]
+fn cache_viewport_clip_enabled() -> bool {
+    crate::aether_performance::cache_viewport_clip_enabled()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn cache_viewport_clip_enabled() -> bool {
+    true
+}
+
+/// Whether `cacheAsBitmap` is honoured at all. Bisect switch; see `aether_performance`.
+#[cfg(feature = "aether_performance")]
+fn bitmap_cache_enabled() -> bool {
+    crate::aether_performance::bitmap_cache_enabled()
+}
+
+#[cfg(not(feature = "aether_performance"))]
+fn bitmap_cache_enabled() -> bool {
+    true
+}
+
 #[cfg(feature = "aether_performance")]
 fn aqw_cache_texture_grid() -> bool {
     crate::aether_performance::cache_texture_grid_enabled()
@@ -1875,42 +1900,48 @@ pub fn render_base<'gc>(
     #[cfg(not(feature = "aether_performance"))]
     let filterless_hot_cache_candidate = false;
 
-    let mut bitmap_cache_direct =
-        if context.use_bitmap_cache && this.is_bitmap_cached() && filterless_hot_cache_candidate {
-            let direct_render_window_active = {
-                let base = this.base();
-                let cache = base.bitmap_cache_mut();
+    let mut bitmap_cache_direct = if context.use_bitmap_cache
+        && bitmap_cache_enabled()
+        && this.is_bitmap_cached()
+        && filterless_hot_cache_candidate
+    {
+        let direct_render_window_active = {
+            let base = this.base();
+            let cache = base.bitmap_cache_mut();
+            cache
+                .as_ref()
+                .is_some_and(BitmapCache::has_filterless_direct_render_frames)
+        };
+
+        if direct_render_window_active {
+            let subtree_safe = !filterless_direct_render_safety_check_needed(
+                context.filterless_direct_subtree_safe,
+                direct_render_window_active,
+            ) || filterless_direct_render_subtree_is_semantically_safe(this);
+
+            let base = this.base();
+            let mut cache = base.bitmap_cache_mut();
+            if subtree_safe {
                 cache
-                    .as_ref()
-                    .is_some_and(BitmapCache::has_filterless_direct_render_frames)
-            };
-
-            if direct_render_window_active {
-                let subtree_safe = !filterless_direct_render_safety_check_needed(
-                    context.filterless_direct_subtree_safe,
-                    direct_render_window_active,
-                ) || filterless_direct_render_subtree_is_semantically_safe(this);
-
-                let base = this.base();
-                let mut cache = base.bitmap_cache_mut();
-                if subtree_safe {
-                    cache
-                        .as_mut()
-                        .is_some_and(BitmapCache::take_filterless_direct_render_frame)
-                } else {
-                    if let Some(cache) = cache.as_mut() {
-                        cache.cancel_filterless_direct_rendering();
-                    }
-                    false
-                }
+                    .as_mut()
+                    .is_some_and(BitmapCache::take_filterless_direct_render_frame)
             } else {
+                if let Some(cache) = cache.as_mut() {
+                    cache.cancel_filterless_direct_rendering();
+                }
                 false
             }
         } else {
             false
-        };
+        }
+    } else {
+        false
+    };
 
-    let cache_info = if context.use_bitmap_cache && this.is_bitmap_cached() && !bitmap_cache_direct
+    let cache_info = if context.use_bitmap_cache
+        && bitmap_cache_enabled()
+        && this.is_bitmap_cached()
+        && !bitmap_cache_direct
     {
         #[cfg(feature = "aether_metrics")]
         crate::aether_metrics::bitmap_cache_check();
@@ -1935,7 +1966,7 @@ pub fn render_base<'gc>(
             // `clip_cache_bounds_to_viewport`; AQW's map layers are several times the viewport and
             // are redrawn in full every frame without this.
             let viewport = context.renderer.viewport_dimensions();
-            let clipped_bounds = (!context.is_offscreen)
+            let clipped_bounds = (!context.is_offscreen && cache_viewport_clip_enabled())
                 .then(|| clip_cache_bounds_to_viewport(bounds, viewport.width, viewport.height))
                 .flatten();
             let viewport_clipped = clipped_bounds.is_some();
@@ -3442,20 +3473,7 @@ pub trait TDisplayObject<'gc>:
     /// during the walk remains scheduled for the next pass.
     #[no_dynamic]
     fn begin_avm2_lifecycle_traversal(self, traversal: Avm2LifecycleTraversal) -> bool {
-        let dirty = self.base().begin_avm2_lifecycle_traversal(traversal);
-
-        // This diagnostics option intentionally retries a full construction
-        // walk when a frame script observes an unconstructed descendant. Keep
-        // that explicit compatibility behavior intact even for a clean
-        // summary; it is off in normal production runs.
-        #[cfg(feature = "aether_diagnostics")]
-        if traversal == Avm2LifecycleTraversal::Construct
-            && crate::aether_diagnostics::frame_construction_retry_enabled()
-        {
-            return true;
-        }
-
-        dirty
+        self.base().begin_avm2_lifecycle_traversal(traversal)
     }
 
     /// Mark this object and every current ancestor as potentially containing
@@ -3692,11 +3710,14 @@ pub trait TDisplayObject<'gc>:
     /// Returned by the `_visible`/`visible` ActionScript properties.
     #[no_dynamic]
     fn set_visible(self, context: &mut UpdateContext<'gc>, value: bool) {
-        if self.base().set_visible(value)
-            && let Some(parent) = self.parent()
-        {
-            // We don't need to invalidate ourselves, we're just toggling if the bitmap is rendered.
-            parent.invalidate_cached_bitmap();
+        if self.base().set_visible(value) {
+            #[cfg(feature = "aether_diagnostics")]
+            crate::aether_diagnostics::record_panel_visible(self.into(), value);
+
+            if let Some(parent) = self.parent() {
+                // We don't need to invalidate ourselves, we're just toggling if the bitmap is rendered.
+                parent.invalidate_cached_bitmap();
+            }
         }
 
         if !value && let Some(int) = self.as_interactive() {

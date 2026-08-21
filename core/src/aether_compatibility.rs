@@ -1076,12 +1076,20 @@ pub fn crafting_frame_construction_applies(clip: MovieClip<'_>) -> bool {
     let Some(object) = clip.object2() else {
         return false;
     };
+    // Byte-compare the local name before anything that allocates. This runs for EVERY frame
+    // script in the game, and the two overlay classes it exists for appear a handful of times a
+    // session; the previous version paid two String conversions per script for that handful.
+    // Same treatment as the mcOption check in `timeline_child_rebind_applies`.
     let class_name = object.instance_class().name();
+    let local = class_name.local_name().as_wstr();
+    if local != b"mcInfoOverlay_233" && local != b"mcInfoOverlay_388" {
+        return false;
+    }
     let class_namespace_uri = class_name
         .namespace()
         .as_uri_opt()
         .map(|uri| uri.to_string());
-    let class_local_name = class_name.local_name().as_wstr().to_string();
+    let class_local_name = local.to_string();
     is_aqw_crafting_frame_target(
         clip.movie().url(),
         class_namespace_uri.as_deref(),
@@ -3049,15 +3057,22 @@ pub fn reposition_aqw_tooltip(context: &mut UpdateContext<'_>) {
 mod tooltip_tests {
     use super::*;
 
+    /// Both tests below touch the same process-global atomic, and the test harness runs tests in
+    /// parallel, so the default-state assertion raced the toggle test's momentary `true`. A flake
+    /// that only appeared when scheduling shifted, which is the worst kind.
+    static TOOLTIP_GLOBAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Off unless asked for. It overrules where the game puts its own tooltips, which is not
     /// something to do to someone who has not asked.
     #[test]
     fn repositioning_is_off_by_default() {
+        let _lock = TOOLTIP_GLOBAL.lock().unwrap();
         assert!(!tooltip_follows_pointer_enabled());
     }
 
     #[test]
     fn repositioning_can_be_turned_on_and_off() {
+        let _lock = TOOLTIP_GLOBAL.lock().unwrap();
         set_tooltip_follows_pointer_enabled(true);
         assert!(tooltip_follows_pointer_enabled());
         set_tooltip_follows_pointer_enabled(false);

@@ -7,6 +7,8 @@ static FILTERLESS_HOT_CACHE_BYPASS: AtomicBool = AtomicBool::new(false);
 static ADAPTIVE_AVATAR_CACHE: AtomicBool = AtomicBool::new(false);
 static CACHE_TEXTURE_GRID: AtomicBool = AtomicBool::new(false);
 static IDLE_GPU_UPLOAD_EVICTION: AtomicBool = AtomicBool::new(false);
+static CACHE_VIEWPORT_CLIP: AtomicBool = AtomicBool::new(true);
+static BITMAP_CACHE: AtomicBool = AtomicBool::new(true);
 
 #[inline]
 pub fn set_avm2_broadcast_fast_path_enabled(enabled: bool) {
@@ -66,6 +68,38 @@ pub fn set_idle_gpu_upload_eviction_enabled(enabled: bool) {
 #[inline]
 pub fn idle_gpu_upload_eviction_enabled() -> bool {
     IDLE_GPU_UPLOAD_EVICTION.load(Ordering::Relaxed)
+}
+
+/// Confine a cache that is several times the viewport to the part of it that can be seen.
+///
+/// Defaults on, because leaving it off costs 627 megapixels a second of offscreen drawing on AQW's
+/// map layers. It exists as a switch only so that the world map flicker can be bisected: both this
+/// and [`filterless_hot_cache_bypass_enabled`] change what a huge, frequently invalidated cache
+/// draws, and the map is the object both were written for.
+#[inline]
+pub fn set_cache_viewport_clip_enabled(enabled: bool) {
+    CACHE_VIEWPORT_CLIP.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn cache_viewport_clip_enabled() -> bool {
+    CACHE_VIEWPORT_CLIP.load(Ordering::Relaxed)
+}
+
+/// Honour `cacheAsBitmap` at all.
+///
+/// Defaults on: this is ordinary Flash behaviour, not an Aether optimization, and turning it off
+/// makes the game draw everything from vectors every frame. It is switchable purely as the broad
+/// half of a bisect, to answer "is this the cache subsystem or not" in one run rather than by
+/// eliminating behaviours inside it one at a time.
+#[inline]
+pub fn set_bitmap_cache_enabled(enabled: bool) {
+    BITMAP_CACHE.store(enabled, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn bitmap_cache_enabled() -> bool {
+    BITMAP_CACHE.load(Ordering::Relaxed)
 }
 
 /// Match the exact public AQW avatar class without allocating a qualified class name or parsing

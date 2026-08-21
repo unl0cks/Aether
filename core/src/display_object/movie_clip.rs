@@ -900,6 +900,9 @@ impl<'gc> MovieClip<'gc> {
     /// This is treated as an 'explicit' goto: frame scripts and other frame
     /// lifecycle events will be retriggered.
     pub fn goto_frame(self, context: &mut UpdateContext<'gc>, frame: FrameNumber, stop: bool) {
+        #[cfg(feature = "aether_diagnostics")]
+        crate::aether_diagnostics::record_panel_goto(self, self.current_frame(), frame, stop);
+
         // Stop first, in case we need to kill and restart the stream sound.
         if stop {
             self.stop(context);
@@ -1136,9 +1139,27 @@ impl<'gc> MovieClip<'gc> {
             format!(" class={class}")
         };
 
+        // NOT `path()`: that walks `avm1_parent()`, which is `None` throughout an AS3 movie, so it
+        // degrades to `_level{depth}` and two unrelated objects at the same depth become
+        // indistinguishable. Walk real parents and use instance names instead.
+        let mut segments = Vec::with_capacity(8);
+        let mut object: DisplayObject<'gc> = self.into();
+        for _ in 0..32 {
+            segments.push(
+                object
+                    .name()
+                    .map_or_else(|| format!("#{}", object.depth()), |name| name.to_string()),
+            );
+            match object.parent() {
+                Some(parent) => object = parent,
+                None => break,
+            }
+        }
+        segments.reverse();
+
         format!(
             "{}{class} frame={}{label} playing={}",
-            self.path(),
+            segments.join("/"),
             self.current_frame(),
             self.playing(),
         )
@@ -2536,37 +2557,15 @@ impl<'gc> MovieClip<'gc> {
                     let callable = Avm2Value::from(callable);
 
                     #[cfg(feature = "aether_diagnostics")]
-                    let diagnostics_needed = crate::aether_diagnostics::timeline_trace_enabled()
-                        || crate::aether_diagnostics::frame_construction_retry_enabled();
+                    let timeline_trace = crate::aether_diagnostics::timeline_trace_enabled();
+                    // The deep snapshot walks up to 16,384 descendants and builds path
+                    // descriptors, so it is timeline-trace diagnostics ONLY. The removed
+                    // construction-retry setting once ran it for every frame script, which cost
+                    // the owner ~3 ms a frame; nothing outside timeline tracing may call it on
+                    // this path.
                     #[cfg(feature = "aether_diagnostics")]
-                    let construction_before = diagnostics_needed
+                    let construction_before = timeline_trace
                         .then(|| crate::aether_diagnostics::construction_snapshot(self));
-                    #[cfg(feature = "aether_diagnostics")]
-                    let retry_attempted =
-                        crate::aether_diagnostics::frame_construction_retry_enabled()
-                            && construction_before
-                                .as_ref()
-                                .is_some_and(|snapshot| snapshot.unconstructed_descendants > 0);
-                    #[cfg(feature = "aether_diagnostics")]
-                    let construction_after_retry = if retry_attempted {
-                        self.construct_frame(context);
-                        let after = crate::aether_diagnostics::construction_snapshot(self);
-                        if crate::aether_diagnostics::timeline_trace_enabled() {
-                            crate::aether_diagnostics::record_timeline_event(
-                                "frame_script_construction_retry",
-                                context,
-                                self,
-                                construction_before.clone(),
-                                Some(after.clone()),
-                                None,
-                                None,
-                            );
-                        }
-                        Some(after)
-                    } else {
-                        None
-                    };
-
                     #[cfg(feature = "aether_compatibility")]
                     if crate::aether_compatibility::crafting_frame_construction_applies(self) {
                         let summary =
@@ -2609,31 +2608,20 @@ impl<'gc> MovieClip<'gc> {
                         .avm2_domain();
 
                     let mut activation = Avm2Activation::from_domain(context, domain);
+                    // Gated like `construction_before` above: two clock reads per frame script
+                    // whose result every ordinary session throws away is a tax on the exact path
+                    // that scales with player count. Timed only when a consumer is listening,
+                    // and both consumers are timeline-trace events.
                     #[cfg(feature = "aether_diagnostics")]
-                    let frame_script_started = std::time::Instant::now();
+                    let frame_script_started = timeline_trace.then(std::time::Instant::now);
                     let frame_script_result = callable.call(
                         &mut activation,
                         avm2_object.into(),
                         Avm2FunctionArgs::empty(),
                     );
                     #[cfg(feature = "aether_diagnostics")]
-                    let frame_script_duration = frame_script_started.elapsed();
-
-                    #[cfg(feature = "aether_diagnostics")]
-                    if retry_attempted
-                        && frame_script_result.is_ok()
-                        && crate::aether_diagnostics::timeline_trace_enabled()
-                    {
-                        crate::aether_diagnostics::record_timeline_event(
-                            "frame_script_after_retry_ok",
-                            activation.context,
-                            self,
-                            construction_before.clone(),
-                            construction_after_retry.clone(),
-                            Some(frame_script_duration),
-                            None,
-                        );
-                    }
+                    let frame_script_duration =
+                        frame_script_started.map(|started| started.elapsed());
 
                     if let Err(e) = frame_script_result {
                         #[cfg(feature = "aether_diagnostics")]
@@ -2643,18 +2631,20 @@ impl<'gc> MovieClip<'gc> {
                                 activation.context,
                                 self,
                                 construction_before,
-                                construction_after_retry.or_else(|| {
-                                    Some(crate::aether_diagnostics::construction_snapshot(self))
-                                }),
-                                Some(frame_script_duration),
+                                Some(crate::aether_diagnostics::construction_snapshot(self)),
+                                frame_script_duration,
                                 Some(format!("{e:?}")),
                             );
                         }
-                        let where_ = format!(
-                            "Error running AVM2 frame script [{}]",
-                            self.frame_script_error_context()
+                        // Lazy: erroring content can throw here every frame, and the identifying
+                        // string must cost nothing on the thousands of lines the budget swallows.
+                        Avm2::uncaught_error_with_detail(
+                            &mut activation,
+                            Some(self.into()),
+                            e,
+                            "Error running AVM2 frame script",
+                            || Some(self.frame_script_error_context()),
                         );
-                        Avm2::uncaught_error(&mut activation, Some(self.into()), e, &where_);
                     }
 
                     self.0
@@ -4646,7 +4636,28 @@ impl<'gc, 'a> MovieClip<'gc> {
                                 graphic.set_avm2_class(activation.gc(), class_object)
                             }
                             Some(Character::MovieClip(mc)) => {
-                                mc.set_avm2_class(activation.gc(), Some(class_object))
+                                mc.set_avm2_class(activation.gc(), Some(class_object));
+
+                                // Aether's movie dedupe breaks an assumption this match was
+                                // written under: that a movie is parsed once, so the id the
+                                // document class rides on (0, which no DefineSprite can claim)
+                                // never resolves to a character. The first load's `None` arm
+                                // below registers the root as character 0 in the movie's
+                                // library, and that library is shared by every later load of
+                                // the same URL. A RE-loaded root therefore lands here instead,
+                                // the class lands on the library's clone, and the root itself
+                                // is left classless: constructor never runs, addFrameScript
+                                // never registers, its `stop()` never fires, and the clip
+                                // plays its timeline in a loop forever. That loop was the
+                                // world map flicker.
+                                if id == 0 && self.avm2_class().is_none() {
+                                    self.set_avm2_class(activation.gc(), Some(class_object));
+                                    tracing::info!(
+                                        "Document class {} re-applied to re-loaded root of {}",
+                                        class_object.inner_class_definition().name().local_name(),
+                                        self.movie().url(),
+                                    );
+                                }
                             }
                             Some(Character::Avm2Button(btn)) => {
                                 btn.set_avm2_class(activation.gc(), class_object)

@@ -253,6 +253,11 @@ struct UncaughtErrorLogBudget {
     remaining: u8,
     suppression_reported: bool,
     frames_until_refill: u16,
+    /// Errors swallowed by `Suppress` since the session began. Printed with every suppression
+    /// notice, because the notice alone hides the one number that matters: 58 notices in a session
+    /// could mean 58 silent errors or 58 thousand, and which one it is decides whether an error
+    /// storm is worth chasing as a performance problem.
+    suppressed_total: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -268,6 +273,7 @@ impl UncaughtErrorLogBudget {
             remaining: UNCAUGHT_ERROR_LOG_CAPACITY,
             suppression_reported: false,
             frames_until_refill: UNCAUGHT_ERROR_LOG_REFILL_FRAMES,
+            suppressed_total: 0,
         }
     }
 
@@ -292,8 +298,10 @@ impl UncaughtErrorLogBudget {
             UncaughtErrorLogAction::LogError
         } else if !self.suppression_reported {
             self.suppression_reported = true;
+            self.suppressed_total += 1;
             UncaughtErrorLogAction::ReportSuppression
         } else {
+            self.suppressed_total += 1;
             UncaughtErrorLogAction::Suppress
         }
     }
@@ -850,19 +858,48 @@ impl<'gc> Avm2<'gc> {
     #[inline(never)]
     pub fn uncaught_error(
         activation: &mut Activation<'_, 'gc>,
+        display_object: Option<DisplayObject<'gc>>,
+        error: Error<'gc>,
+        extra_info: &str,
+    ) {
+        Self::uncaught_error_with_detail(activation, display_object, error, extra_info, || None)
+    }
+
+    /// [`Self::uncaught_error`], with extra identifying detail that is only worth paying for on
+    /// the lines that actually reach the log.
+    ///
+    /// The budget decides FIRST and the closure runs only for `LogError`. The whole point of the
+    /// budget is that broken content erroring every frame costs a counter check, not work: 0.6.34
+    /// built its frame-script context string before this call, which billed every suppressed error
+    /// for allocations whose output was then thrown away.
+    #[cold]
+    #[inline(never)]
+    pub fn uncaught_error_with_detail(
+        activation: &mut Activation<'_, 'gc>,
         _display_object: Option<DisplayObject<'gc>>,
         error: Error<'gc>,
         extra_info: &str,
+        detail: impl FnOnce() -> Option<String>,
     ) {
         match activation.context.avm2.uncaught_error_log_budget.take() {
             UncaughtErrorLogAction::LogError => {
                 // This will print the properly formatted error.
                 let stringified = error.to_string(activation);
-                tracing::error!("{}: {}", extra_info, stringified);
+                match detail() {
+                    Some(detail) => {
+                        tracing::error!("{} [{}]: {}", extra_info, detail, stringified)
+                    }
+                    None => tracing::error!("{}: {}", extra_info, stringified),
+                }
             }
             UncaughtErrorLogAction::ReportSuppression => {
                 tracing::warn!(
-                    "Additional uncaught AVM2 errors are suppressed until the logging budget refills"
+                    "Additional uncaught AVM2 errors are suppressed until the logging budget refills ({} suppressed so far this session)",
+                    activation
+                        .context
+                        .avm2
+                        .uncaught_error_log_budget
+                        .suppressed_total,
                 );
             }
             UncaughtErrorLogAction::Suppress => {}
