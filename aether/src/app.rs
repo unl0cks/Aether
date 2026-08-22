@@ -33,6 +33,13 @@ struct MainWindow {
     player: PlayerController,
     minimized: bool,
     mouse_pos: PhysicalPosition<f64>,
+    /// Whether a left press was delivered to the movie and its release is still owed.
+    ///
+    /// While set, pointer events reach the movie even when egui reports them consumed,
+    /// because egui claims any event whose cursor is merely over one of its areas. AQW
+    /// stops a panel drag on the `MOUSE_UP` the panel receives, so a release lost to the
+    /// menu bar left the world map glued to the cursor.
+    movie_holds_pointer: bool,
     mouse_motion: MouseMotionCoalescer<PhysicalPosition<f64>>,
     modifiers: Modifiers,
     min_window_size: LogicalSize<u32>,
@@ -153,7 +160,22 @@ impl MainWindow {
             self.flush_pending_mouse_move(Instant::now(), true);
         }
 
-        if self.gui.handle_event(&event) {
+        let gui_consumed = self.gui.handle_event(&event);
+
+        // A drag that starts in the movie must not lose its release to the menu bar. egui
+        // reports pointer events as consumed whenever the cursor is merely over one of its
+        // areas, and AQW's draggable panels -- the world map above all -- stop on the
+        // MOUSE_UP *they* receive: a release swallowed up there leaves the panel glued to
+        // the cursor until some later click delivers a fresh press-and-release. So once a
+        // left press has been delivered to the movie, pointer events belong to it until the
+        // matching release, exactly like OS pointer capture. egui still sees every event
+        // above; a release without a press on its own widgets does nothing there.
+        let movie_captured_pointer = self.movie_holds_pointer
+            && matches!(
+                event,
+                WindowEvent::CursorMoved { .. } | WindowEvent::MouseInput { .. }
+            );
+        if gui_consumed && !movie_captured_pointer {
             #[cfg(feature = "metrics")]
             if is_cursor_moved {
                 self.metrics.record_host_mouse_gui_consumed();
@@ -221,9 +243,17 @@ impl MainWindow {
                 self.player.handle_event(PlayerEvent::FocusGained);
             }
             WindowEvent::Focused(false) => {
+                // A release delivered to another window will never reach us, so the
+                // capture must not outlive the focus.
+                self.movie_holds_pointer = false;
                 self.player.handle_event(PlayerEvent::FocusLost);
             }
             WindowEvent::MouseInput { button, state, .. } => {
+                // Tracked before any early return, so a release always ends the capture.
+                if button == winit::event::MouseButton::Left {
+                    self.movie_holds_pointer = state == ElementState::Pressed;
+                }
+
                 if self.gui.is_context_menu_visible() {
                     return;
                 }
@@ -806,6 +836,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 loaded,
                 minimized: false,
                 mouse_pos: PhysicalPosition::new(0.0, 0.0),
+                movie_holds_pointer: false,
                 mouse_motion: MouseMotionCoalescer::new(mouse_motion_enabled),
                 modifiers: Modifiers::default(),
                 time: Instant::now(),
