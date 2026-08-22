@@ -265,6 +265,151 @@ impl AetherExplicitFlags {
 /// Every default here has to match what `aether_preset::apply` chooses, so that a fresh install
 /// with no saved preferences behaves exactly as it did before the options window existed. The
 /// tests below hold the two in step.
+/// The key that flips AQW's own FPS counter, or nothing.
+///
+/// Captured the same way as the options-window hotkey and stored just as readably ("F3",
+/// "Ctrl+F"); "off" binds nothing. The game's Advanced options row toggles the counter with a
+/// mouse click and its keybind menu offers nothing for it, so the binding lives here.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FpsHotkey(pub Option<OptionsHotkey>);
+
+impl fmt::Display for FpsHotkey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.0 {
+            Some(binding) => binding.fmt(formatter),
+            None => formatter.write_str("off"),
+        }
+    }
+}
+
+impl std::str::FromStr for FpsHotkey {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        if text.eq_ignore_ascii_case("off") {
+            return Ok(FpsHotkey(None));
+        }
+        // The first release of this setting saved bare lowercase key names ("f3"). Key names are
+        // case-sensitive to `parse`, so try the file's spelling first and an uppercased one
+        // second, rather than silently unbinding everyone who set the key that week.
+        OptionsHotkey::parse(text)
+            .or_else(|| OptionsHotkey::parse(&text.to_ascii_uppercase()))
+            .map(|binding| FpsHotkey(Some(binding)))
+            .ok_or_else(|| format!("expected off or a key binding such as F3, got {text}"))
+    }
+}
+
+/// Where AQW's FPS counter sits along the top of the stage.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FpsPosition {
+    #[default]
+    TopCenter,
+    TopLeft,
+    TopRight,
+}
+
+impl FpsPosition {
+    pub const ALL: [FpsPosition; 3] = [
+        FpsPosition::TopCenter,
+        FpsPosition::TopLeft,
+        FpsPosition::TopRight,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FpsPosition::TopCenter => "Top center",
+            FpsPosition::TopLeft => "Top left",
+            FpsPosition::TopRight => "Top right",
+        }
+    }
+
+    pub fn anchor(self) -> ruffle_core::aether_compatibility::FpsCounterAnchor {
+        use ruffle_core::aether_compatibility::FpsCounterAnchor;
+        match self {
+            FpsPosition::TopCenter => FpsCounterAnchor::Center,
+            FpsPosition::TopLeft => FpsCounterAnchor::Left,
+            FpsPosition::TopRight => FpsCounterAnchor::Right,
+        }
+    }
+}
+
+impl fmt::Display for FpsPosition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            FpsPosition::TopCenter => "top-center",
+            FpsPosition::TopLeft => "top-left",
+            FpsPosition::TopRight => "top-right",
+        })
+    }
+}
+
+impl std::str::FromStr for FpsPosition {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "top-center" => Ok(FpsPosition::TopCenter),
+            "top-left" => Ok(FpsPosition::TopLeft),
+            "top-right" => Ok(FpsPosition::TopRight),
+            other => Err(format!(
+                "expected top-center, top-left or top-right, got {other}"
+            )),
+        }
+    }
+}
+
+/// How large AQW's FPS counter draws.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum FpsSize {
+    Small,
+    #[default]
+    Default,
+    Big,
+}
+
+impl FpsSize {
+    pub const ALL: [FpsSize; 3] = [FpsSize::Small, FpsSize::Default, FpsSize::Big];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            FpsSize::Small => "Small",
+            FpsSize::Default => "Default",
+            FpsSize::Big => "Big",
+        }
+    }
+
+    pub fn scale(self) -> f64 {
+        match self {
+            FpsSize::Small => 0.75,
+            FpsSize::Default => 1.0,
+            FpsSize::Big => 1.5,
+        }
+    }
+}
+
+impl fmt::Display for FpsSize {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            FpsSize::Small => "small",
+            FpsSize::Default => "default",
+            FpsSize::Big => "big",
+        })
+    }
+}
+
+impl std::str::FromStr for FpsSize {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        match text {
+            "small" => Ok(FpsSize::Small),
+            "default" => Ok(FpsSize::Default),
+            "big" => Ok(FpsSize::Big),
+            other => Err(format!("expected small, default or big, got {other}")),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AetherSettings {
     pub number_separators: bool,
@@ -306,6 +451,10 @@ pub struct AetherSettings {
 
     pub quality: StageQuality,
     pub focus_aura_colour: FocusAuraColour,
+    /// The key that flips AQW's own FPS counter. Unbound by default.
+    pub fps_counter_hotkey: FpsHotkey,
+    pub fps_counter_position: FpsPosition,
+    pub fps_counter_size: FpsSize,
     pub bitmap_cache_sweep: BitmapCacheSweep,
     pub ui_font: UiFont,
 
@@ -366,6 +515,11 @@ impl Default for AetherSettings {
             // These three mirror what the AQW preset picks, same as the toggles above.
             quality: StageQuality::High,
             focus_aura_colour: FocusAuraColour::Red,
+            // Unbound: a key that suddenly does something is a surprise, and the binding is one
+            // click away for anyone who wants it.
+            fps_counter_hotkey: FpsHotkey(None),
+            fps_counter_position: FpsPosition::TopCenter,
+            fps_counter_size: FpsSize::Default,
             bitmap_cache_sweep: BitmapCacheSweep::Balanced,
             ui_font: UiFont::Default,
             msaa_samples: None,
@@ -437,6 +591,9 @@ pub struct ResolvedAetherSettings {
     pub prerelease_updates: ResolvedSetting,
     pub quality: Resolved<StageQuality>,
     pub focus_aura_colour: Resolved<FocusAuraColour>,
+    pub fps_counter_hotkey: Resolved<FpsHotkey>,
+    pub fps_counter_position: Resolved<FpsPosition>,
+    pub fps_counter_size: Resolved<FpsSize>,
     pub bitmap_cache_sweep: Resolved<BitmapCacheSweep>,
     pub ui_font: Resolved<UiFont>,
     pub msaa_samples: Resolved<Option<u8>>,
@@ -526,6 +683,10 @@ impl ResolvedAetherSettings {
                 explicit.focus_aura_colour,
                 saved.focus_aura_colour,
             ),
+            // Menu-only: there is no command line flag to pin any of the three.
+            fps_counter_hotkey: Resolved::resolve(None, saved.fps_counter_hotkey),
+            fps_counter_position: Resolved::resolve(None, saved.fps_counter_position),
+            fps_counter_size: Resolved::resolve(None, saved.fps_counter_size),
             bitmap_cache_sweep: Resolved::resolve(
                 explicit.bitmap_cache_sweep,
                 saved.bitmap_cache_sweep,
@@ -630,6 +791,15 @@ pub fn apply_live_settings(
     // frame rate are read while the renderer and the player are built, and cannot.
     if let Some(player) = player {
         player.set_quality(settings.quality.value);
+        // The FPS counter's placement and scale live on the game's own clip, so a change made in
+        // the menu is pushed to the clip now rather than waiting for the next hotkey press.
+        if aqw_mode {
+            let anchor = settings.fps_counter_position.value.anchor();
+            let scale = settings.fps_counter_size.value.scale();
+            player.update(|context| {
+                ruffle_core::aether_compatibility::style_aqw_fps_display(context, anchor, scale);
+            });
+        }
         // The font family and scope above are read fresh as each field lays itself out, so text
         // drawn after this already shows the choice. Text already on screen -- a name that never
         // changes, a button that only redraws when its counter ticks -- has to be pushed, so lay it

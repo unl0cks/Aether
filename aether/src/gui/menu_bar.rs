@@ -67,6 +67,24 @@ impl MenuBar {
             dialogs.toggle_aether_options();
         }
 
+        // The AQW FPS-counter hotkey, bound in Aether Options -> Gameplay. Read fresh per frame
+        // like the options hotkey, so a rebind applies the moment it is saved.
+        let aether = self.preferences.aether();
+        if let Some(binding) = aether.fps_counter_hotkey.value.0
+            && egui_ctx.input_mut(|input| input.consume_shortcut(&binding.shortcut()))
+            && let Some(player) = &mut player
+        {
+            let anchor = aether.fps_counter_position.value.anchor();
+            let scale = aether.fps_counter_size.value.scale();
+            player.update(|context| {
+                if ruffle_core::aether_compatibility::toggle_aqw_fps_display(context) {
+                    ruffle_core::aether_compatibility::style_aqw_fps_display(
+                        context, anchor, scale,
+                    );
+                }
+            });
+        }
+
         // TODO(mike): Make some MenuItem struct with shortcut info to handle this more cleanly.
         if egui_ctx.input_mut(|input| input.consume_shortcut(&Self::SHORTCUT_OPEN_ADVANCED)) {
             dialogs.open_file_advanced();

@@ -91,6 +91,9 @@ pub struct AetherOptionsDialog {
     /// would.
     rebinding: bool,
 
+    /// As `rebinding`, but the key becomes the FPS-counter hotkey.
+    fps_rebinding: bool,
+
     tab: OptionsTab,
 
     /// What the renderer and player were actually built with, taken from process start rather
@@ -128,6 +131,7 @@ impl AetherOptionsDialog {
             settings,
             applied_at_open: preferences.aether_at_startup(),
             rebinding: false,
+            fps_rebinding: false,
             tab: OptionsTab::Gameplay,
             aqw_mode: preferences.aqw_mode(),
             update_check: UpdateCheck::Idle,
@@ -136,7 +140,7 @@ impl AetherOptionsDialog {
     }
 
     pub fn is_rebinding(&self) -> bool {
-        self.rebinding
+        self.rebinding || self.fps_rebinding
     }
 
     pub fn show(
@@ -150,7 +154,7 @@ impl AetherOptionsDialog {
         // Deferred out of the closure: the player borrow cannot cross into the window body.
         let mut saving = false;
 
-        if self.rebinding {
+        if self.rebinding || self.fps_rebinding {
             self.capture_rebind(egui_ctx);
         }
         self.poll_update_check();
@@ -228,6 +232,56 @@ impl AetherOptionsDialog {
 
     /// What the game does, as opposed to how it looks or how fast it runs.
     fn show_gameplay_tab(&mut self, ui: &mut Ui) {
+        ui.label("Performance display");
+        ui.horizontal(|ui| {
+            ui.label("Show FPS hotkey");
+            let label = if self.fps_rebinding {
+                "Press a key...".to_owned()
+            } else {
+                match self.settings.fps_counter_hotkey.0 {
+                    Some(binding) => binding.to_string(),
+                    None => "Unbound".to_owned(),
+                }
+            };
+            if Button::new(label).ui(ui).clicked() {
+                self.fps_rebinding = true;
+                self.rebinding = false;
+            }
+            if self.settings.fps_counter_hotkey.0.is_some() && Button::new("Clear").ui(ui).clicked()
+            {
+                self.settings.fps_counter_hotkey = crate::aether_settings::FpsHotkey(None);
+                self.fps_rebinding = false;
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Position");
+            ComboBox::from_id_salt("aether-fps-position")
+                .selected_text(self.settings.fps_counter_position.label())
+                .show_ui(ui, |ui| {
+                    for choice in crate::aether_settings::FpsPosition::ALL {
+                        ui.selectable_value(
+                            &mut self.settings.fps_counter_position,
+                            choice,
+                            choice.label(),
+                        );
+                    }
+                });
+            ui.label("Size");
+            ComboBox::from_id_salt("aether-fps-size")
+                .selected_text(self.settings.fps_counter_size.label())
+                .show_ui(ui, |ui| {
+                    for choice in crate::aether_settings::FpsSize::ALL {
+                        ui.selectable_value(
+                            &mut self.settings.fps_counter_size,
+                            choice,
+                            choice.label(),
+                        );
+                    }
+                });
+        });
+        ui.small("Flips the same FPS counter as the game's Advanced options row, which has no keybind of its own. Position and size apply on save, and Escape cancels a rebind.");
+        ui.separator();
+
         ui.label("Numbers");
         toggle(
             ui,
@@ -442,6 +496,7 @@ impl AetherOptionsDialog {
             };
             if Button::new(label).ui(ui).clicked() {
                 self.rebinding = true;
+                self.fps_rebinding = false;
             }
             if self.hotkey != OptionsHotkey::default() && Button::new("Reset").ui(ui).clicked() {
                 self.hotkey = OptionsHotkey::default();
@@ -809,11 +864,12 @@ impl AetherOptionsDialog {
         {
             if key == Key::Escape {
                 self.rebinding = false;
+                self.fps_rebinding = false;
             }
             return;
         }
 
-        self.hotkey = OptionsHotkey {
+        let binding = OptionsHotkey {
             modifiers: Modifiers {
                 command: modifiers.command || modifiers.ctrl,
                 alt: modifiers.alt,
@@ -822,7 +878,13 @@ impl AetherOptionsDialog {
             },
             key,
         };
-        self.rebinding = false;
+        if self.fps_rebinding {
+            self.settings.fps_counter_hotkey = crate::aether_settings::FpsHotkey(Some(binding));
+            self.fps_rebinding = false;
+        } else {
+            self.hotkey = binding;
+            self.rebinding = false;
+        }
     }
 
     /// Whether anything changed that the running renderer or player cannot pick up.

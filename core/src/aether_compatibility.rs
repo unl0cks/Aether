@@ -700,6 +700,136 @@ fn report_focus_icon_shape<'gc>(
     );
 }
 
+/// Flip AQW's own FPS counter, exactly as the game's options row does.
+///
+/// `optionHandler.as` ("Display FPS") and `World.toggleFPS()` both just flip
+/// `rootClass.ui.mcFPS.visible`; the counter's arithmetic runs either way. Calling the game's own
+/// public `World.toggleFPS()` keeps the hotkey behaviourally identical to the menu row. Quietly a
+/// no-op outside AQW, and before the world exists (login, server select, loading).
+pub fn toggle_aqw_fps_display(context: &mut UpdateContext<'_>) -> bool {
+    let Some(root) = context.stage.iter_render_list().next() else {
+        return false;
+    };
+    if !is_aqw_game_movie(root.movie().url()) {
+        return false;
+    }
+    let Some(root_object) = root.object2() else {
+        return false;
+    };
+
+    let mut activation = Avm2Activation::from_nothing(context);
+    let toggled = (|| -> Result<bool, crate::avm2::Error<'_>> {
+        let world = Avm2Value::from(root_object).get_public_property(
+            AvmString::new_utf8(activation.gc(), "world"),
+            &mut activation,
+        )?;
+        if matches!(world, Avm2Value::Null | Avm2Value::Undefined) {
+            return Ok(false);
+        }
+        world.call_public_property(
+            AvmString::new_utf8(activation.gc(), "toggleFPS"),
+            Avm2FunctionArgs::empty(),
+            &mut activation,
+        )?;
+        Ok(true)
+    })();
+
+    match toggled {
+        Ok(toggled) => toggled,
+        Err(error) => {
+            tracing::warn!(?error, "AQW FPS toggle failed");
+            false
+        }
+    }
+}
+
+/// Where the FPS counter is pinned along the top of AQW's 960-unit-wide stage.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum FpsCounterAnchor {
+    Left,
+    Center,
+    Right,
+}
+
+/// Place and scale AQW's own FPS counter.
+///
+/// The clip is the game's `ui.mcFPS`; scaling and moving it are ordinary display-object property
+/// writes, the same ones its own scripts could make. Width is read back AFTER scaling so the
+/// anchor maths uses the size that will actually draw. Coordinates are in AQW's fixed 960x550
+/// design space, which the stage scale mode maps to the window. Quietly a no-op outside AQW and
+/// before the UI exists.
+pub fn style_aqw_fps_display(
+    context: &mut UpdateContext<'_>,
+    anchor: FpsCounterAnchor,
+    scale: f64,
+) -> bool {
+    const STAGE_WIDTH: f64 = 960.0;
+    const EDGE_MARGIN: f64 = 8.0;
+
+    let Some(root) = context.stage.iter_render_list().next() else {
+        return false;
+    };
+    if !is_aqw_game_movie(root.movie().url()) {
+        return false;
+    }
+    let Some(root_object) = root.object2() else {
+        return false;
+    };
+
+    let mut activation = Avm2Activation::from_nothing(context);
+    let styled = (|| -> Result<bool, crate::avm2::Error<'_>> {
+        let ui = Avm2Value::from(root_object)
+            .get_public_property(AvmString::new_utf8(activation.gc(), "ui"), &mut activation)?;
+        if matches!(ui, Avm2Value::Null | Avm2Value::Undefined) {
+            return Ok(false);
+        }
+        let fps = ui.get_public_property(
+            AvmString::new_utf8(activation.gc(), "mcFPS"),
+            &mut activation,
+        )?;
+        if matches!(fps, Avm2Value::Null | Avm2Value::Undefined) {
+            return Ok(false);
+        }
+
+        fps.set_public_property(
+            AvmString::new_utf8(activation.gc(), "scaleX"),
+            Avm2Value::Number(scale),
+            &mut activation,
+        )?;
+        fps.set_public_property(
+            AvmString::new_utf8(activation.gc(), "scaleY"),
+            Avm2Value::Number(scale),
+            &mut activation,
+        )?;
+
+        let width = fps
+            .get_public_property(
+                AvmString::new_utf8(activation.gc(), "width"),
+                &mut activation,
+            )?
+            .coerce_to_number(&mut activation)?;
+        let x = match anchor {
+            FpsCounterAnchor::Left => EDGE_MARGIN,
+            FpsCounterAnchor::Center => (STAGE_WIDTH - width) / 2.0,
+            FpsCounterAnchor::Right => STAGE_WIDTH - width - EDGE_MARGIN,
+        };
+        fps.set_public_property(
+            AvmString::new_utf8(activation.gc(), "x"),
+            Avm2Value::Number(x),
+            &mut activation,
+        )?;
+        Ok(true)
+    })();
+
+    match styled {
+        Ok(styled) => styled,
+        Err(error) => {
+            tracing::warn!(?error, "AQW FPS counter styling failed");
+            false
+        }
+    }
+}
+
 /// A colour the Focus aura icon can be marked with.
 ///
 /// Multiply-only, because that is what a colour transform on existing artwork can do without

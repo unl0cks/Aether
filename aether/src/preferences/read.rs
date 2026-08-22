@@ -164,6 +164,15 @@ pub fn read_preferences(input: &str) -> ParseDetails<SavedGlobalPreferences> {
         if let Some(value) = aether.parse_from_str(cx, "focus_aura_colour") {
             settings.focus_aura_colour = value;
         }
+        if let Some(value) = aether.parse_from_str(cx, "fps_counter_hotkey") {
+            settings.fps_counter_hotkey = value;
+        }
+        if let Some(value) = aether.parse_from_str(cx, "fps_counter_position") {
+            settings.fps_counter_position = value;
+        }
+        if let Some(value) = aether.parse_from_str(cx, "fps_counter_size") {
+            settings.fps_counter_size = value;
+        }
         if let Some(value) = aether.parse_from_str(cx, "bitmap_cache_sweep") {
             settings.bitmap_cache_sweep = value;
         }

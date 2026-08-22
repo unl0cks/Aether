@@ -194,6 +194,9 @@ impl<'a> PreferencesWriter<'a> {
             }
             table["quality"] = value(settings.quality.to_string());
             table["focus_aura_colour"] = value(settings.focus_aura_colour.to_string());
+            table["fps_counter_hotkey"] = value(settings.fps_counter_hotkey.to_string());
+            table["fps_counter_position"] = value(settings.fps_counter_position.to_string());
+            table["fps_counter_size"] = value(settings.fps_counter_size.to_string());
             table["bitmap_cache_sweep"] = value(settings.bitmap_cache_sweep.to_string());
             table["ui_font"] = value(settings.ui_font.to_string());
             match settings.msaa_samples {
@@ -461,6 +464,9 @@ crash_report = true
 ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+fps_counter_hotkey = \"off\"
+fps_counter_position = \"top-center\"
+fps_counter_size = \"default\"
 bitmap_cache_sweep = \"balanced\"
 ui_font = \"default\"
 max_fps = 60.0
@@ -536,6 +542,9 @@ crash_report = true
 ui_font_all_text = false
 quality = \"high\"
 focus_aura_colour = \"red\"
+fps_counter_hotkey = \"off\"
+fps_counter_position = \"top-center\"
+fps_counter_size = \"default\"
 bitmap_cache_sweep = \"balanced\"
 ui_font = \"default\"
 ",
