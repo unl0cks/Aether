@@ -134,6 +134,10 @@ pub struct WgpuMetricsSnapshot {
     pub filter_atlas_members: u64,
     pub filter_atlas_pixels: u64,
     pub filter_atlas_member_pixels: u64,
+    /// Cache groups whose CONTENTS drew in one shared pass, and how many entries that
+    /// covered. `members / groups` is the content passes each shared pass replaced.
+    pub cache_content_atlas_groups: u64,
+    pub cache_content_atlas_members: u64,
 }
 
 struct PoolCounters {
@@ -563,6 +567,15 @@ pub fn record_cache_texture_pool(hit: bool) {
     }
 }
 
+static CACHE_CONTENT_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
+static CACHE_CONTENT_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
+
+/// Record a cache group whose contents drew in one shared pass instead of one pass each.
+pub fn record_cache_content_atlas(members: u64) {
+    saturating_atomic_add(&CACHE_CONTENT_ATLAS_GROUPS, 1);
+    saturating_atomic_add(&CACHE_CONTENT_ATLAS_MEMBERS, members);
+}
+
 static FILTER_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
 static FILTER_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
 static FILTER_ATLAS_PIXELS: AtomicU64 = AtomicU64::new(0);
@@ -673,6 +686,8 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         filter_atlas_members: FILTER_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
         filter_atlas_pixels: FILTER_ATLAS_PIXELS.swap(0, Ordering::Relaxed),
         filter_atlas_member_pixels: FILTER_ATLAS_MEMBER_PIXELS.swap(0, Ordering::Relaxed),
+        cache_content_atlas_groups: CACHE_CONTENT_ATLAS_GROUPS.swap(0, Ordering::Relaxed),
+        cache_content_atlas_members: CACHE_CONTENT_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
     }
 }
 

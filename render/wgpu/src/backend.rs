@@ -480,6 +480,12 @@ impl<T: RenderTarget + 'static> WgpuRenderBackend<T> {
     /// atlas that will not fit, a multisampled source it cannot copy, a blur that turns out to be a
     /// no-op. That fallback is the ordinary path, not an error path.
     fn render_atlased_cache_group(&mut self, group: Vec<BitmapCacheEntry>) -> Vec<u64> {
+        // The whole group's contents in one pass, when the group qualifies. Falls through to
+        // the pass-per-entry path below on any reason at all.
+        if let Some(signatures) = self.render_content_atlased_group(&group) {
+            return signatures;
+        }
+
         #[cfg(feature = "aether_metrics")]
         let group_started = std::time::Instant::now();
         #[cfg_attr(not(feature = "aether_metrics"), allow(unused_mut))]
@@ -691,6 +697,297 @@ impl<T: RenderTarget + 'static> WgpuRenderBackend<T> {
         );
         Some((blurred.color_view().clone(), texture_size, packing.slots))
     }
+
+    /// Draw a whole cache group's contents in ONE render pass, blur them in place, and
+    /// compose each member from its atlas slot.
+    ///
+    /// The filter atlas contained the blur cost; the pass that remained per entry was the
+    /// one that draws its content. On a renderer priced by passes -- submit_ms = 1.97 +
+    /// 0.0925 x passes -- 50 to 80 filtered rebuilds a frame (Divine Intervention's wings
+    /// on a full room) were 50 to 80 content passes. Here the group's commands are
+    /// translated into slots of one shared surface and drawn together, so the group costs
+    /// one content pass, one resolve and one blur chain, plus the composes it always cost.
+    ///
+    /// Returns `None` whenever the group cannot be drawn this way -- mixed filters, complex
+    /// blends in the content, members reading each other's caches, packing or sample-count
+    /// mismatches -- and the caller runs the pass-per-entry path instead. Every bail before
+    /// the draw is free; the two after it (blur refusal) waste one pass, and cannot happen
+    /// for content the planner grouped, since grouping requires a shareable blur.
+    fn render_content_atlased_group(&mut self, group: &[BitmapCacheEntry]) -> Option<Vec<u64>> {
+        if group.len() < 2 || !crate::aether_switches::CACHE_CONTENT_ATLAS.enabled() {
+            return None;
+        }
+        let first_filter = group.first()?.filters.first()?;
+        let blur = crate::filters::filter_inner_blur(first_filter)?;
+        let (blur_x, blur_y, passes) = crate::filters::filter_shares_a_blur(first_filter)?;
+        for entry in group {
+            // Exactly one filter (the planner's own admission rule), a transparent clear so
+            // one shared clear serves everyone, and content that stays in one draw chunk.
+            if entry.filters.len() != 1
+                || entry.clear.a != 0
+                || !cache_content_commands_are_groupable(&entry.commands)
+            {
+                return None;
+            }
+        }
+        // A member whose content samples another member's cache texture must see this
+        // frame's result there, which only the sequential path provides.
+        for entry in group {
+            for command in &entry.commands.commands {
+                if let ruffle_render::commands::Command::RenderBitmap { bitmap, .. } = command
+                    && group
+                        .iter()
+                        .any(|other| std::sync::Arc::ptr_eq(&other.handle.0, &bitmap.0))
+                {
+                    return None;
+                }
+            }
+        }
+
+        #[cfg(feature = "aether_metrics")]
+        let group_started = std::time::Instant::now();
+
+        let sizes: Vec<(u32, u32)> = group
+            .iter()
+            .map(|entry| {
+                let texture = &as_texture(&entry.handle).texture;
+                bitmap_cache_filter_source_size(
+                    (texture.width(), texture.height()),
+                    (entry.logical_width, entry.logical_height),
+                )
+            })
+            .collect();
+        // The one packing serves the draw, the blur and the compose, so they cannot
+        // disagree about where a member sits. Padding is the blur's reach with a two-pixel
+        // floor: an entry's own target used to clip its stray antialiased edge, and the
+        // atlas has to keep such an edge out of the neighbouring slot instead.
+        let packing = crate::filters::atlas::pack_atlas(
+            &sizes,
+            crate::filters::atlas::blur_reach(blur_x, passes).max(2),
+            crate::filters::atlas::blur_reach(blur_y, passes).max(2),
+            self.descriptors.limits.max_texture_dimension_2d,
+        )?;
+        let mut slot_of_entry: Vec<Option<&crate::filters::atlas::AtlasSlot>> =
+            vec![None; group.len()];
+        for slot in &packing.slots {
+            slot_of_entry[slot.index] = Some(slot);
+        }
+
+        // Antialiasing parity: the atlas must draw at the sample count the members' own
+        // targets would have used, or grouping changes how their edges look. A large atlas
+        // can cross the big-target threshold that caps MSAA; refuse rather than degrade.
+        let surface = Surface::new(
+            &self.descriptors,
+            self.surface.quality(),
+            packing.width,
+            packing.height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let (first_width, first_height) = *sizes.first()?;
+        let member_surface = Surface::new(
+            &self.descriptors,
+            self.surface.quality(),
+            first_width,
+            first_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        if surface.sample_count() != member_surface.sample_count() {
+            return None;
+        }
+
+        // Members keep their original order: translation by whole pixels moves rasterised
+        // pixels exactly, and disjoint slots keep the members from compositing over each
+        // other, so drawing together is drawing identically.
+        let mut combined = CommandList::new();
+        for (entry, slot) in group.iter().zip(&slot_of_entry) {
+            let slot = (*slot)?;
+            combined.commands.extend(cache_content_commands_translated(
+                &entry.commands,
+                swf::Twips::from_pixels(f64::from(slot.x)),
+                swf::Twips::from_pixels(f64::from(slot.y)),
+            ));
+        }
+
+        #[cfg_attr(not(feature = "aether_metrics"), allow(unused_mut))]
+        let mut signatures = Vec::new();
+        #[cfg(feature = "aether_metrics")]
+        for entry in group {
+            crate::aether_metrics::record_cache_entry(entry.filters.len() as u64);
+            if let Some(signature) =
+                crate::aether_metrics::atlasable_filter_signature(&entry.filters[0])
+            {
+                signatures.push(signature);
+            }
+        }
+
+        let atlas_target = surface.draw_commands(
+            RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
+            &self.descriptors,
+            &self.meshes,
+            combined,
+            &mut self.active_frame.staging_belt,
+            &self.dynamic_transforms,
+            &mut self.active_frame.command_encoder,
+            LayerRef::None,
+            &mut self.offscreen_texture_pool,
+        );
+        atlas_target.ensure_cleared(&mut self.active_frame.command_encoder);
+
+        let blurred = self.descriptors.filters.blur_together(
+            &self.descriptors,
+            &mut self.offscreen_texture_pool,
+            &mut self.active_frame.command_encoder,
+            &mut self.active_frame.staging_belt,
+            &FilterSource {
+                texture: atlas_target.color_texture(),
+                view: atlas_target.color_view().clone(),
+                point: (0, 0),
+                size: (packing.width, packing.height),
+            },
+            &blur,
+        )?;
+        blurred.ensure_cleared(&mut self.active_frame.command_encoder);
+        let blurred_size = (
+            blurred.color_texture().width(),
+            blurred.color_texture().height(),
+        );
+
+        for (entry, slot) in group.iter().zip(&slot_of_entry) {
+            let slot = (*slot)?;
+            let output = self.descriptors.filters.apply_with_pre_blurred(
+                &self.descriptors,
+                &mut self.active_frame.command_encoder,
+                &mut self.offscreen_texture_pool,
+                &mut self.active_frame.staging_belt,
+                FilterSource {
+                    texture: atlas_target.color_texture(),
+                    view: atlas_target.color_view().clone(),
+                    point: (slot.x, slot.y),
+                    size: (slot.width, slot.height),
+                },
+                entry.filters[0].clone(),
+                Some(crate::filters::PreBlurred {
+                    view: blurred.color_view(),
+                    region: crate::filters::FilterRegion {
+                        texture_size: blurred_size,
+                        point: (slot.x, slot.y),
+                        size: (slot.width, slot.height),
+                    },
+                }),
+            );
+            self.active_frame.command_encoder.copy_texture_to_texture(
+                output.color_texture().as_image_copy(),
+                as_texture(&entry.handle).texture.as_image_copy(),
+                wgpu::Extent3d {
+                    width: slot.width,
+                    height: slot.height,
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+
+        #[cfg(feature = "aether_metrics")]
+        {
+            crate::aether_metrics::record_filter_atlas(
+                packing.slots.len() as u64,
+                u64::from(packing.width) * u64::from(packing.height),
+                sizes
+                    .iter()
+                    .map(|&(w, h)| u64::from(w) * u64::from(h))
+                    .sum(),
+            );
+            crate::aether_metrics::record_cache_content_atlas(group.len() as u64);
+            crate::aether_metrics::record_cache_entry_time(true, group_started.elapsed());
+        }
+        Some(signatures)
+    }
+}
+
+/// Whether these commands can share one render pass with other entries' contents.
+///
+/// The bar is that they stay in one `Chunk::Draw`. A complex or shader blend composites
+/// against "the target", which in a shared atlas would be the neighbours; even a trivial
+/// `Blend` command spawns a sub-target sized to the whole surface unless it is a sole
+/// carried draw, and in an atlas the whole surface is everyone's. Alpha masks and Stage3D
+/// have machinery of their own, and a perspective projection does not commute with the slot
+/// translation. Ordinary masks are fine: they balance within the entry, and the stencil
+/// test only reads pixels the entry itself rasterises.
+fn cache_content_commands_are_groupable(commands: &CommandList) -> bool {
+    use ruffle_render::commands::Command;
+    commands.commands.iter().all(|command| match command {
+        Command::RenderBitmap { transform, .. } | Command::RenderShape { transform, .. } => {
+            transform.perspective_projection.is_none()
+        }
+        Command::DrawRect { .. } | Command::DrawLine { .. } | Command::DrawLineRect { .. } => true,
+        Command::PushMask
+        | Command::ActivateMask
+        | Command::DeactivateMask
+        | Command::PopMask => true,
+        Command::RenderStage3D { .. } | Command::RenderAlphaMask { .. } | Command::Blend(..) => {
+            false
+        }
+    })
+}
+
+/// The same commands, shifted so they draw into an atlas slot instead of at the origin.
+///
+/// Only reached for command lists `cache_content_commands_are_groupable` admitted, so the
+/// variants without a translatable transform cannot appear; they are reproduced unchanged
+/// anyway rather than trusted to stay unreachable.
+fn cache_content_commands_translated(
+    commands: &CommandList,
+    dx: swf::Twips,
+    dy: swf::Twips,
+) -> Vec<ruffle_render::commands::Command> {
+    use ruffle_render::commands::Command;
+    let translate = |matrix: &ruffle_render::matrix::Matrix| {
+        let mut moved = *matrix;
+        moved.tx += dx;
+        moved.ty += dy;
+        moved
+    };
+    commands
+        .commands
+        .iter()
+        .map(|command| match command {
+            Command::RenderBitmap {
+                bitmap,
+                transform,
+                smoothing,
+                pixel_snapping,
+                source_size,
+            } => Command::RenderBitmap {
+                bitmap: bitmap.clone(),
+                transform: ruffle_render::transform::Transform {
+                    matrix: translate(&transform.matrix),
+                    ..transform.clone()
+                },
+                smoothing: *smoothing,
+                pixel_snapping: *pixel_snapping,
+                source_size: *source_size,
+            },
+            Command::RenderShape { shape, transform } => Command::RenderShape {
+                shape: shape.clone(),
+                transform: ruffle_render::transform::Transform {
+                    matrix: translate(&transform.matrix),
+                    ..transform.clone()
+                },
+            },
+            Command::DrawRect { color, matrix } => Command::DrawRect {
+                color: *color,
+                matrix: translate(matrix),
+            },
+            Command::DrawLine { color, matrix } => Command::DrawLine {
+                color: *color,
+                matrix: translate(matrix),
+            },
+            Command::DrawLineRect { color, matrix } => Command::DrawLineRect {
+                color: *color,
+                matrix: translate(matrix),
+            },
+            other => other.clone(),
+        })
+        .collect()
 }
 
 impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {

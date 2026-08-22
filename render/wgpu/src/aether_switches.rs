@@ -107,6 +107,15 @@ pub static FILTER_ATLAS: RuntimeSwitch = RuntimeSwitch::new("AETHER_FILTER_ATLAS
 pub static CACHE_TEXTURE_POOL: RuntimeSwitch =
     RuntimeSwitch::new("AETHER_CACHE_TEXTURE_POOL", false);
 
+/// Draw a filtered cache group's CONTENTS into one shared pass as well, not just its blurs.
+///
+/// The filter atlas contains the blur cost; what remained was one render pass per entry to
+/// draw its content. Divine Intervention measured 50-80 filtered cache rebuilds per frame
+/// (a multi-layer glow effect on up to 7 avatars), which is 50-80 content passes on a
+/// pass-priced renderer. Grouped, a whole blur-compatible group draws in one pass.
+pub static CACHE_CONTENT_ATLAS: RuntimeSwitch =
+    RuntimeSwitch::new("AETHER_CACHE_CONTENT_ATLAS", true);
+
 /// Let runs of compatible complex blends share one render pass.
 pub static BLEND_BATCHING: RuntimeSwitch = RuntimeSwitch::new("AETHER_BLEND_BATCH", true);
 
@@ -122,6 +131,7 @@ pub static BLENDCHECK: RuntimeSwitch = RuntimeSwitch::new("AETHER_BLENDCHECK", f
 /// Every switch this module owns, so one can be looked up by the variable name that names it.
 pub const ALL: &[&RuntimeSwitch] = &[
     &FILTER_ATLAS,
+    &CACHE_CONTENT_ATLAS,
     &CACHE_TEXTURE_POOL,
     &BLEND_BATCHING,
     &BLEND_REORDERING,
