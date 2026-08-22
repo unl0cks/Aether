@@ -754,10 +754,17 @@ pub enum FpsCounterAnchor {
 /// Place and scale AQW's own FPS counter.
 ///
 /// The clip is the game's `ui.mcFPS`; scaling and moving it are ordinary display-object property
-/// writes, the same ones its own scripts could make. Width is read back AFTER scaling so the
-/// anchor maths uses the size that will actually draw. Coordinates are in AQW's fixed 960x550
+/// writes, the same ones its own scripts could make. Coordinates are in AQW's fixed 960x550
 /// design space, which the stage scale mode maps to the window. Quietly a no-op outside AQW and
 /// before the UI exists.
+///
+/// The clip's registration point is NOT its top-left corner: the artwork extends left of and
+/// above the origin. Anchoring `x` directly therefore hung half the counter off screen ("only
+/// the decimals showed" on Top left), and scaling grew the art up past the stage top. So the
+/// anchor maths runs on the clip's VISIBLE rectangle -- `getBounds(ui)`, measured after
+/// scaling, in the same space `x`/`y` move the clip in -- and the move applied is the
+/// difference between where that rectangle is and where it should sit. Applying it twice is a
+/// no-op, which matters because it runs on every save and every toggle.
 pub fn style_aqw_fps_display(
     context: &mut UpdateContext<'_>,
     anchor: FpsCounterAnchor,
@@ -802,20 +809,54 @@ pub fn style_aqw_fps_display(
             &mut activation,
         )?;
 
-        let width = fps
+        let bounds = fps.call_public_property(
+            AvmString::new_utf8(activation.gc(), "getBounds"),
+            Avm2FunctionArgs::from_slice(&[ui]),
+            &mut activation,
+        )?;
+        let bounds_x = bounds
+            .get_public_property(AvmString::new_utf8(activation.gc(), "x"), &mut activation)?
+            .coerce_to_number(&mut activation)?;
+        let bounds_y = bounds
+            .get_public_property(AvmString::new_utf8(activation.gc(), "y"), &mut activation)?
+            .coerce_to_number(&mut activation)?;
+        let bounds_width = bounds
             .get_public_property(
                 AvmString::new_utf8(activation.gc(), "width"),
                 &mut activation,
             )?
             .coerce_to_number(&mut activation)?;
-        let x = match anchor {
+        let x_now = fps
+            .get_public_property(AvmString::new_utf8(activation.gc(), "x"), &mut activation)?
+            .coerce_to_number(&mut activation)?;
+        let y_now = fps
+            .get_public_property(AvmString::new_utf8(activation.gc(), "y"), &mut activation)?
+            .coerce_to_number(&mut activation)?;
+        if !(bounds_x.is_finite()
+            && bounds_y.is_finite()
+            && bounds_width.is_finite()
+            && x_now.is_finite()
+            && y_now.is_finite())
+        {
+            // A clip with no drawable content yet reports nothing useful; writing NaN into
+            // its position would stick. Leave it where the game put it.
+            return Ok(false);
+        }
+
+        let target_left = match anchor {
             FpsCounterAnchor::Left => EDGE_MARGIN,
-            FpsCounterAnchor::Center => (STAGE_WIDTH - width) / 2.0,
-            FpsCounterAnchor::Right => STAGE_WIDTH - width - EDGE_MARGIN,
+            FpsCounterAnchor::Center => (STAGE_WIDTH - bounds_width) / 2.0,
+            FpsCounterAnchor::Right => STAGE_WIDTH - bounds_width - EDGE_MARGIN,
         };
         fps.set_public_property(
             AvmString::new_utf8(activation.gc(), "x"),
-            Avm2Value::Number(x),
+            Avm2Value::Number(x_now + (target_left - bounds_x)),
+            &mut activation,
+        )?;
+        // Flush with the stage top at every size, which is where the game's own art sits.
+        fps.set_public_property(
+            AvmString::new_utf8(activation.gc(), "y"),
+            Avm2Value::Number(y_now - bounds_y),
             &mut activation,
         )?;
         Ok(true)
