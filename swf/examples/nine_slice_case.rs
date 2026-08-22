@@ -63,6 +63,10 @@ fn main() {
     let shadow = rest.iter().any(|arg| arg == "shadow");
     // A glow draws on every side at zero distance, so a wrongly placed filter cannot hide.
     let glow = rest.iter().any(|arg| arg == "glow");
+    // Translucent fills, which is how AQW paints every drop toast, confirmation box and fading
+    // tooltip. Overlapping cell draws are invisible on opaque art -- the same pixels twice --
+    // and composite twice on translucent art, which draws a darker line down every cell join.
+    let translucent = rest.iter().any(|arg| arg == "translucent");
     // How far the art sits above and left of the sprite's own origin.
     //
     // A cell's transform translates by `low * (1 - 1/scale)`, where `low` is the near edge of the
@@ -97,27 +101,35 @@ fn main() {
         y_max: Twips::from_pixels(inner),
     };
 
+    // DefineShape version 3 is where per-fill alpha starts existing; at version 1 the writer
+    // quietly saturates it and the translucent case tests nothing.
+    let (shape_version, frame_fill, middle_fill) = if translucent {
+        (3, 0x99e02020, 0x992060e0)
+    } else {
+        (1, 0xffe02020, 0xff2060e0)
+    };
+
     let frame = Tag::DefineShape(Box::new(Shape {
-        version: 1,
+        version: shape_version,
         id: 1,
         shape_bounds: bounds,
         edge_bounds: bounds,
         flags: ShapeFlag::empty(),
         styles: ShapeStyles {
-            fill_styles: vec![FillStyle::Color(Color::from_rgba(0xffe02020))],
+            fill_styles: vec![FillStyle::Color(Color::from_rgba(frame_fill))],
             line_styles: vec![],
         },
         shape: rect(0.0, 0.0, BOX, BOX, 1),
     }));
 
     let middle = Tag::DefineShape(Box::new(Shape {
-        version: 1,
+        version: shape_version,
         id: 3,
         shape_bounds: inner_bounds,
         edge_bounds: inner_bounds,
         flags: ShapeFlag::empty(),
         styles: ShapeStyles {
-            fill_styles: vec![FillStyle::Color(Color::from_rgba(0xff2060e0))],
+            fill_styles: vec![FillStyle::Color(Color::from_rgba(middle_fill))],
             line_styles: vec![],
         },
         shape: rect(0.0, 0.0, inner, inner, 1),

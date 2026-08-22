@@ -2733,29 +2733,78 @@ fn draw_possibly_sliced<'gc, F>(
                 0.0
             };
 
+            // The cell edges, in device pixels, with the interior joins snapped to whole ones.
+            //
+            // Neighbouring masks must agree EXACTLY about where a join is or the join shows: meet
+            // short of each other and the gap draws a background-coloured seam, overlap -- which
+            // is what SLICE_BLEED does -- and translucent art composites twice there, a darker
+            // line down every join of every drop toast and confirmation box (invisible on opaque
+            // tooltips right until their fade-out makes every pixel translucent). Snapping each
+            // interior join once, shared by both neighbours, tiles the cells with neither gap nor
+            // overlap. The outer edges keep their exact positions so the art's own antialiased
+            // silhouette rasterises precisely as an unsliced draw would.
+            //
+            // Only an unrotated view can be snapped this way; under rotation the joins are not
+            // axis-aligned in device space, and the bleed remains the fallback there. AQW never
+            // rotates its UI.
+            let snapped: Option<([f64; 4], [f64; 4])> = (to_screen.b == 0.0
+                && to_screen.c == 0.0
+                && to_screen.a > 0.0
+                && to_screen.d > 0.0)
+                .then(|| {
+                    let device_x = |v: f64| f64::from(to_screen.a) * v + to_screen.tx.to_pixels();
+                    let device_y = |v: f64| f64::from(to_screen.d) * v + to_screen.ty.to_pixels();
+                    let edges_x = [
+                        device_x(horizontal.dest[0]),
+                        device_x(horizontal.dest[1]).round(),
+                        device_x(horizontal.dest[2]).round(),
+                        device_x(horizontal.dest[3]),
+                    ];
+                    let edges_y = [
+                        device_y(vertical.dest[0]),
+                        device_y(vertical.dest[1]).round(),
+                        device_y(vertical.dest[2]).round(),
+                        device_y(vertical.dest[3]),
+                    ];
+                    (edges_x, edges_y)
+                })
+                .filter(|(edges_x, edges_y)| {
+                    // Snapping can collapse a sub-pixel band; those cells cannot tile. Rare
+                    // enough that falling back to the bleed is the right price.
+                    edges_x.windows(2).all(|pair| pair[0] < pair[1])
+                        && edges_y.windows(2).all(|pair| pair[0] < pair[1])
+                });
+
             for row in 0..3 {
                 let (source_y, dest_y, stretch_y, dest_y_end) = vertical.band(row);
                 for column in 0..3 {
                     let (source_x, dest_x, stretch_x, dest_x_end) = horizontal.band(column);
 
                     // The cell's own destination, used both to place it and to clip it.
-                    //
-                    // Grown by a hair towards its neighbours. Two masks that meet exactly on a
-                    // boundary can both miss the pixels the boundary lands inside, which draws a
-                    // thin seam down the middle of a panel. Cells that meet agree about what is at
-                    // the join -- it is the same point of the same object -- so letting them
-                    // overlap there costs nothing and closes the gap.
-                    let bleed_left = if column > 0 { bleed_x } else { 0.0 };
-                    let bleed_right = if column < 2 { bleed_x } else { 0.0 };
-                    let bleed_up = if row > 0 { bleed_y } else { 0.0 };
-                    let bleed_down = if row < 2 { bleed_y } else { 0.0 };
-                    let clip = Matrix::create_box(
-                        (dest_x_end - dest_x + bleed_left + bleed_right) as f32,
-                        (dest_y_end - dest_y + bleed_up + bleed_down) as f32,
-                        Twips::from_pixels(dest_x - bleed_left),
-                        Twips::from_pixels(dest_y - bleed_up),
-                    );
-                    let clip = context.transform_stack.transform().matrix * clip;
+                    let clip = if let Some((edges_x, edges_y)) = &snapped {
+                        // Already in device space, on the shared snapped edges.
+                        Matrix::create_box(
+                            (edges_x[column + 1] - edges_x[column]) as f32,
+                            (edges_y[row + 1] - edges_y[row]) as f32,
+                            Twips::from_pixels(edges_x[column]),
+                            Twips::from_pixels(edges_y[row]),
+                        )
+                    } else {
+                        // Rotated view: grown by a hair towards its neighbours instead, which
+                        // closes the gap two exactly-meeting masks can leave, at the price of a
+                        // double composite on translucent art.
+                        let bleed_left = if column > 0 { bleed_x } else { 0.0 };
+                        let bleed_right = if column < 2 { bleed_x } else { 0.0 };
+                        let bleed_up = if row > 0 { bleed_y } else { 0.0 };
+                        let bleed_down = if row < 2 { bleed_y } else { 0.0 };
+                        let clip = Matrix::create_box(
+                            (dest_x_end - dest_x + bleed_left + bleed_right) as f32,
+                            (dest_y_end - dest_y + bleed_up + bleed_down) as f32,
+                            Twips::from_pixels(dest_x - bleed_left),
+                            Twips::from_pixels(dest_y - bleed_up),
+                        );
+                        context.transform_stack.transform().matrix * clip
+                    };
 
                     context.commands.push_mask();
                     context.commands.draw_rect(Color::WHITE, clip);
