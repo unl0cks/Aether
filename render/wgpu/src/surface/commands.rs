@@ -807,6 +807,28 @@ impl DrawRegions {
             .iter()
             .any(|held| blend_regions_overlap(Some(*held), region))
     }
+
+    /// One box, for a caller that knows an extent without having chunked anything.
+    pub fn of(region: (u32, u32, u32, u32)) -> Self {
+        let mut regions = Self::default();
+        regions.push(region);
+        regions
+    }
+
+    /// Take on another set's boxes as well, or report that they no longer fit.
+    ///
+    /// Refusing rather than widening is deliberate: the caller's fallback is "assume
+    /// everywhere", and a box silently grown to span two clusters says the same thing while
+    /// looking precise.
+    pub fn try_extend(&mut self, other: &DrawRegions) -> bool {
+        for held in &other.boxes[..other.len as usize] {
+            if self.is_at_capacity() {
+                return false;
+            }
+            self.push(*held);
+        }
+        true
+    }
 }
 
 impl<'a> WgpuCommandHandler<'a> {

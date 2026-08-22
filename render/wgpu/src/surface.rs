@@ -241,10 +241,13 @@ impl Surface {
                     chunk,
                     needs_stencil,
                     transforms,
-                    // Consumed by `reorder_blends_for_batching` before execution begins; drawing
-                    // itself does not care where it draws.
-                    bounds: _,
+                    // Drawing itself does not care where it draws, but the target does: a
+                    // blend reading back later can skip its resolve if the drawing since
+                    // missed the region it reads. Also consumed by
+                    // `reorder_blends_for_batching` before execution begins.
+                    bounds,
                 } => {
+                    target.set_pending_pass_region(bounds);
                     #[cfg(feature = "aether_metrics")]
                     crate::aether_metrics::record_encoded_chunk(chunk.len() as u64, false);
                     transforms.copy_to(
@@ -504,6 +507,20 @@ impl Surface {
                             })
                         })
                         .collect::<Vec<_>>();
+
+                    // The composite writes where its children sit, so that is what the
+                    // next reader has to know about. An unbounded child in the batch makes
+                    // the whole pass unbounded, which is the safe answer.
+                    let composited_regions = batch.iter().try_fold(
+                        crate::surface::commands::DrawRegions::default(),
+                        |mut regions, (_, region)| {
+                            let region = (*region)?;
+                            regions
+                                .try_extend(&crate::surface::commands::DrawRegions::of(region))
+                                .then_some(regions)
+                        },
+                    );
+                    target.set_pending_pass_region(composited_regions);
 
                     let mut render_pass =
                         draw_encoder.begin_render_pass(&wgpu::RenderPassDescriptor {

@@ -229,6 +229,22 @@ pub struct CommandTarget {
     /// backend, so there is no single point that owns "this target is finished".
     deferred_resolve: bool,
     resolve_state: ResolveState,
+    /// Where this target has been drawn into since its resolved texture was last brought up
+    /// to date. `None` means somewhere unrecorded, so any reader has to resolve.
+    ///
+    /// A blend reads back a region typically a few tens of thousands of pixels wide, and
+    /// resolving the whole target for it is the single largest cost in a crowded frame. It
+    /// is also usually unnecessary: what the blend reads has often not been touched since
+    /// the last resolve, because the drawing in between landed on another part of the
+    /// screen. Recording where the drawing went makes that answerable.
+    dirty_regions: Cell<Option<crate::surface::commands::DrawRegions>>,
+    /// The extent the next pass against this target will cover, when its caller knows.
+    ///
+    /// Consumed by [`Self::color_attachments`], which is the one place every pass passes
+    /// through and the only place that learns a pass is starting. `None` means unknown,
+    /// which marks the whole target dirty -- so a caller that forgets to set it loses the
+    /// optimisation rather than the correctness.
+    pending_pass_region: Cell<Option<crate::surface::commands::DrawRegions>>,
 }
 
 /// Whether a deferred target's resolved texture has fallen behind its multisampled one.
@@ -250,6 +266,16 @@ impl ResolveState {
     /// Whether a resolve is owed, claiming it if so.
     fn take(&self) -> bool {
         self.dirty.replace(false)
+    }
+
+    /// Whether a resolve is owed at all, without claiming it.
+    fn is_dirty(&self) -> bool {
+        self.dirty.get()
+    }
+
+    /// Give up a claimed resolve, because the reader turned out not to need one.
+    fn restore(&self) {
+        self.dirty.set(true);
     }
 }
 
@@ -490,6 +516,9 @@ impl CommandTarget {
             // `FreshWithTexture` seeds both buffers from the same texture above, and every other
             // mode starts empty, so the resolved side begins in step with the multisampled one.
             resolve_state: ResolveState::default(),
+            // Clean, and nothing drawn yet: an empty box set overlaps nothing.
+            dirty_regions: Cell::new(Some(Default::default())),
+            pending_pass_region: Cell::new(None),
         }
     }
 
@@ -499,9 +528,54 @@ impl CommandTarget {
     /// dirty. Called before anything reads the resolved side, which is a blend reading its parent
     /// back and the point where the target is finished.
     pub fn resolve_now(&self, encoder: &mut wgpu::CommandEncoder) {
+        self.resolve_now_for(encoder, None)
+    }
+
+    /// Declare the extent of the pass about to be encoded against this target.
+    ///
+    /// Set before each pass by the command loop, which is the only place that knows what a
+    /// pass covers. Anything not declared counts as covering everything.
+    pub fn set_pending_pass_region(
+        &self,
+        region: Option<crate::surface::commands::DrawRegions>,
+    ) {
+        self.pending_pass_region.set(region);
+    }
+
+    /// Fold the pass that is starting into the record of what has gone unresolved.
+    fn note_dirty_pass(&self) {
+        let pending = self.pending_pass_region.replace(None);
+        let merged = match (self.dirty_regions.get(), pending) {
+            // Already unrecorded, or this pass will not say where it draws.
+            (None, _) | (_, None) => None,
+            (Some(mut known), Some(adding)) => known.try_extend(&adding).then_some(known),
+        };
+        self.dirty_regions.set(merged);
+    }
+
+    /// As [`Self::resolve_now`], for a reader that only looks at `region`.
+    ///
+    /// Skipped entirely when nothing has been drawn there since the last resolve: the
+    /// resolved texture is already correct where this reader will look, whatever happened
+    /// elsewhere. `None` means the reader's extent is unknown, which always resolves.
+    pub fn resolve_now_for(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        region: Option<(u32, u32, u32, u32)>,
+    ) {
         if !self.resolve_state.take() {
             return;
         }
+        if let Some(dirty) = self.dirty_regions.get()
+            && !dirty.overlaps(region)
+        {
+            // Still owed elsewhere, so the claim goes back.
+            self.resolve_state.restore();
+            #[cfg(feature = "aether_metrics")]
+            crate::aether_metrics::record_msaa_resolve_skipped();
+            return;
+        }
+        self.dirty_regions.set(Some(Default::default()));
         let Some(resolve_buffer) = &self.resolve_buffer else {
             return;
         };
@@ -639,9 +713,15 @@ impl CommandTarget {
         let resolve_target = match (&self.resolve_buffer, self.deferred_resolve) {
             (Some(_), true) => {
                 self.resolve_state.note_pass();
+                self.note_dirty_pass();
                 None
             }
-            (buffer, _) => buffer.as_ref().map(|b| b.view()),
+            (buffer, _) => {
+                // An eagerly resolving target is never behind, so it has nothing to record;
+                // the declaration is still cleared, or it would leak into the next pass.
+                self.pending_pass_region.set(None);
+                buffer.as_ref().map(|b| b.view())
+            }
         };
         Some(wgpu::RenderPassColorAttachment {
             view: self.frame_buffer.view(),
@@ -710,14 +790,21 @@ impl CommandTarget {
         // The copy below reads the resolved texture, so this is one of the two points a deferred
         // target has to catch up.
         //
-        // This resolves the WHOLE target, once per blend chunk, which is expensive: measured at
-        // 2.08 resolve passes and 3.30 MPx per complex blend, against regions that are typically a
-        // few tens of thousands of pixels. Replacing it with a shader that resolves only the region
-        // was tried, was pixel-equivalent, and cut resolve bandwidth by 97% -- and had to be backed
-        // out, because making the multisampled buffer shader-readable took peak GPU texture memory
-        // from 1,966 MB to 11,451 MB. Any second attempt has to solve that first; the blend corpus
-        // in `_evidence/blend_corpus.swf` proves correctness, but correctness was never the problem.
-        self.resolve_now(encoder);
+        // This resolves the WHOLE target, which is expensive: measured at 2.08 resolve passes and
+        // 3.30 MPx per complex blend, against regions that are typically a few tens of thousands of
+        // pixels. Resolving only the region was tried, was pixel-equivalent, and cut resolve
+        // bandwidth by 97% -- and had to be backed out, because making the multisampled buffer
+        // shader-readable took peak GPU texture memory from 1,966 MB to 11,451 MB. Any attempt to
+        // shrink the resolve ITSELF has to solve that first.
+        //
+        // What can be attacked without touching the buffer's usage is how OFTEN this runs. The
+        // resolve exists to catch the resolved texture up with drawing it has not seen; if the
+        // drawing since the last resolve missed this blend's region entirely, the texture is
+        // already correct where this blend will read, and the resolve is skipped. Measured in a
+        // crowded Battleon: 457 complex blends a frame, each averaging 96x96 pixels, spread across
+        // nine avatars and the map -- so most of them read somewhere the drawing in between never
+        // touched.
+        self.resolve_now_for(encoder, region);
         if let Some((origin, extent)) =
             blend_buffer_copy_region(self.origin, self.frame_buffer.size(), region)
         {

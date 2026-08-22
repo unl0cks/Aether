@@ -497,6 +497,8 @@ struct WgpuTexturePoolTotals {
     /// Multisample resolves and the pixels they covered. A resolve costs the target's pixel count
     /// regardless of what was drawn, so this is the one encoding counter that is not about volume.
     msaa_resolves: u64,
+    /// Resolves the region test avoided; against msaa_resolves, what it bought.
+    msaa_resolves_skipped: u64,
     msaa_resolve_pixels: u64,
     /// How many times a frame was handed to the driver part-way through. Zero means the splitter
     /// never engaged, which is worth being able to tell apart from it engaging and not helping.
@@ -573,6 +575,9 @@ impl WgpuTexturePoolTotals {
         self.blend_chunks = self.blend_chunks.saturating_add(sample.blend_chunks);
         self.bind_groups = self.bind_groups.saturating_add(sample.bind_groups);
         self.msaa_resolves = self.msaa_resolves.saturating_add(sample.msaa_resolves);
+        self.msaa_resolves_skipped = self
+            .msaa_resolves_skipped
+            .saturating_add(sample.msaa_resolves_skipped);
         self.msaa_resolve_pixels = self
             .msaa_resolve_pixels
             .saturating_add(sample.msaa_resolve_pixels);
@@ -1306,7 +1311,7 @@ fn perf_summary_line(
         "swf {:.1}/s, render {:.1} fps | tick {:.1}/{:.1} ms | render {:.1}/{:.1} ms | \
          present {:.1}/{:.1} ms (avg/max) | submit {:.1} ms (cache {:.1} ms over {:.0} entries: {:.0} filtered carrying {:.0} filters,          {:.0} filterless, \
          newtex {:.1} ms over {:.0}) per frame | passes {:.0} (draw {:.0} blend {:.0}) \
-         draws {:.0} resolves {:.0}/{:.1} MPx binds {:.0} in {:.1} ms queue {:.1} ms per frame | \
+         draws {:.0} resolves {:.0}(skipped {:.0})/{:.1} MPx binds {:.0} in {:.1} ms queue {:.1} ms per frame | \
          batching: ideal {:.0} passes, adjacent {:.0}, broke on drawing {:.0} mode {:.0} \
          overlap {:.0}, full-surface {:.0}, unbounded draws {:.0}, moved {:.0},          chunks at box cap {:.0} | \
          cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels) |          content atlas: {:.1} passes covering {:.1} draws, blend children {:.1} passes covering {:.1} draws |          cache textures: {:.1} reused, {:.1} created ({:.0}% reuse){}",
@@ -1333,6 +1338,7 @@ fn perf_summary_line(
         encoding.blend_chunks as f64 / rendered_frames,
         encoding.draw_commands as f64 / rendered_frames,
         encoding.msaa_resolves as f64 / rendered_frames,
+        encoding.msaa_resolves_skipped as f64 / rendered_frames,
         encoding.msaa_resolve_pixels as f64 / 1_000_000.0 / rendered_frames,
         encoding.bind_groups as f64 / rendered_frames,
         encoding.bind_group_nanos as f64 / 1_000_000.0 / rendered_frames,

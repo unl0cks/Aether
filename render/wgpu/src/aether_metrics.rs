@@ -71,6 +71,8 @@ pub struct WgpuMetricsSnapshot {
     /// these two counters is the work that stopped happening.
     pub msaa_resolves: u64,
     pub msaa_resolve_pixels: u64,
+    /// Resolves the region test avoided. Against `msaa_resolves`, what it bought.
+    pub msaa_resolves_skipped: u64,
     /// How many times a frame's commands were handed over part-way through. Zero means every frame
     /// reached the driver in one piece, which is the state the device was lost in.
     pub submission_splits: u64,
@@ -403,6 +405,14 @@ static MSAA_RESOLVES: AtomicU64 = AtomicU64::new(0);
 static MSAA_RESOLVE_PIXELS: AtomicU64 = AtomicU64::new(0);
 
 /// Record one multisample resolve over `pixels` pixels of a target.
+static MSAA_RESOLVES_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// A blend read back a region nothing had drawn into since the last resolve, so the whole
+/// resolve was skipped. Against `msaa_resolves`, this is what the region test is buying.
+pub fn record_msaa_resolve_skipped() {
+    saturating_atomic_add(&MSAA_RESOLVES_SKIPPED, 1);
+}
+
 pub fn record_msaa_resolve(pixels: u64) {
     saturating_atomic_add(&MSAA_RESOLVES, 1);
     saturating_atomic_add(&MSAA_RESOLVE_PIXELS, pixels);
@@ -667,6 +677,7 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         queue_nanos: QUEUE_NANOS.swap(0, Ordering::Relaxed),
         msaa_resolves: MSAA_RESOLVES.swap(0, Ordering::Relaxed),
         msaa_resolve_pixels: MSAA_RESOLVE_PIXELS.swap(0, Ordering::Relaxed),
+        msaa_resolves_skipped: MSAA_RESOLVES_SKIPPED.swap(0, Ordering::Relaxed),
         render_passes: RENDER_PASSES.swap(0, Ordering::Relaxed),
         submission_splits: SUBMISSION_SPLITS.swap(0, Ordering::Relaxed),
         complex_blends: std::array::from_fn(|i| COMPLEX_BLENDS[i].swap(0, Ordering::Relaxed)),
