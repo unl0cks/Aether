@@ -57,6 +57,12 @@ fn main() {
     // `cached` is the case that mattered: a cached object's draw replays a finished image and reads
     // only the translation off the transform stack, so slicing one moves it instead of slicing it.
     let cached = rest.iter().any(|arg| arg == "cached");
+    // A drop shadow, which is how AQW dresses every confirmation box and item-drop toast. A filter
+    // routes the object through the offscreen filter pipeline, a different path from both the
+    // plain draw and the cacheAsBitmap replay.
+    let shadow = rest.iter().any(|arg| arg == "shadow");
+    // A glow draws on every side at zero distance, so a wrongly placed filter cannot hide.
+    let glow = rest.iter().any(|arg| arg == "glow");
     // How far the art sits above and left of the sprite's own origin.
     //
     // A cell's transform translates by `low * (1 - 1/scale)`, where `low` is the near edge of the
@@ -274,7 +280,7 @@ fn main() {
     tags.push(Tag::PlaceObject(Box::new(PlaceObject {
         // `cacheAsBitmap` is a PlaceObject3 field. At version 2 the writer drops it without
         // complaint, and the case renders as though it had never been asked for.
-        version: if cached { 3 } else { 2 },
+        version: if cached || shadow || glow { 3 } else { 2 },
         action: PlaceObjectAction::Place(CharacterId::from(2u16)),
         depth: 1,
         matrix: Some(matrix),
@@ -283,7 +289,31 @@ fn main() {
         name: None,
         clip_depth: None,
         class_name: None,
-        filters: None,
+        filters: if shadow {
+            Some(vec![swf::Filter::DropShadowFilter(Box::new(
+                swf::DropShadowFilter {
+                    color: Color::from_rgba(0xcc000000),
+                    blur_x: Fixed16::from_f64(6.0),
+                    blur_y: Fixed16::from_f64(6.0),
+                    angle: Fixed16::from_f64(0.785),
+                    distance: Fixed16::from_f64(4.0),
+                    strength: Fixed8::ONE,
+                    flags: swf::DropShadowFilterFlags::COMPOSITE_SOURCE
+                        | swf::DropShadowFilterFlags::from_bits_truncate(1),
+                },
+            ))])
+        } else if glow {
+            Some(vec![swf::Filter::GlowFilter(Box::new(swf::GlowFilter {
+                color: Color::from_rgba(0xff00e0e0),
+                blur_x: Fixed16::from_f64(8.0),
+                blur_y: Fixed16::from_f64(8.0),
+                strength: Fixed8::ONE,
+                flags: swf::GlowFilterFlags::COMPOSITE_SOURCE
+                    | swf::GlowFilterFlags::from_bits_truncate(1),
+            }))])
+        } else {
+            None
+        },
         background_color: None,
         blend_mode: None,
         clip_actions: None,
