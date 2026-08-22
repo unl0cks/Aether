@@ -139,6 +139,14 @@ pub struct BitmapCache {
     /// renders the same contents offscreen and then copies the texture back to the stage.
     filterless_rebuild_streak: u8,
 
+    /// Consecutive dirty rebuilds, regardless of filters, saturating rather than cycling.
+    ///
+    /// `filterless_rebuild_streak` resets every time it reaches its threshold, because it
+    /// exists to fire the direct-render bypass; this one exists to *describe* the cache, so
+    /// it only resets on a clean hit. A high value means the cache is rebuilt every frame it
+    /// is drawn, which changes what is worth doing to it: see `is_hot_rebuilder`.
+    dirty_streak: u8,
+
     /// Remaining frames for which a repeatedly invalidated, filterless cache is drawn directly.
     /// This preserves every authored animation frame while avoiding redundant offscreen work.
     filterless_direct_frames: u16,
@@ -558,6 +566,18 @@ impl BitmapCache {
     /// carry across it.
     fn note_cache_hit(&mut self) {
         self.filterless_rebuild_streak = 0;
+        self.dirty_streak = 0;
+    }
+
+    /// Whether this cache has rebuilt dirty for at least a second's worth of frames.
+    ///
+    /// A cache this hot pays a full rebuild every frame already, so the one cost viewport
+    /// clipping introduces -- a rebuild on camera pans -- is already being paid. Battleon's
+    /// town art carries a 3736x1848 layer that animates continuously; on a 1440p screen it
+    /// is under the 2x area threshold that ordinarily justifies clipping, and rebuilding
+    /// its full seven megapixels 49 times a second was pure waste.
+    fn is_hot_rebuilder(&self) -> bool {
+        self.dirty_streak >= CACHE_HOT_REBUILDER_STREAK
     }
 
     fn dirty_reason(
@@ -617,6 +637,8 @@ impl BitmapCache {
         viewport_clipped: bool,
     ) {
         self.viewport_clipped = viewport_clipped;
+        // `update` only runs for a dirty rebuild, so this counts them; a clean hit resets it.
+        self.dirty_streak = self.dirty_streak.saturating_add(1);
         self.matrix_a = matrix.a;
         self.matrix_b = matrix.b;
         self.matrix_c = matrix.c;
@@ -698,7 +720,7 @@ impl BitmapCache {
     /// first time, so nothing is lost but the work of rebuilding it.
     ///
     /// `None` never releases, which is what every build before the sweep existed did.
-    fn sweep_if_idle(&mut self, sweeps_before_release: Option<u8>) -> bool {
+    pub(crate) fn sweep_if_idle(&mut self, sweeps_before_release: Option<u8>) -> bool {
         if std::mem::take(&mut self.drawn_since_sweep) {
             self.idle_sweeps = 0;
             return false;
@@ -721,6 +743,11 @@ impl BitmapCache {
 
     fn handle(&self) -> Option<BitmapHandle> {
         self.bitmap.as_ref().map(|b| b.handle.clone())
+    }
+
+    /// Whether a GPU surface is currently allocated, without cloning its handle.
+    pub(crate) fn has_surface(&self) -> bool {
+        self.bitmap.is_some()
     }
 
     fn output_size(&self) -> (u32, u32) {
@@ -1533,7 +1560,7 @@ impl<'gc> DisplayObjectBase<'gc> {
         }
     }
 
-    fn bitmap_cache_mut(&self) -> RefMut<'_, Option<BitmapCache>> {
+    pub(crate) fn bitmap_cache_mut(&self) -> RefMut<'_, Option<BitmapCache>> {
         RefMut::map(self.cell.borrow_mut(), |c| &mut c.cache)
     }
 
@@ -1675,6 +1702,16 @@ const CACHE_VIEWPORT_MARGIN: f64 = 128.0;
 /// Below this the saving does not pay for the rebuild that a camera pan now costs.
 const CACHE_VIEWPORT_CLIP_RATIO: f64 = 2.0;
 
+/// The ratio once a cache has proved it rebuilds every frame anyway.
+///
+/// Pan rebuilds are the cost the ordinary ratio guards against, and a hot rebuilder is
+/// already paying a rebuild per frame, so any pixel saved is free: clip as soon as the
+/// object is bigger than the viewport at all.
+const CACHE_HOT_VIEWPORT_CLIP_RATIO: f64 = 1.0;
+
+/// Consecutive dirty rebuilds before a cache counts as a hot rebuilder -- about a second.
+const CACHE_HOT_REBUILDER_STREAK: u8 = 60;
+
 /// Confine an enormous cache to the part of it that can actually be seen.
 ///
 /// A `cacheAsBitmap` object is otherwise rendered offscreen at its full size however little of it
@@ -1689,18 +1726,28 @@ const CACHE_VIEWPORT_CLIP_RATIO: f64 = 2.0;
 /// off screen and not otherwise.
 ///
 /// Returns `None` when the object is small enough to leave alone.
+///
+/// `hot_rebuilder` relaxes the size threshold: a cache that rebuilds every frame has
+/// already paid the pan-rebuild cost clipping would introduce, so it is clipped as soon as
+/// it exceeds the viewport at all. See [`BitmapCache::is_hot_rebuilder`].
 fn clip_cache_bounds_to_viewport(
     bounds: Rectangle<Twips>,
     viewport_width: u32,
     viewport_height: u32,
+    hot_rebuilder: bool,
 ) -> Option<Rectangle<Twips>> {
     if !bounds.is_valid() || viewport_width == 0 || viewport_height == 0 {
         return None;
     }
 
+    let clip_ratio = if hot_rebuilder {
+        CACHE_HOT_VIEWPORT_CLIP_RATIO
+    } else {
+        CACHE_VIEWPORT_CLIP_RATIO
+    };
     let viewport_area = f64::from(viewport_width) * f64::from(viewport_height);
     let bounds_area = bounds.width().to_pixels() * bounds.height().to_pixels();
-    if bounds_area <= viewport_area * CACHE_VIEWPORT_CLIP_RATIO {
+    if bounds_area <= viewport_area * clip_ratio {
         return None;
     }
 
@@ -2030,10 +2077,24 @@ pub fn render_base<'gc>(
 
             // An object far larger than the window is cached only where it can be seen. See
             // `clip_cache_bounds_to_viewport`; AQW's map layers are several times the viewport and
-            // are redrawn in full every frame without this.
+            // are redrawn in full every frame without this. Whether the cache has been rebuilding
+            // every frame is read up front, in a borrow of its own, because it changes how large
+            // the object must be before clipping pays.
+            let hot_rebuilder = this
+                .base()
+                .bitmap_cache_mut()
+                .as_ref()
+                .is_some_and(BitmapCache::is_hot_rebuilder);
             let viewport = context.renderer.viewport_dimensions();
             let clipped_bounds = (!context.is_offscreen && cache_viewport_clip_enabled())
-                .then(|| clip_cache_bounds_to_viewport(bounds, viewport.width, viewport.height))
+                .then(|| {
+                    clip_cache_bounds_to_viewport(
+                        bounds,
+                        viewport.width,
+                        viewport.height,
+                        hot_rebuilder,
+                    )
+                })
                 .flatten();
             let viewport_clipped = clipped_bounds.is_some();
             let bounds = clipped_bounds.unwrap_or(bounds);
@@ -2190,6 +2251,13 @@ pub fn render_base<'gc>(
                                 this.as_ptr() as usize as u64,
                                 cache_update_started.elapsed(),
                             );
+                            // The one place surfaces come into being, so the one place the
+                            // sweep registry has to hear about them. See
+                            // `Library::register_cache_surface`.
+                            #[cfg(feature = "aether_performance")]
+                            if cache.has_surface() {
+                                context.new_cache_surfaces.push(Gc::downgrade(this.base()));
+                            }
                             let logical_size = cache.output_size();
                             cache.note_drawn();
                             cache_info = cache.handle().map(|handle| DrawCacheInfo {
@@ -2294,6 +2362,8 @@ pub fn render_base<'gc>(
                 renderer: context.renderer,
                 commands: CommandList::new(),
                 cache_draws: context.cache_draws,
+                #[cfg(feature = "aether_performance")]
+                new_cache_surfaces: context.new_cache_surfaces,
                 gc_context: context.gc_context,
                 library: context.library,
                 transform_stack: &mut transform_stack,
@@ -3402,37 +3472,6 @@ pub trait TDisplayObject<'gc>:
     /// Refresh exact AQW AvatarMC root cache eligibility.
     ///
     /// Descendants are traversed so any stale eligibility from reparenting is cleared, but
-    /// Release `cacheAsBitmap` surfaces in this subtree that were not drawn since the last sweep.
-    ///
-    /// Returns how many were released.
-    ///
-    /// Library bitmap uploads have had an idle sweep for a while; these never did. A cache surface
-    /// lives on the display object rather than in the library, so nothing the library sweeps can
-    /// reach it, and it was held for as long as the object lived however long ago it last drew. A
-    /// crowded room measured 9,324 live textures holding 2.25 GB while the pools themselves
-    /// retained only 0.82 GB -- the rest was checked out and never coming back.
-    ///
-    /// Clearing costs the object one rebuild the next time it draws, from the same display list
-    /// that built it originally. See [`BitmapCache::sweep_if_idle`] for the reprieve rule.
-    #[cfg(feature = "aether_performance")]
-    fn sweep_idle_bitmap_caches(self, sweeps_before_release: Option<u8>) -> usize {
-        let mut released = 0;
-
-        if let Some(cache) = self.base().bitmap_cache_mut().as_mut()
-            && cache.sweep_if_idle(sweeps_before_release)
-        {
-            released += 1;
-        }
-
-        if let Some(container) = self.as_container() {
-            for child in container.iter_render_list() {
-                released += child.sweep_idle_bitmap_caches(sweeps_before_release);
-            }
-        }
-
-        released
-    }
-
     /// equipment sublayers never own independent live GPU caches.
     #[cfg(feature = "aether_performance")]
     fn refresh_aether_adaptive_avatar_cache_candidates(self) {
@@ -5725,7 +5764,7 @@ mod cache_viewport_clip_tests {
     #[test]
     fn a_map_several_times_the_window_is_cut_down_to_it() {
         let clipped =
-            clip_cache_bounds_to_viewport(rect(-1900.0, -400.0, 6334.0, 2269.0), 2560, 1440)
+            clip_cache_bounds_to_viewport(rect(-1900.0, -400.0, 6334.0, 2269.0), 2560, 1440, false)
                 .expect("a map this size is worth clipping");
 
         // Never wider than the window plus its margin on each side.
@@ -5745,10 +5784,14 @@ mod cache_viewport_clip_tests {
     /// and would make a camera pan invalidate a cache that is currently untroubled by one.
     #[test]
     fn an_object_that_fits_the_window_is_left_alone() {
-        assert!(clip_cache_bounds_to_viewport(rect(0.0, 0.0, 400.0, 300.0), 2560, 1440).is_none());
+        assert!(
+            clip_cache_bounds_to_viewport(rect(0.0, 0.0, 400.0, 300.0), 2560, 1440, false)
+                .is_none()
+        );
         // Large, but not enough of it off screen to pay for the pan rebuilds.
         assert!(
-            clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2600.0, 1500.0), 2560, 1440).is_none()
+            clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2600.0, 1500.0), 2560, 1440, false)
+                .is_none()
         );
     }
 
@@ -5756,7 +5799,34 @@ mod cache_viewport_clip_tests {
     #[test]
     fn something_completely_off_screen_is_declined() {
         assert!(
-            clip_cache_bounds_to_viewport(rect(9000.0, 9000.0, 8000.0, 8000.0), 2560, 1440)
+            clip_cache_bounds_to_viewport(rect(9000.0, 9000.0, 8000.0, 8000.0), 2560, 1440, false)
+                .is_none()
+        );
+    }
+
+    /// The 21aug26 Battleon whale: 3736x1848 on a 1440p screen is 1.9x the viewport, under
+    /// the 2x threshold, so it was rebuilt at its full seven megapixels 49 times a second.
+    /// Once the cache has proved it rebuilds every frame, the pan-rebuild cost the threshold
+    /// guards against is already sunk, and the same bounds are clipped.
+    #[test]
+    fn a_hot_rebuilder_is_clipped_even_just_under_the_ordinary_threshold() {
+        let whale = rect(-600.0, -200.0, 3736.0, 1848.0);
+        assert!(
+            clip_cache_bounds_to_viewport(whale, 2560, 1440, false).is_none(),
+            "cold, the whale stays under the 2x threshold"
+        );
+        let clipped = clip_cache_bounds_to_viewport(whale, 2560, 1440, true)
+            .expect("hot, the same whale is clipped");
+        assert!(clipped.width().to_pixels() <= 2560.0 + CACHE_VIEWPORT_MARGIN * 2.0);
+        assert!(clipped.height().to_pixels() <= 1440.0 + CACHE_VIEWPORT_MARGIN * 2.0);
+    }
+
+    /// Hot or not, an object the viewport already covers gains nothing from clipping: the
+    /// clipped rectangle would be the object itself, and the 10% saving guard declines it.
+    #[test]
+    fn a_hot_rebuilder_that_fits_the_window_is_still_left_alone() {
+        assert!(
+            clip_cache_bounds_to_viewport(rect(0.0, 0.0, 2000.0, 1200.0), 2560, 1440, true)
                 .is_none()
         );
     }

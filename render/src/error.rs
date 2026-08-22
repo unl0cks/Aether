@@ -50,4 +50,12 @@ pub enum Error {
 
     #[error("Could not read pixels back from the graphics device")]
     GpuReadbackFailed,
+
+    /// The backend refused to allocate because live texture memory is over its budget.
+    ///
+    /// Only `cacheAsBitmap` surfaces are ever refused, and their caller falls back to
+    /// rendering the object directly, so this is a graceful degradation rather than a
+    /// failure: the object looks the same and simply is not cached until pressure clears.
+    #[error("Texture memory budget exhausted")]
+    TextureBudgetExhausted,
 }

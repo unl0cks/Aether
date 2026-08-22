@@ -27,8 +27,8 @@
 //! reusing this pool would have to clear for itself.
 
 use fnv::FnvHashMap;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Mutex, OnceLock};
 
 /// Whether the idle set is held to what a small card can afford.
 ///
@@ -76,6 +76,44 @@ const LOW_VRAM_MAX_IDLE_BYTES: u64 = 32 * 1024 * 1024;
 /// Bytes alone would let a flood of tiny surfaces mint thousands of buckets, which costs lookup
 /// time and memory in the map rather than in the textures.
 const MAX_IDLE_ENTRIES: usize = 512;
+
+/// How much total texture memory may be live before new cache surfaces are refused.
+///
+/// Sized from two measurements. A healthy 47-minute session on a 10 GB card peaked at
+/// 1,407 MB of live texture memory, so this binds on nothing normal. A runaway on a 4 GB
+/// card -- one broken particle effect spawning thousands of cached skulls -- went from
+/// 1,576 to 4,128 live textures (3.3 GB) in three minutes and took the machine down with
+/// it, VRAM spilling over PCIe into system RAM. The budget stops that climb at a point
+/// where a 4 GB card is still workable.
+const DEFAULT_TEXTURE_BUDGET_BYTES: u64 = 2560 * 1024 * 1024;
+
+/// The same, for a card that cannot spare it. On a 2 GB card the default budget IS the
+/// whole card, so pressure has to start far earlier.
+const LOW_VRAM_TEXTURE_BUDGET_BYTES: u64 = 1280 * 1024 * 1024;
+
+/// The live-texture-memory ceiling above which new `cacheAsBitmap` surfaces are refused
+/// and the idle sweep turns eager.
+///
+/// `AETHER_TEXTURE_BUDGET_MB` pins it for a measuring run; `0` refuses every fresh cache
+/// surface, which is the control for measuring what caching buys. The refusal path is
+/// graceful -- the object renders direct, identically -- so a too-small budget costs
+/// speed, never correctness.
+pub fn texture_memory_budget_bytes() -> u64 {
+    static ENV_OVERRIDE: OnceLock<Option<u64>> = OnceLock::new();
+    let env = *ENV_OVERRIDE.get_or_init(|| {
+        std::env::var("AETHER_TEXTURE_BUDGET_MB")
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .map(|megabytes| megabytes.saturating_mul(1024 * 1024))
+    });
+    env.unwrap_or_else(|| {
+        if LOW_VRAM.load(Ordering::Relaxed) {
+            LOW_VRAM_TEXTURE_BUDGET_BYTES
+        } else {
+            DEFAULT_TEXTURE_BUDGET_BYTES
+        }
+    })
+}
 
 #[derive(Debug)]
 struct Inner<T> {

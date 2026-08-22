@@ -40,6 +40,7 @@ use std::cell::Cell;
 use std::collections::VecDeque;
 use std::num::NonZeroU32;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use swf::Color;
 use tracing::instrument;
 use wgpu::SubmissionIndex;
@@ -803,6 +804,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
             buffers: hal.buffers.read().max(0) as u64,
             buffer_bytes: hal.buffer_memory.read().max(0) as u64,
             memory_allocations: hal.memory_allocations.read().max(0) as u64,
+            texture_budget_bytes: Some(crate::cache_texture_pool::texture_memory_budget_bytes()),
+            budget_denials: TEXTURE_BUDGET_DENIALS.load(Ordering::Relaxed),
         })
     }
 
@@ -1594,10 +1597,42 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
         //
         // The texture arrives with its previous contents. Safe here because the sole caller is the
         // bitmap cache, which pairs every allocation with a rebuild that clears.
-        let texture = self
-            .cache_texture_pool
-            .take(width, height)
-            .unwrap_or_else(|| {
+        let texture = match self.cache_texture_pool.take(width, height) {
+            Some(texture) => texture,
+            None => {
+                // A fresh driver allocation is the one path that grows live texture memory, so
+                // it is the one place the budget is enforced. Pool reuse above stays allowed
+                // under pressure: it adds nothing. Refusal is graceful -- the bitmap cache
+                // renders the object direct instead -- which is why a budget can exist at all.
+                let live_texture_bytes = self
+                    .descriptors
+                    .device
+                    .get_internal_counters()
+                    .hal
+                    .texture_memory
+                    .read()
+                    .max(0) as u64;
+                let budget = crate::cache_texture_pool::texture_memory_budget_bytes();
+                if live_texture_bytes > budget {
+                    TEXTURE_BUDGET_DENIALS.fetch_add(1, Ordering::Relaxed);
+                    // Log the transitions, not the denials: a storm denies thousands of times
+                    // a second and a warn per denial would drown the log it is meant to serve.
+                    if !TEXTURE_BUDGET_DENYING.swap(true, Ordering::Relaxed) {
+                        tracing::warn!(
+                            "texture memory budget reached ({} MB live, {} MB budget): \
+                             new cache surfaces render direct until pressure clears",
+                            live_texture_bytes / (1024 * 1024),
+                            budget / (1024 * 1024),
+                        );
+                    }
+                    return Err(BitmapError::TextureBudgetExhausted);
+                }
+                if TEXTURE_BUDGET_DENYING.swap(false, Ordering::Relaxed) {
+                    tracing::info!(
+                        "texture memory pressure cleared ({} MB live)",
+                        live_texture_bytes / (1024 * 1024),
+                    );
+                }
                 let texture_label = create_debug_label!("Bitmap");
                 self.descriptors
                     .device
@@ -1614,7 +1649,8 @@ impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
                             | wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::COPY_SRC,
                     })
-            });
+            }
+        };
         Ok(BitmapHandle(Arc::new(Texture {
             texture,
             bind_linear: Default::default(),
@@ -2198,6 +2234,15 @@ const DEFAULT_MAX_ATLAS_GROUP: usize = 8;
 /// there and is not on the 2 GB cards low VRAM mode exists for. Three still captures most of the
 /// grouping, since the average group is 3.9.
 const LOW_VRAM_MAX_ATLAS_GROUP: usize = 3;
+
+/// Whether the texture-memory budget is currently refusing fresh cache surfaces.
+///
+/// Exists so the log records the *transitions* -- pressure reached, pressure cleared --
+/// rather than a line per refusal, of which a storm produces thousands a second.
+static TEXTURE_BUDGET_DENYING: AtomicBool = AtomicBool::new(false);
+
+/// Session total of refused cache-surface allocations, reported through the resource census.
+static TEXTURE_BUDGET_DENIALS: AtomicU64 = AtomicU64::new(0);
 
 static FILTER_ATLAS_MAX_GROUP: std::sync::atomic::AtomicUsize =
     std::sync::atomic::AtomicUsize::new(DEFAULT_MAX_ATLAS_GROUP);

@@ -783,6 +783,24 @@ impl<'gc> Font<'gc> {
         self.0.glyphs.get_by_index(i)
     }
 
+    /// Release the registered meshes of glyphs that have gone undrawn since the last
+    /// sweep, returning how many were released.
+    ///
+    /// AQW loads a font per gear SWF and every chat line and label registers meshes from
+    /// them, so live glyph meshes only ever accumulated: a 2.5-hour session grew from
+    /// 13k to 42k live GPU buffers with textures flat, and this was the unswept class.
+    /// The parsed glyph shape stays, so an evicted glyph re-registers on its next draw
+    /// exactly as it registered the first time.
+    pub fn sweep_idle_glyph_handles(&self) -> usize {
+        match &self.0.glyphs {
+            GlyphSource::Memory { glyphs, .. } => glyphs
+                .iter()
+                .filter(|glyph| glyph.shape.sweep_idle_handle())
+                .count(),
+            _ => 0,
+        }
+    }
+
     /// Returns a glyph entry by character.
     /// Used by `EditText` display objects.
     pub fn get_glyph_for_char(&self, c: char) -> Option<GlyphRef<'_>> {
@@ -960,24 +978,54 @@ enum SwfGlyphOrShape {
         shape: swf::Shape,
         // Handle to registered shape, loaded lazily on first render of this glyph.
         handle: Option<ShapeHandle>,
+        /// Whether this glyph has been rendered since the last idle sweep. The same
+        /// second-chance clock as `BitmapCharacter`: a registered mesh that no text on
+        /// screen is using anymore is released, and re-registers from `shape` on demand.
+        drawn_since_sweep: bool,
     },
     Poisoned,
 }
 
 impl SwfGlyphOrShape {
-    fn shape(&mut self) -> (&mut swf::Shape, &mut Option<ShapeHandle>) {
+    fn shape(&mut self) -> (&mut swf::Shape, &mut Option<ShapeHandle>, &mut bool) {
         if let Self::Glyph(_) = self
             && let Self::Glyph(glyph) = core::mem::replace(self, Self::Poisoned)
         {
             *self = Self::Shape {
                 shape: ruffle_render::shape_utils::swf_glyph_to_shape(glyph),
                 handle: None,
+                drawn_since_sweep: false,
             };
         }
 
         match self {
-            SwfGlyphOrShape::Shape { shape, handle } => (shape, handle),
+            SwfGlyphOrShape::Shape {
+                shape,
+                handle,
+                drawn_since_sweep,
+            } => (shape, handle, drawn_since_sweep),
             _ => unreachable!(),
+        }
+    }
+
+    /// Release this glyph's registered mesh unless it has been drawn since the previous
+    /// sweep. Returns whether a handle was released.
+    ///
+    /// A glyph still in the raw `Glyph` state has never been registered, so there is
+    /// nothing to release and nothing is converted: conversion happens on first draw.
+    fn sweep_idle_handle(&mut self) -> bool {
+        match self {
+            Self::Shape {
+                handle,
+                drawn_since_sweep,
+                ..
+            } => {
+                if core::mem::take(drawn_since_sweep) {
+                    return false;
+                }
+                handle.take().is_some()
+            }
+            _ => false,
         }
     }
 }
@@ -1014,7 +1062,7 @@ impl GlyphShape {
         match self {
             GlyphShape::Swf(glyph) => {
                 let mut glyph = glyph.borrow_mut();
-                let (shape, _) = glyph.shape();
+                let (shape, _, _) = glyph.shape();
                 shape.shape_bounds.contains(point)
                     && ruffle_render::shape_utils::shape_hit_test(shape, point, local_matrix)
             }
@@ -1031,7 +1079,8 @@ impl GlyphShape {
         match self {
             GlyphShape::Swf(glyph) => {
                 let mut glyph = glyph.borrow_mut();
-                let (shape, handle) = glyph.shape();
+                let (shape, handle, drawn_since_sweep) = glyph.shape();
+                *drawn_since_sweep = true;
                 handle.get_or_insert_with(|| {
                     renderer.register_shape((&*shape).into(), &NullBitmapSource)
                 });
@@ -1052,6 +1101,19 @@ impl GlyphShape {
                 .cloned()
                 .map(|handle| GlyphRenderData::from_bitmap(handle, bitmap.tx)),
             GlyphShape::None => None,
+        }
+    }
+
+    /// Release this glyph's registered mesh if it has gone undrawn since the last sweep.
+    ///
+    /// Only SWF-embedded glyphs participate: they are the ones AQW loads by the hundreds
+    /// of fonts, one per gear SWF. Device-font glyphs belong to the handful of fonts on
+    /// the machine, and bitmap glyphs hold their handle in a `OnceCell` that nothing can
+    /// take back.
+    fn sweep_idle_handle(&self) -> bool {
+        match self {
+            GlyphShape::Swf(glyph) => glyph.borrow_mut().sweep_idle_handle(),
+            _ => false,
         }
     }
 }

@@ -9,7 +9,7 @@ use crate::prelude::*;
 use crate::string::{AvmString, WStr};
 use crate::tag_utils::SwfMovie;
 use gc_arena::collect::Trace;
-use gc_arena::{Collect, Mutation};
+use gc_arena::{Collect, Gc, GcWeak, Mutation};
 use ruffle_render::backend::RenderBackend;
 use ruffle_render::bitmap::BitmapHandle;
 use ruffle_render::utils::remove_invalid_jpeg_data;
@@ -234,16 +234,23 @@ impl<'gc> MovieLibrary<'gc> {
 
     /// Evict cached GPU uploads that have not been drawn since the previous sweep,
     /// returning how many were released.
+    ///
+    /// A font counts one per glyph mesh released rather than one per font: a font is
+    /// hundreds of independently registered meshes, and the census reads this number as
+    /// "uploads released".
     pub fn sweep_idle_gpu_uploads(&self) -> usize {
         self.characters
             .values()
-            .filter(|character| match character {
-                Character::Bitmap(bitmap) => bitmap.sweep_idle_gpu_upload(),
-                Character::Graphic(graphic) => graphic.sweep_idle_gpu_upload(),
-                Character::MorphShape(morph_shape) => morph_shape.sweep_idle_gpu_upload(),
-                _ => false,
+            .map(|character| match character {
+                Character::Bitmap(bitmap) => usize::from(bitmap.sweep_idle_gpu_upload()),
+                Character::Graphic(graphic) => usize::from(graphic.sweep_idle_gpu_upload()),
+                Character::MorphShape(morph_shape) => {
+                    usize::from(morph_shape.sweep_idle_gpu_upload())
+                }
+                Character::Font(font) => font.sweep_idle_glyph_handles(),
+                _ => 0,
             })
-            .count()
+            .sum()
     }
 
     /// Registers a character; returns `true` if successful, or `false` if a character with
@@ -577,6 +584,27 @@ pub struct Library<'gc> {
     /// references has already taken its characters with it.
     #[collect(require_static)]
     movies_by_url: FnvHashMap<(String, Option<String>), Weak<SwfMovie>>,
+
+    /// Every display object currently holding a live `cacheAsBitmap` surface.
+    ///
+    /// The sweep used to walk the stage and the orphans, which misses the deepest retention:
+    /// AQW keeps objects alive in its own data structures long after they leave both, and
+    /// their surfaces -- measured at 9,324 live textures holding 2.25 GB against 0.82 GB in
+    /// the pools -- were unreachable by any walk. Surfaces are allocated in exactly one
+    /// place, so registering there makes this list complete by construction, whatever is
+    /// retaining the object.
+    ///
+    /// Weak by the same argument as the orphan list: a registry entry must not keep an
+    /// object alive. Held as the object's *base* rather than a `DisplayObject`, because the
+    /// cache lives on the base, every kind of display object has one, and
+    /// `DisplayObject::downgrade` only supports three of the kinds that can carry a cache.
+    cache_surfaces: Vec<GcWeak<'gc, crate::display_object::DisplayObjectBase<'gc>>>,
+
+    /// Addresses of everything in `cache_surfaces`, so registration is a lookup rather than
+    /// a walk. Keyed by address exactly as the orphan list is, and sound for the same
+    /// reason: a `GcWeak` keeps its allocation alive, so live entries cannot collide.
+    #[collect(require_static)]
+    cache_surfaces_present: FnvHashSet<usize>,
 }
 
 /// How many loads have been served an already-resident movie instead of parsing a second copy.
@@ -613,7 +641,67 @@ impl<'gc> Library<'gc> {
             default_font_cache: Default::default(),
             avm2_class_registry: Default::default(),
             movies_by_url: Default::default(),
+            cache_surfaces: Vec::new(),
+            cache_surfaces_present: Default::default(),
         }
+    }
+
+    /// Note that this display object was just given a live `cacheAsBitmap` surface.
+    ///
+    /// Fed from the one place surfaces are allocated, which is what makes
+    /// [`Self::sweep_idle_cache_surfaces`] complete. Takes the weak the render pass
+    /// collected -- the library is borrowed immutably while rendering, so the player
+    /// drains the frame's allocations in here afterwards. Registering the same object
+    /// again while its surface lives is a no-op.
+    pub fn register_cache_surface(
+        &mut self,
+        surface_owner: GcWeak<'gc, crate::display_object::DisplayObjectBase<'gc>>,
+    ) {
+        if self
+            .cache_surfaces_present
+            .insert(GcWeak::as_ptr(surface_owner) as usize)
+        {
+            self.cache_surfaces.push(surface_owner);
+        }
+    }
+
+    /// Release `cacheAsBitmap` surfaces that have gone undrawn long enough, wherever their
+    /// owners are retained. Returns how many surfaces were released.
+    ///
+    /// Entries leave the registry when their object dies or their surface is gone --
+    /// released here, or cleared by an invalidation that never rebuilt. An object whose
+    /// surface was released re-registers the next time it rebuilds one, so pruning is safe.
+    pub fn sweep_idle_cache_surfaces(
+        &mut self,
+        mc: &Mutation<'gc>,
+        sweeps_before_release: Option<u8>,
+    ) -> usize {
+        let mut released = 0;
+        let present = &mut self.cache_surfaces_present;
+        self.cache_surfaces.retain(|weak| {
+            let Some(base) = weak.upgrade(mc) else {
+                present.remove(&(weak.as_ptr() as usize));
+                return false;
+            };
+            let mut cache = base.bitmap_cache_mut();
+            let Some(cache) = cache.as_mut() else {
+                present.remove(&(Gc::as_ptr(base) as usize));
+                return false;
+            };
+            if cache.sweep_if_idle(sweeps_before_release) {
+                released += 1;
+                present.remove(&(Gc::as_ptr(base) as usize));
+                return false;
+            }
+            // Still holding a surface (or spared this sweep); an entry whose surface was
+            // cleared some other way is pruned too, since rebuilding re-registers it.
+            if !cache.has_surface() {
+                present.remove(&(Gc::as_ptr(base) as usize));
+                return false;
+            }
+            true
+        });
+        released
     }
 
     /// The movie already parsed from this URL, if one is still resident.

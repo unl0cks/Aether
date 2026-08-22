@@ -2488,17 +2488,28 @@ impl Player {
                 tracing::debug!("Evicted {released} idle GPU uploads");
             }
 
-            // `cacheAsBitmap` surfaces live on display objects, not in the library, so the sweep
-            // above cannot see one. Reached from the two roots that can still draw: the stage, and
-            // the orphans, which keep advancing after being detached and so keep their caches.
-            let sweeps_before_release =
-                crate::aether_performance::bitmap_cache_sweep().sweeps_before_release();
-            let mut caches = context
-                .stage
-                .sweep_idle_bitmap_caches(sweeps_before_release);
-            crate::orphan_manager::OrphanManager::each_orphan_obj(context, |dobj, _| {
-                caches += dobj.sweep_idle_bitmap_caches(sweeps_before_release);
+            // Over the renderer's texture budget, patience is the wrong trade: the budget is
+            // already refusing new surfaces, and every idle one released frees room for a
+            // drawn one. Measured on a 4 GB card, the alternative was 3.3 GB of live cache
+            // textures in three minutes and VRAM spilling over PCIe.
+            let over_texture_budget = context.renderer.resource_census().is_some_and(|census| {
+                census
+                    .texture_budget_bytes
+                    .is_some_and(|budget| census.texture_bytes > budget)
             });
+
+            // `cacheAsBitmap` surfaces live on display objects, not in the library. Walking
+            // the stage and the orphans used to be how they were found, and it misses the
+            // deepest retention: objects AQW keeps alive in its own data structures are on
+            // neither root. The registry hears about every allocation instead, so it reaches
+            // every surface however its owner is retained.
+            let sweeps_before_release = crate::aether_performance::effective_sweep_limit(
+                crate::aether_performance::bitmap_cache_sweep().sweeps_before_release(),
+                over_texture_budget,
+            );
+            let caches = context
+                .library
+                .sweep_idle_cache_surfaces(context.gc(), sweeps_before_release);
             if caches > 0 {
                 tracing::debug!("Evicted {caches} idle bitmap cache surfaces");
             }
@@ -2555,10 +2566,15 @@ impl Player {
             #[cfg(not(feature = "aether_render_hints"))]
             let commands = CommandList::new();
 
+            #[cfg(feature = "aether_performance")]
+            let mut new_cache_surfaces = vec![];
+
             let mut render_context = RenderContext {
                 renderer: this.renderer.deref_mut(),
                 commands,
                 cache_draws: &mut cache_draws,
+                #[cfg(feature = "aether_performance")]
+                new_cache_surfaces: &mut new_cache_surfaces,
                 gc_context,
                 library: &gc_root.library,
                 transform_stack: &mut this.transform_stack,
@@ -2607,6 +2623,13 @@ impl Player {
                     .cache_draw_capacity_hint
                     .max(cache_draw_hint)
                     .min(MAX_CACHE_DRAW_HINT);
+            }
+
+            // The render pass could only collect these; the library was immutably borrowed
+            // for it. Now that the frame's borrows are back, tell the sweep registry.
+            #[cfg(feature = "aether_performance")]
+            for surface_owner in new_cache_surfaces.drain(..) {
+                gc_root.library.register_cache_surface(surface_owner);
             }
 
             (cache_draws, commands)

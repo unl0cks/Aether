@@ -43,6 +43,17 @@ pub struct RenderResourceCensus {
     /// Real driver allocations. Vulkan caps these per device, so this can exhaust while most of
     /// the card is still free.
     pub memory_allocations: u64,
+    /// The backend's texture-memory budget, if it enforces one.
+    ///
+    /// `texture_bytes` above this means the backend is refusing new `cacheAsBitmap`
+    /// surfaces, and the idle sweep should turn eager until the pressure clears.
+    pub texture_budget_bytes: Option<u64>,
+    /// How many `cacheAsBitmap` surface allocations the budget has refused so far.
+    ///
+    /// Cumulative for the session, so a census can print a delta. A large number here on a
+    /// small card is the budget doing its job; a large number on a big card means the
+    /// budget is set too low for the content.
+    pub budget_denials: u64,
 }
 
 pub trait RenderBackend: Any {

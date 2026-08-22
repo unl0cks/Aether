@@ -1527,10 +1527,16 @@ pub fn draw<'gc>(
     transform_stack.push(&transform);
 
     let mut cache_draws = vec![];
+    // Never populated here: `use_bitmap_cache` is false, so nothing under this draw
+    // allocates a cache surface. The registry only cares about ones that exist.
+    #[cfg(feature = "aether_performance")]
+    let mut new_cache_surfaces = vec![];
     let mut render_context = RenderContext {
         renderer: context.renderer,
         commands: CommandList::new(),
         cache_draws: &mut cache_draws,
+        #[cfg(feature = "aether_performance")]
+        new_cache_surfaces: &mut new_cache_surfaces,
         gc_context: context.gc_context,
         library: context.library,
         transform_stack: &mut transform_stack,

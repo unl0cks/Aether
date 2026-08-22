@@ -608,6 +608,15 @@ pub struct RenderContext<'a, 'gc> {
     /// Any offscreen draws that should be used to redraw a cacheAsBitmap
     pub cache_draws: &'a mut Vec<BitmapCacheEntry>,
 
+    /// Display objects that allocated a `cacheAsBitmap` surface during this render.
+    ///
+    /// The library is only borrowed immutably while rendering, so the idle-sweep registry
+    /// cannot be appended in place; the player drains this into
+    /// `Library::register_cache_surface` once the frame's borrows are released.
+    #[cfg(feature = "aether_performance")]
+    pub new_cache_surfaces:
+        &'a mut Vec<gc_arena::GcWeak<'gc, crate::display_object::DisplayObjectBase<'gc>>>,
+
     /// The GC context, used to perform any `Gc` writes that must occur during rendering.
     pub gc_context: &'gc Mutation<'gc>,
 

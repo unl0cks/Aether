@@ -198,7 +198,7 @@ impl MemoryCensus {
             let mb = |bytes: u64| bytes / (1024 * 1024);
             tracing::info!(
                 "gpu census: textures {} ({:+}) holding {} ({:+}) MB | buffers {} ({:+}) holding \
-                 {} ({:+}) MB | driver allocations {} ({:+})",
+                 {} ({:+}) MB | driver allocations {} ({:+}) | budget {} denials {}",
                 render.textures,
                 delta64(render.textures, first.textures),
                 mb(render.texture_bytes),
@@ -209,6 +209,10 @@ impl MemoryCensus {
                 delta64(mb(render.buffer_bytes), mb(first.buffer_bytes)),
                 render.memory_allocations,
                 delta64(render.memory_allocations, first.memory_allocations),
+                render
+                    .texture_budget_bytes
+                    .map_or("off".to_string(), |bytes| format!("{} MB", mb(bytes))),
+                render.budget_denials,
             );
         }
     }

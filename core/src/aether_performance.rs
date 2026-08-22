@@ -141,6 +141,19 @@ mod tests {
     }
 
     #[test]
+    fn texture_pressure_makes_the_sweep_eager_but_respects_off() {
+        // Balanced patience collapses to one missed sweep under pressure...
+        assert_eq!(effective_sweep_limit(Some(15), true), Some(1));
+        assert_eq!(effective_sweep_limit(Some(5), true), Some(1));
+        // ...and stays untouched without it.
+        assert_eq!(effective_sweep_limit(Some(15), false), Some(15));
+        // Off is an explicit user choice, kept even under pressure: the allocation
+        // budget bounds the damage without releasing anything behind their back.
+        assert_eq!(effective_sweep_limit(None, true), None);
+        assert_eq!(effective_sweep_limit(None, false), None);
+    }
+
+    #[test]
     fn aqw_adaptive_avatar_candidate_requires_exact_public_class_and_spider_movie() {
         assert!(is_aqw_avatar_cache_candidate(
             "https://game.aq.com/game/gamefiles/spider.swf",
@@ -319,6 +332,19 @@ pub fn set_bitmap_cache_sweep(choice: BitmapCacheSweep) {
         .position(|candidate| *candidate == choice)
         .unwrap_or(2) as u8;
     BITMAP_CACHE_SWEEP.store(index, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The sweep patience actually applied, given whether the renderer is over its texture budget.
+///
+/// Under pressure an idle surface is released at the first sweep it misses -- roughly two to
+/// four seconds -- because the alternative, measured on a 4 GB card, is VRAM spilling over
+/// PCIe and taking the whole machine with it. `Off` stays `Off`: someone who chose never to
+/// release keeps that choice, and the allocation budget still bounds the damage on its own.
+pub fn effective_sweep_limit(configured: Option<u8>, over_texture_budget: bool) -> Option<u8> {
+    match (configured, over_texture_budget) {
+        (Some(limit), true) => Some(limit.min(1)),
+        (configured, _) => configured,
+    }
 }
 
 pub fn bitmap_cache_sweep() -> BitmapCacheSweep {
