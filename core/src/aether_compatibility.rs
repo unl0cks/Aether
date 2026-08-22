@@ -859,6 +859,7 @@ pub fn style_aqw_fps_display(
             Avm2Value::Number(y_now - bounds_y),
             &mut activation,
         )?;
+        raise_to_top_of(ui, fps, &mut activation)?;
         Ok(true)
     })();
 
@@ -866,6 +867,82 @@ pub fn style_aqw_fps_display(
         Ok(styled) => styled,
         Err(error) => {
             tracing::warn!(?error, "AQW FPS counter styling failed");
+            false
+        }
+    }
+}
+
+/// Move `child` to the top of `parent`'s display list, if it is not already there.
+fn raise_to_top_of<'gc>(
+    parent: Avm2Value<'gc>,
+    child: Avm2Value<'gc>,
+    activation: &mut Avm2Activation<'_, 'gc>,
+) -> Result<(), crate::avm2::Error<'gc>> {
+    let top = parent
+        .get_public_property(AvmString::new_utf8(activation.gc(), "numChildren"), activation)?
+        .coerce_to_i32(activation)?
+        - 1;
+    if top < 0 {
+        return Ok(());
+    }
+    let current = parent
+        .call_public_property(
+            AvmString::new_utf8(activation.gc(), "getChildIndex"),
+            Avm2FunctionArgs::from_slice(&[child]),
+            activation,
+        )?
+        .coerce_to_i32(activation)?;
+    if current != top {
+        parent.call_public_property(
+            AvmString::new_utf8(activation.gc(), "setChildIndex"),
+            Avm2FunctionArgs::from_slice(&[child, Avm2Value::Integer(top)]),
+            activation,
+        )?;
+    }
+    Ok(())
+}
+
+/// Keep AQW's FPS counter above the game's own panels.
+///
+/// The game menu, shops and quest logs are added to `ui` after the counter and land higher
+/// in its child list, hiding it. There is no event to hook when that happens, so the host
+/// calls this about once a second; it is a couple of property reads when the order is
+/// already right, and a `setChildIndex` when a panel has just opened over it. Quietly a
+/// no-op outside AQW and before the UI exists, and independent of the counter's visibility:
+/// raising it while hidden simply means it comes back on top.
+pub fn raise_aqw_fps_display(context: &mut UpdateContext<'_>) -> bool {
+    let Some(root) = context.stage.iter_render_list().next() else {
+        return false;
+    };
+    if !is_aqw_game_movie(root.movie().url()) {
+        return false;
+    }
+    let Some(root_object) = root.object2() else {
+        return false;
+    };
+
+    let mut activation = Avm2Activation::from_nothing(context);
+    let raised = (|| -> Result<bool, crate::avm2::Error<'_>> {
+        let ui = Avm2Value::from(root_object)
+            .get_public_property(AvmString::new_utf8(activation.gc(), "ui"), &mut activation)?;
+        if matches!(ui, Avm2Value::Null | Avm2Value::Undefined) {
+            return Ok(false);
+        }
+        let fps = ui.get_public_property(
+            AvmString::new_utf8(activation.gc(), "mcFPS"),
+            &mut activation,
+        )?;
+        if matches!(fps, Avm2Value::Null | Avm2Value::Undefined) {
+            return Ok(false);
+        }
+        raise_to_top_of(ui, fps, &mut activation)?;
+        Ok(true)
+    })();
+
+    match raised {
+        Ok(raised) => raised,
+        Err(error) => {
+            tracing::warn!(?error, "AQW FPS counter raise failed");
             false
         }
     }

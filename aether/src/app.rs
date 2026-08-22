@@ -19,7 +19,7 @@ use ruffle_core::swf::HeaderExt;
 use ruffle_frontend_utils::content::ContentDescriptor;
 use ruffle_render::backend::ViewportDimensions;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{LogicalSize, PhysicalPosition, PhysicalSize, Size};
 use winit::event::{ElementState, Ime, KeyEvent, Modifiers, StartCause, WindowEvent};
@@ -33,6 +33,8 @@ struct MainWindow {
     player: PlayerController,
     minimized: bool,
     mouse_pos: PhysicalPosition<f64>,
+    /// When the FPS counter was last re-asserted to the top of AQW's ui layer.
+    last_fps_counter_raise: Instant,
     /// Whether a left press was delivered to the movie and its release is still owed.
     ///
     /// While set, pointer events reach the movie even when egui reports them consumed,
@@ -643,6 +645,15 @@ impl MainWindow {
                 let core = player.aether_core_census();
                 self.memory_census.record(core);
             }
+            // The game's own panels open above the FPS counter and hide it; there is no
+            // event for that, so its place at the top is re-asserted once a second. A
+            // couple of property reads when nothing changed.
+            if new_time.duration_since(self.last_fps_counter_raise) >= Duration::from_secs(1) {
+                self.last_fps_counter_raise = new_time;
+                player.update(|context| {
+                    ruffle_core::aether_compatibility::raise_aqw_fps_display(context);
+                });
+            }
             self.next_frame_time = Some(new_time + player.time_til_next_frame());
         } else {
             self.next_frame_time = None;
@@ -836,6 +847,7 @@ impl ApplicationHandler<RuffleEvent> for App {
                 loaded,
                 minimized: false,
                 mouse_pos: PhysicalPosition::new(0.0, 0.0),
+                last_fps_counter_raise: Instant::now(),
                 movie_holds_pointer: false,
                 mouse_motion: MouseMotionCoalescer::new(mouse_motion_enabled),
                 modifiers: Modifiers::default(),

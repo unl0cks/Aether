@@ -378,11 +378,14 @@ impl FpsSize {
         }
     }
 
+    /// The whole ladder shifted down one rung on the owner's verdict: the counter at the
+    /// game's own 1.0 was already big enough to be "Big", so Default is the old Small and
+    /// Small goes smaller still.
     pub fn scale(self) -> f64 {
         match self {
-            FpsSize::Small => 0.75,
-            FpsSize::Default => 1.0,
-            FpsSize::Big => 1.5,
+            FpsSize::Small => 0.55,
+            FpsSize::Default => 0.75,
+            FpsSize::Big => 1.0,
         }
     }
 }
