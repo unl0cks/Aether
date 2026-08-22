@@ -41,6 +41,17 @@ pub fn set_low_vram(enabled: bool) {
     LOW_VRAM.store(enabled, Ordering::Relaxed);
 }
 
+/// Whether this adapter is spending the player's system RAM rather than its own.
+///
+/// Set from the adapter, not from a preference, because the player of an integrated part
+/// has no reason to know they are one and the failure is not one they can be asked to
+/// anticipate: the driver reports a budget it cannot honour and the device is simply lost.
+static INTEGRATED_GPU: AtomicBool = AtomicBool::new(false);
+
+pub fn set_integrated_gpu(integrated: bool) {
+    INTEGRATED_GPU.store(integrated, Ordering::Relaxed);
+}
+
 /// Whether cache surfaces are recycled at all.
 ///
 /// On by default, on measurement. `AETHER_CACHE_TEXTURE_POOL=0` sends every allocation to the
@@ -91,6 +102,15 @@ const DEFAULT_TEXTURE_BUDGET_BYTES: u64 = 2560 * 1024 * 1024;
 /// whole card, so pressure has to start far earlier.
 const LOW_VRAM_TEXTURE_BUDGET_BYTES: u64 = 1280 * 1024 * 1024;
 
+/// The ceiling for an adapter with no memory of its own.
+///
+/// A quarter of the discrete budget, the same ratio the general texture pool already gives
+/// integrated parts. An Intel UHD reported "Graphics device lost: Out of memory" at a
+/// 800x600 stage on Low quality -- a scene that has no business holding hundreds of
+/// megabytes of cache surfaces, so a budget this far above its legitimate needs only ever
+/// binds on a runaway.
+const INTEGRATED_TEXTURE_BUDGET_BYTES: u64 = 640 * 1024 * 1024;
+
 /// The live-texture-memory ceiling above which new `cacheAsBitmap` surfaces are refused
 /// and the idle sweep turns eager.
 ///
@@ -107,10 +127,17 @@ pub fn texture_memory_budget_bytes() -> u64 {
             .map(|megabytes| megabytes.saturating_mul(1024 * 1024))
     });
     env.unwrap_or_else(|| {
-        if LOW_VRAM.load(Ordering::Relaxed) {
+        let chosen = if LOW_VRAM.load(Ordering::Relaxed) {
             LOW_VRAM_TEXTURE_BUDGET_BYTES
         } else {
             DEFAULT_TEXTURE_BUDGET_BYTES
+        };
+        // The two are separate facts -- a setting the player chose, and what the adapter
+        // actually is -- so the tighter of them wins rather than one overriding the other.
+        if INTEGRATED_GPU.load(Ordering::Relaxed) {
+            chosen.min(INTEGRATED_TEXTURE_BUDGET_BYTES)
+        } else {
+            chosen
         }
     })
 }
@@ -385,6 +412,34 @@ mod tests {
         inner.entries = 5;
         trim(&mut inner);
         assert_eq!((inner.entries, inner.bytes), (0, 0));
+    }
+
+    /// The two ceilings answer different questions -- what the player asked for, and what
+    /// the adapter is -- so the tighter one has to win either way round.
+    #[test]
+    fn an_integrated_adapter_tightens_the_budget_whatever_the_setting_says() {
+        let restore = (
+            LOW_VRAM.load(Ordering::Relaxed),
+            INTEGRATED_GPU.load(Ordering::Relaxed),
+        );
+
+        set_low_vram(false);
+        set_integrated_gpu(false);
+        assert_eq!(texture_memory_budget_bytes(), DEFAULT_TEXTURE_BUDGET_BYTES);
+
+        set_integrated_gpu(true);
+        assert_eq!(texture_memory_budget_bytes(), INTEGRATED_TEXTURE_BUDGET_BYTES);
+
+        // Low VRAM is already tighter than the discrete default, and still looser than an
+        // integrated part deserves, so the integrated ceiling keeps winning.
+        set_low_vram(true);
+        assert_eq!(texture_memory_budget_bytes(), INTEGRATED_TEXTURE_BUDGET_BYTES);
+
+        set_integrated_gpu(false);
+        assert_eq!(texture_memory_budget_bytes(), LOW_VRAM_TEXTURE_BUDGET_BYTES);
+
+        set_low_vram(restore.0);
+        set_integrated_gpu(restore.1);
     }
 
     #[test]

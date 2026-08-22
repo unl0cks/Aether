@@ -258,6 +258,13 @@ impl<T: RenderTarget> WgpuRenderBackend<T> {
 
         let transforms = DynamicTransforms::new(&descriptors);
         let adapter_info = descriptors.adapter.get_info();
+        // An adapter with no memory of its own gets the tighter cache-surface ceiling, on the
+        // same evidence that already shrinks its texture pool: an Intel UHD reported
+        // "Graphics device lost: Out of memory" at 800x600 on Low quality. The player of an
+        // integrated part cannot be expected to know to ask for that.
+        crate::cache_texture_pool::set_integrated_gpu(
+            crate::texture_pool_policy::is_integrated_gpu(&adapter_info),
+        );
         let active_frame = ActiveFrame::new(
             &descriptors,
             max_cache_entries_per_submission(offscreen_texture_pool_policy, &adapter_info),
