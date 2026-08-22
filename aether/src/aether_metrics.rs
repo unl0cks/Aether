@@ -541,6 +541,9 @@ struct WgpuTexturePoolTotals {
     /// `members / groups` is the content passes each shared pass replaced.
     cache_content_atlas_groups: u64,
     cache_content_atlas_members: u64,
+    /// The same, for complex-blend children sharing a pass instead of taking one each.
+    blend_child_atlas_groups: u64,
+    blend_child_atlas_members: u64,
 }
 
 impl WgpuTexturePoolTotals {
@@ -646,6 +649,12 @@ impl WgpuTexturePoolTotals {
         self.cache_content_atlas_members = self
             .cache_content_atlas_members
             .saturating_add(sample.cache_content_atlas_members);
+        self.blend_child_atlas_groups = self
+            .blend_child_atlas_groups
+            .saturating_add(sample.blend_child_atlas_groups);
+        self.blend_child_atlas_members = self
+            .blend_child_atlas_members
+            .saturating_add(sample.blend_child_atlas_members);
     }
 
     fn take(&mut self) -> Self {
@@ -1300,7 +1309,7 @@ fn perf_summary_line(
          draws {:.0} resolves {:.0}/{:.1} MPx binds {:.0} in {:.1} ms queue {:.1} ms per frame | \
          batching: ideal {:.0} passes, adjacent {:.0}, broke on drawing {:.0} mode {:.0} \
          overlap {:.0}, full-surface {:.0}, unbounded draws {:.0}, moved {:.0},          chunks at box cap {:.0} | \
-         cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels) |          content atlas: {:.1} passes covering {:.1} draws |          cache textures: {:.1} reused, {:.1} created ({:.0}% reuse){}",
+         cache split: filtered {:.1} ms, filterless {:.1} ms | filters {:.0} in {:.0} groups (largest {:.0}, batch {:.2}) |          atlas: {:.1} groups covering {:.1} filters ({:.2} per group, {:.2}x the pixels) |          content atlas: {:.1} passes covering {:.1} draws, blend children {:.1} passes covering {:.1} draws |          cache textures: {:.1} reused, {:.1} created ({:.0}% reuse){}",
         authored_frames_executed as f64 / seconds,
         render_frames as f64 / seconds,
         tick.mean_ms,
@@ -1352,6 +1361,8 @@ fn perf_summary_line(
         encoding.filter_atlas_pixels as f64 / encoding.filter_atlas_member_pixels.max(1) as f64,
         encoding.cache_content_atlas_groups as f64 / rendered_frames,
         encoding.cache_content_atlas_members as f64 / rendered_frames,
+        encoding.blend_child_atlas_groups as f64 / rendered_frames,
+        encoding.blend_child_atlas_members as f64 / rendered_frames,
         encoding.cache_texture_pool_hits as f64 / rendered_frames,
         encoding.cache_texture_pool_misses as f64 / rendered_frames,
         100.0 * encoding.cache_texture_pool_hits as f64

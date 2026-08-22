@@ -138,6 +138,9 @@ pub struct WgpuMetricsSnapshot {
     /// covered. `members / groups` is the content passes each shared pass replaced.
     pub cache_content_atlas_groups: u64,
     pub cache_content_atlas_members: u64,
+    /// The same, for complex-blend children sharing a pass instead of taking one each.
+    pub blend_child_atlas_groups: u64,
+    pub blend_child_atlas_members: u64,
 }
 
 struct PoolCounters {
@@ -567,6 +570,15 @@ pub fn record_cache_texture_pool(hit: bool) {
     }
 }
 
+static BLEND_CHILD_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
+static BLEND_CHILD_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
+
+/// Record a batch of complex-blend children that drew in one shared pass.
+pub fn record_blend_child_atlas(members: u64) {
+    saturating_atomic_add(&BLEND_CHILD_ATLAS_GROUPS, 1);
+    saturating_atomic_add(&BLEND_CHILD_ATLAS_MEMBERS, members);
+}
+
 static CACHE_CONTENT_ATLAS_GROUPS: AtomicU64 = AtomicU64::new(0);
 static CACHE_CONTENT_ATLAS_MEMBERS: AtomicU64 = AtomicU64::new(0);
 
@@ -688,6 +700,8 @@ pub fn take_snapshot() -> WgpuMetricsSnapshot {
         filter_atlas_member_pixels: FILTER_ATLAS_MEMBER_PIXELS.swap(0, Ordering::Relaxed),
         cache_content_atlas_groups: CACHE_CONTENT_ATLAS_GROUPS.swap(0, Ordering::Relaxed),
         cache_content_atlas_members: CACHE_CONTENT_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
+        blend_child_atlas_groups: BLEND_CHILD_ATLAS_GROUPS.swap(0, Ordering::Relaxed),
+        blend_child_atlas_members: BLEND_CHILD_ATLAS_MEMBERS.swap(0, Ordering::Relaxed),
     }
 }
 

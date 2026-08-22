@@ -116,6 +116,14 @@ pub static CACHE_TEXTURE_POOL: RuntimeSwitch =
 pub static CACHE_CONTENT_ATLAS: RuntimeSwitch =
     RuntimeSwitch::new("AETHER_CACHE_CONTENT_ATLAS", true);
 
+/// Draw a frame's complex-blend CHILDREN into one shared pass instead of one each.
+///
+/// Divine Intervention's wings carry ~120 overlay/multiply layers per frame, and every one
+/// rendered its child into a sub-target of its own -- half the blend bill was those child
+/// passes. The composite passes are untouched; only where the children draw changes.
+pub static BLEND_CHILD_ATLAS: RuntimeSwitch =
+    RuntimeSwitch::new("AETHER_BLEND_CHILD_ATLAS", true);
+
 /// Let runs of compatible complex blends share one render pass.
 pub static BLEND_BATCHING: RuntimeSwitch = RuntimeSwitch::new("AETHER_BLEND_BATCH", true);
 
@@ -133,6 +141,7 @@ pub const ALL: &[&RuntimeSwitch] = &[
     &FILTER_ATLAS,
     &CACHE_CONTENT_ATLAS,
     &CACHE_TEXTURE_POOL,
+    &BLEND_CHILD_ATLAS,
     &BLEND_BATCHING,
     &BLEND_REORDERING,
     &BLENDCHECK,

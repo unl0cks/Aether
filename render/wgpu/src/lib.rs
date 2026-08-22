@@ -55,6 +55,7 @@ pub mod blend_region;
 mod buffer_builder;
 mod buffer_pool;
 pub mod cache_texture_pool;
+mod content_grouping;
 #[cfg(feature = "clap")]
 pub mod clap;
 pub mod descriptors;

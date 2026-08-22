@@ -499,6 +499,7 @@ impl Surface {
                                     descriptors,
                                     region,
                                     texture.texture().size(),
+                                    texture.content_origin(),
                                 )
                             })
                         })

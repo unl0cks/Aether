@@ -725,7 +725,7 @@ impl<T: RenderTarget + 'static> WgpuRenderBackend<T> {
             // one shared clear serves everyone, and content that stays in one draw chunk.
             if entry.filters.len() != 1
                 || entry.clear.a != 0
-                || !cache_content_commands_are_groupable(&entry.commands)
+                || !crate::content_grouping::commands_are_groupable(&entry.commands)
             {
                 return None;
             }
@@ -801,7 +801,7 @@ impl<T: RenderTarget + 'static> WgpuRenderBackend<T> {
         let mut combined = CommandList::new();
         for (entry, slot) in group.iter().zip(&slot_of_entry) {
             let slot = (*slot)?;
-            combined.commands.extend(cache_content_commands_translated(
+            combined.commands.extend(crate::content_grouping::commands_translated(
                 &entry.commands,
                 swf::Twips::from_pixels(f64::from(slot.x)),
                 swf::Twips::from_pixels(f64::from(slot.y)),
@@ -903,92 +903,6 @@ impl<T: RenderTarget + 'static> WgpuRenderBackend<T> {
     }
 }
 
-/// Whether these commands can share one render pass with other entries' contents.
-///
-/// The bar is that they stay in one `Chunk::Draw`. A complex or shader blend composites
-/// against "the target", which in a shared atlas would be the neighbours; even a trivial
-/// `Blend` command spawns a sub-target sized to the whole surface unless it is a sole
-/// carried draw, and in an atlas the whole surface is everyone's. Alpha masks and Stage3D
-/// have machinery of their own, and a perspective projection does not commute with the slot
-/// translation. Ordinary masks are fine: they balance within the entry, and the stencil
-/// test only reads pixels the entry itself rasterises.
-fn cache_content_commands_are_groupable(commands: &CommandList) -> bool {
-    use ruffle_render::commands::Command;
-    commands.commands.iter().all(|command| match command {
-        Command::RenderBitmap { transform, .. } | Command::RenderShape { transform, .. } => {
-            transform.perspective_projection.is_none()
-        }
-        Command::DrawRect { .. } | Command::DrawLine { .. } | Command::DrawLineRect { .. } => true,
-        Command::PushMask
-        | Command::ActivateMask
-        | Command::DeactivateMask
-        | Command::PopMask => true,
-        Command::RenderStage3D { .. } | Command::RenderAlphaMask { .. } | Command::Blend(..) => {
-            false
-        }
-    })
-}
-
-/// The same commands, shifted so they draw into an atlas slot instead of at the origin.
-///
-/// Only reached for command lists `cache_content_commands_are_groupable` admitted, so the
-/// variants without a translatable transform cannot appear; they are reproduced unchanged
-/// anyway rather than trusted to stay unreachable.
-fn cache_content_commands_translated(
-    commands: &CommandList,
-    dx: swf::Twips,
-    dy: swf::Twips,
-) -> Vec<ruffle_render::commands::Command> {
-    use ruffle_render::commands::Command;
-    let translate = |matrix: &ruffle_render::matrix::Matrix| {
-        let mut moved = *matrix;
-        moved.tx += dx;
-        moved.ty += dy;
-        moved
-    };
-    commands
-        .commands
-        .iter()
-        .map(|command| match command {
-            Command::RenderBitmap {
-                bitmap,
-                transform,
-                smoothing,
-                pixel_snapping,
-                source_size,
-            } => Command::RenderBitmap {
-                bitmap: bitmap.clone(),
-                transform: ruffle_render::transform::Transform {
-                    matrix: translate(&transform.matrix),
-                    ..transform.clone()
-                },
-                smoothing: *smoothing,
-                pixel_snapping: *pixel_snapping,
-                source_size: *source_size,
-            },
-            Command::RenderShape { shape, transform } => Command::RenderShape {
-                shape: shape.clone(),
-                transform: ruffle_render::transform::Transform {
-                    matrix: translate(&transform.matrix),
-                    ..transform.clone()
-                },
-            },
-            Command::DrawRect { color, matrix } => Command::DrawRect {
-                color: *color,
-                matrix: translate(matrix),
-            },
-            Command::DrawLine { color, matrix } => Command::DrawLine {
-                color: *color,
-                matrix: translate(matrix),
-            },
-            Command::DrawLineRect { color, matrix } => Command::DrawLineRect {
-                color: *color,
-                matrix: translate(matrix),
-            },
-            other => other.clone(),
-        })
-        .collect()
-}
 
 impl<T: RenderTarget + 'static> RenderBackend for WgpuRenderBackend<T> {
     fn set_viewport_dimensions(&mut self, dimensions: ViewportDimensions) {

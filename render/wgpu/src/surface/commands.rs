@@ -471,13 +471,64 @@ pub enum Chunk {
         bounds: Option<DrawRegions>,
     },
     Blend {
-        texture: PoolOrArcTexture,
+        texture: BlendChildSource,
         blend_mode: ChunkBlendMode,
         needs_stencil: bool,
         /// Where this child sits in the target, when it covers less than all of it. `None` is a
         /// full-surface child and composites exactly as it always has.
         region: Option<(u32, u32, u32, u32)>,
     },
+}
+
+/// Where a blend chunk's child pixels live.
+///
+/// A child used to always render into a sub-target of its own, which is one render pass per
+/// blend before its composite even starts. Groupable children now share a surface -- see
+/// `resolve_deferred_blend_children` -- and their composites read a slot of it instead.
+pub enum BlendChildSource {
+    /// The child rendered into a target of its own; content starts at (0, 0).
+    Own(PoolOrArcTexture),
+    /// The child was drawn into a surface shared with others; content starts at `origin`.
+    Atlased {
+        texture: std::rc::Rc<PoolOrArcTexture>,
+        origin: (u32, u32),
+    },
+    /// Placeholder while the frame's children are being gathered. Every one is replaced by
+    /// `resolve_deferred_blend_children` before the chunks leave `chunk_blends`.
+    Pending(usize),
+}
+
+impl BlendChildSource {
+    pub fn texture(&self) -> &wgpu::Texture {
+        match self {
+            BlendChildSource::Own(texture) => texture.texture(),
+            BlendChildSource::Atlased { texture, .. } => texture.texture(),
+            BlendChildSource::Pending(_) => {
+                unreachable!("a pending blend child escaped chunk_blends")
+            }
+        }
+    }
+
+    pub fn view(&self) -> &wgpu::TextureView {
+        match self {
+            BlendChildSource::Own(texture) => texture.view(),
+            BlendChildSource::Atlased { texture, .. } => texture.view(),
+            BlendChildSource::Pending(_) => {
+                unreachable!("a pending blend child escaped chunk_blends")
+            }
+        }
+    }
+
+    /// Where this child's pixels start within its texture.
+    pub fn content_origin(&self) -> (u32, u32) {
+        match self {
+            BlendChildSource::Own(_) => (0, 0),
+            BlendChildSource::Atlased { origin, .. } => *origin,
+            BlendChildSource::Pending(_) => {
+                unreachable!("a pending blend child escaped chunk_blends")
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -593,7 +644,33 @@ struct WgpuCommandHandler<'a> {
     /// `None` means at least one command in the chunk could not be bounded, so the chunk has to be
     /// treated as covering everything. See [`Chunk::Draw::bounds`].
     current_bounds: ChunkBounds,
+    /// Complex-blend children waiting to share one render pass instead of taking one each.
+    /// Emptied by `resolve_deferred_blend_children` before `chunk_blends` returns.
+    deferred_blend_children: Vec<DeferredBlendChild>,
 }
+
+/// A complex blend's child, recorded instead of rendered so the frame's children can draw
+/// together. `region` is where the child sits on the parent, exactly as the solo sub-target
+/// would have been placed.
+struct DeferredBlendChild {
+    commands: CommandList,
+    region: BlendRegion,
+}
+
+/// Complex-blend children no larger than this may join the shared child pass. Bigger ones
+/// pack poorly and push the shared surface over the MSAA parity threshold, where the whole
+/// batch would fall back anyway.
+const MAX_DEFERRED_BLEND_CHILD_AREA: u64 = 512 * 512;
+
+/// Combined member area per shared surface. Packing overhead measured around 1.4x, so this
+/// keeps the surface itself under the large-target threshold that would cap its MSAA below
+/// what each member's own sub-target would have used.
+const MAX_DEFERRED_BLEND_BATCH_AREA: u64 = 2 * 1024 * 1024;
+
+/// Padding between members in the shared surface. There is no blur here; two pixels keep a
+/// member's antialiased edge and its neighbour's out of each other's half-texel sampling
+/// reach, matching the transparent padding a pooled sub-target always had around content.
+const DEFERRED_BLEND_CHILD_PADDING: u32 = 2;
 
 /// How many disjoint boxes a draw chunk's extent is described by.
 ///
@@ -774,6 +851,7 @@ impl<'a> WgpuCommandHandler<'a> {
             transforms,
             needs_stencil: false,
             num_masks: 0,
+            deferred_blend_children: vec![],
         }
     }
 
@@ -808,9 +886,209 @@ impl<'a> WgpuCommandHandler<'a> {
             });
         }
 
+        self.resolve_deferred_blend_children(&mut result);
+
         reorder_blends_for_batching(&mut result);
 
         result
+    }
+
+    /// Draw the frame's deferred blend children -- shared passes where a batch allows it,
+    /// one sub-target each where it does not -- and fill in their pending chunks.
+    ///
+    /// Deferring the renders to here is sound because nothing reads a child's texture until
+    /// its composite runs, and composites run only after `chunk_blends` has returned. The
+    /// children themselves are self-contained: admission refused anything that reads a
+    /// layer, another target, or state outside its own commands.
+    fn resolve_deferred_blend_children(&mut self, result: &mut [Chunk]) {
+        let pending = mem::take(&mut self.deferred_blend_children);
+        if pending.is_empty() {
+            return;
+        }
+
+        // Batched greedily by combined area so each shared surface stays small enough to
+        // keep the members' MSAA. Batch boundaries only cost a extra shared pass.
+        let mut sources: Vec<Option<BlendChildSource>> = Vec::with_capacity(pending.len());
+        let mut batch_start = 0;
+        while batch_start < pending.len() {
+            let mut batch_end = batch_start;
+            let mut area: u64 = 0;
+            while batch_end < pending.len() {
+                let child = &pending[batch_end];
+                let child_area =
+                    u64::from(child.region.width) * u64::from(child.region.height);
+                if batch_end > batch_start && area + child_area > MAX_DEFERRED_BLEND_BATCH_AREA
+                {
+                    break;
+                }
+                area += child_area;
+                batch_end += 1;
+            }
+            let batch = &pending[batch_start..batch_end];
+            match self.render_blend_child_atlas(batch) {
+                Some((texture, origins)) => {
+                    #[cfg(feature = "aether_metrics")]
+                    crate::aether_metrics::record_blend_child_atlas(batch.len() as u64);
+                    sources.extend(origins.into_iter().map(|origin| {
+                        Some(BlendChildSource::Atlased {
+                            texture: texture.clone(),
+                            origin,
+                        })
+                    }));
+                }
+                None => {
+                    for child in batch {
+                        sources.push(Some(BlendChildSource::Own(
+                            self.render_blend_child_solo(child),
+                        )));
+                    }
+                }
+            }
+            batch_start = batch_end;
+        }
+
+        for chunk in result.iter_mut() {
+            if let Chunk::Blend { texture, .. } = chunk
+                && let BlendChildSource::Pending(index) = *texture
+            {
+                *texture = sources[index]
+                    .take()
+                    .expect("each pending blend child resolves exactly once");
+            }
+        }
+    }
+
+    /// One shared surface for this batch of children, or `None` if it cannot keep their
+    /// pixels exactly (packing failure, or the shared surface would lose their MSAA).
+    fn render_blend_child_atlas(
+        &mut self,
+        batch: &[DeferredBlendChild],
+    ) -> Option<(std::rc::Rc<PoolOrArcTexture>, Vec<(u32, u32)>)> {
+        if batch.len() < 2 {
+            return None;
+        }
+        let sizes: Vec<(u32, u32)> = batch
+            .iter()
+            .map(|child| (child.region.width, child.region.height))
+            .collect();
+        let packing = crate::filters::atlas::pack_atlas(
+            &sizes,
+            DEFERRED_BLEND_CHILD_PADDING,
+            DEFERRED_BLEND_CHILD_PADDING,
+            self.descriptors.limits.max_texture_dimension_2d,
+        )?;
+
+        // Antialiasing parity: the shared surface must draw at the sample count each
+        // child's own sub-target would have used, or grouping changes how edges look.
+        let atlas_surface = Surface::new(
+            self.descriptors,
+            self.quality,
+            packing.width,
+            packing.height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let (first_width, first_height) = sizes[0];
+        let member_surface = Surface::new(
+            self.descriptors,
+            self.quality,
+            first_width,
+            first_height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        if atlas_surface.sample_count() != member_surface.sample_count() {
+            return None;
+        }
+
+        let mut origins = vec![(0u32, 0u32); batch.len()];
+        let mut combined = CommandList::new();
+        for slot in &packing.slots {
+            let child = &batch[slot.index];
+            origins[slot.index] = (slot.x, slot.y);
+            combined
+                .commands
+                .extend(crate::content_grouping::commands_translated(
+                    &child.commands,
+                    Twips::from_pixels(f64::from(slot.x) - f64::from(child.region.x)),
+                    Twips::from_pixels(f64::from(slot.y) - f64::from(child.region.y)),
+                ));
+        }
+
+        let target = atlas_surface.draw_commands(
+            RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
+            self.descriptors,
+            self.meshes,
+            combined,
+            self.staging_belt,
+            self.dynamic_transforms,
+            self.draw_encoder,
+            LayerRef::None,
+            self.texture_pool,
+        );
+        target.ensure_cleared(self.draw_encoder);
+        Some((std::rc::Rc::new(target.take_color_texture()), origins))
+    }
+
+    /// Close the open draw chunk and push a blend chunk that composites `texture`.
+    ///
+    /// A blend cannot be folded into a draw chunk: it reads what has already been drawn, so
+    /// everything before it has to be a chunk of its own first.
+    fn push_blend_chunk(
+        &mut self,
+        texture: BlendChildSource,
+        blend_mode: ChunkBlendMode,
+        region: BlendRegion,
+    ) {
+        if !self.current.is_empty() {
+            let bounds = self.current_bounds.take().to_regions();
+            self.result.push(Chunk::Draw {
+                chunk: mem::take(&mut self.current),
+                needs_stencil: self.needs_stencil,
+                transforms: mem::replace(
+                    &mut self.transforms,
+                    BufferBuilder::new_for_uniform(&self.descriptors.limits),
+                ),
+                bounds,
+            });
+        }
+        self.transforms
+            .set_buffer_limit(self.dynamic_transforms.buffer.size());
+        self.result.push(Chunk::Blend {
+            texture,
+            blend_mode,
+            needs_stencil: self.num_masks > 0,
+            region: (!region.is_full(self.origin, self.width, self.height)).then_some((
+                region.x,
+                region.y,
+                region.width,
+                region.height,
+            )),
+        });
+        self.needs_stencil = self.num_masks > 0;
+    }
+
+    /// One sub-target for one deferred child, exactly as an undeferred child renders.
+    fn render_blend_child_solo(&mut self, child: &DeferredBlendChild) -> PoolOrArcTexture {
+        let surface = Surface::new(
+            self.descriptors,
+            self.quality,
+            child.region.width,
+            child.region.height,
+            wgpu::TextureFormat::Rgba8Unorm,
+        );
+        let target = surface.draw_commands_at(
+            (child.region.x, child.region.y),
+            RenderTargetMode::FreshWithColor(wgpu::Color::TRANSPARENT),
+            self.descriptors,
+            self.meshes,
+            child.commands.clone(),
+            self.staging_belt,
+            self.dynamic_transforms,
+            self.draw_encoder,
+            LayerRef::None,
+            self.texture_pool,
+        );
+        target.ensure_cleared(self.draw_encoder);
+        target.take_color_texture()
     }
 
     /// The unit square, which is the geometry every pipeline but `RenderShape` draws.
@@ -1342,6 +1620,31 @@ impl CommandHandler for WgpuCommandHandler<'_> {
             return;
         }
 
+        // A complex blend's child is an ordinary render into a fresh transparent target,
+        // and nothing reads it until the composite runs -- which happens after every chunk
+        // is gathered. So the render can be recorded here and drawn later alongside the
+        // frame's other children, in one pass instead of one each. Measured on Divine
+        // Intervention: ~120 blends a frame, and their child passes were half the blend
+        // bill. Admission refuses anything that would notice the difference, nested blends
+        // included, which is also what makes `LayerRef::None` right when it finally draws.
+        if crate::aether_switches::BLEND_CHILD_ATLAS.enabled()
+            && let BlendType::Complex(complex) = blend_type
+            && !region.is_full(self.origin, self.width, self.height)
+            && u64::from(region.width) * u64::from(region.height)
+                <= MAX_DEFERRED_BLEND_CHILD_AREA
+            && crate::content_grouping::commands_are_groupable(&commands)
+        {
+            let index = self.deferred_blend_children.len();
+            self.deferred_blend_children
+                .push(DeferredBlendChild { commands, region });
+            self.push_blend_chunk(
+                BlendChildSource::Pending(index),
+                ChunkBlendMode::Complex(complex),
+                region,
+            );
+            return;
+        }
+
         let surface = Surface::new(
             self.descriptors,
             self.quality,
@@ -1430,37 +1733,16 @@ impl CommandHandler for WgpuCommandHandler<'_> {
                 );
             }
             blend_type => {
-                if !self.current.is_empty() {
-                    let bounds = self.current_bounds.take().to_regions();
-                    self.result.push(Chunk::Draw {
-                        chunk: mem::take(&mut self.current),
-                        needs_stencil: self.needs_stencil,
-                        transforms: mem::replace(
-                            &mut self.transforms,
-                            BufferBuilder::new_for_uniform(&self.descriptors.limits),
-                        ),
-                        bounds,
-                    });
-                }
-                self.transforms
-                    .set_buffer_limit(self.dynamic_transforms.buffer.size());
                 let chunk_blend_mode = match blend_type {
                     BlendType::Complex(complex) => ChunkBlendMode::Complex(complex),
                     BlendType::Shader(shader) => ChunkBlendMode::Shader(shader),
                     _ => unreachable!(),
                 };
-                self.result.push(Chunk::Blend {
-                    texture: target.take_color_texture(),
-                    blend_mode: chunk_blend_mode,
-                    needs_stencil: self.num_masks > 0,
-                    region: (!region.is_full(self.origin, self.width, self.height)).then_some((
-                        region.x,
-                        region.y,
-                        region.width,
-                        region.height,
-                    )),
-                });
-                self.needs_stencil = self.num_masks > 0;
+                self.push_blend_chunk(
+                    BlendChildSource::Own(target.take_color_texture()),
+                    chunk_blend_mode,
+                    region,
+                );
             }
         }
     }

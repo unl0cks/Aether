@@ -588,16 +588,22 @@ impl CommandTarget {
     /// normalises against the texture for exactly this reason; this did not.
     ///
     /// Not cached: unlike the whole-frame group there is a different region per blend.
+    /// `content_origin` is where the child's pixels start inside its texture. Zero for a
+    /// child that rendered into a target of its own, and its slot corner for one that
+    /// shares a surface with other children.
     pub fn region_frame_bind_group(
         &self,
         descriptors: &Descriptors,
         region: (u32, u32, u32, u32),
         child_texture: wgpu::Extent3d,
+        content_origin: (u32, u32),
     ) -> std::sync::Arc<wgpu::BindGroup> {
         let (rx, ry, rw, rh) = region;
+        // Where the region sits on the parent, less where the child's pixels sit in their
+        // texture: together these carry a parent fragment to the texel that backs it.
         let (local_x, local_y) = (
-            rx.saturating_sub(self.origin.0) as f32,
-            ry.saturating_sub(self.origin.1) as f32,
+            rx.saturating_sub(self.origin.0) as f32 - content_origin.0 as f32,
+            ry.saturating_sub(self.origin.1) as f32 - content_origin.1 as f32,
         );
         let (rw, rh) = (rw.max(1) as f32, rh.max(1) as f32);
         let (tw, th) = (
