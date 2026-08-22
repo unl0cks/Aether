@@ -46,9 +46,14 @@ pub fn set_color_transform<'gc>(
     let ct = object_to_color_transform(ct);
 
     let dobj = get_display_object(this);
+    // AQW's map loops re-assign a constant tint every frame. The write itself is a no-op, but
+    // unconditionally invalidating here rebuilt every cacheAsBitmap ancestor each frame -- in the
+    // new Battleon that was a full 3767x1850 layer, nineteen times a second, for pixels that never
+    // changed. A value that did change must still invalidate: the parent's cache has it baked in.
+    let changed = dobj.base().color_transform() != ct;
     dobj.set_color_transform(ct);
     dobj.set_transformed_by_script(true);
-    if let Some(parent) = dobj.parent() {
+    if changed && let Some(parent) = dobj.parent() {
         parent.invalidate_cached_bitmap();
     }
     Ok(Value::Undefined)

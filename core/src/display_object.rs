@@ -1855,6 +1855,70 @@ fn sole_command_kind(commands: &CommandList) -> &'static str {
     }
 }
 
+/// Whether applying this colour transform per child is the same as applying it to the flattened
+/// cache, so the adaptive direct-render bypass stays exact.
+///
+/// Porter-Duff `over` is linear in the colour channels: for a pure colour multiplier k with alpha
+/// untouched, k*(a over b) = (k*a) over (k*b), so tinting each child directly produces the pixels
+/// the cache-then-tint path would. An alpha multiplier changes coverage and an additive term is
+/// applied once per overlapping child instead of once, so neither commutes and both stay excluded.
+///
+/// The condition used to demand the DEFAULT transform, and one authored 5% scenery tint
+/// (g/b x0.949) on the new Battleon's two whale layers was the entire difference between the
+/// bypass engaging (ultraengineer, untinted, 54 FPS) and not (Battleon, 9,529 full 3767x1850
+/// rebuilds in a few minutes, 30 FPS).
+#[cfg(feature = "aether_performance")]
+fn colour_transform_commutes_with_flattening(ct: &ColorTransform) -> bool {
+    ct.a_multiply == swf::Fixed8::ONE
+        && ct.r_add == 0
+        && ct.g_add == 0
+        && ct.b_add == 0
+        && ct.a_add == 0
+}
+
+#[cfg(all(test, feature = "aether_performance"))]
+mod colour_transform_commute_tests {
+    use super::*;
+
+    fn ct() -> ColorTransform {
+        ColorTransform::default()
+    }
+
+    #[test]
+    fn identity_commutes() {
+        assert!(colour_transform_commutes_with_flattening(&ct()));
+    }
+
+    #[test]
+    fn a_pure_colour_multiplier_commutes() {
+        // The new Battleon's authored scenery tint: g/b x0.949, alpha untouched.
+        let mut tint = ct();
+        tint.g_multiply = swf::Fixed8::from_f32(0.949);
+        tint.b_multiply = swf::Fixed8::from_f32(0.949);
+        assert!(colour_transform_commutes_with_flattening(&tint));
+    }
+
+    #[test]
+    fn an_alpha_multiplier_does_not_commute() {
+        // Coverage changes per child, so tint-then-flatten and flatten-then-tint disagree
+        // wherever children overlap.
+        let mut fade = ct();
+        fade.a_multiply = swf::Fixed8::from_f32(0.5);
+        assert!(!colour_transform_commutes_with_flattening(&fade));
+    }
+
+    #[test]
+    fn additive_terms_do_not_commute() {
+        // An offset lands once per overlapping child instead of once on the flattened result.
+        let mut warm = ct();
+        warm.r_add = 20;
+        assert!(!colour_transform_commutes_with_flattening(&warm));
+        let mut ghost = ct();
+        ghost.a_add = -30;
+        assert!(!colour_transform_commutes_with_flattening(&ghost));
+    }
+}
+
 pub fn render_base<'gc>(
     this: DisplayObject<'gc>,
     context: &mut RenderContext<'_, 'gc>,
@@ -1896,7 +1960,9 @@ pub fn render_base<'gc>(
             && this.filters().is_empty()
             && blend_mode == ExtendedBlendMode::Normal
             && this.opaque_background().is_none()
-            && context.transform_stack.transform().color_transform == ColorTransform::default();
+            && colour_transform_commutes_with_flattening(
+                &context.transform_stack.transform().color_transform,
+            );
     #[cfg(not(feature = "aether_performance"))]
     let filterless_hot_cache_candidate = false;
 

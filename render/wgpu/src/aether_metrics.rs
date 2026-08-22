@@ -1451,8 +1451,11 @@ pub fn texture_census_report(limit: usize) -> Vec<String> {
     // never been able to explain one. The final entry is the closest thing to the failing request.
     let recent = recent_textures();
     if !recent.is_empty() {
+        // Say "most recent", not "before the fault": this report also prints from the routine
+        // once-a-minute census, and the old wording read as an allocation failure in an ordinary
+        // healthy session, which cost a real investigation a wrong turn on 2026-08-21.
         out.push(format!(
-            "last {} texture requests before the fault (newest last):",
+            "most recent {} texture requests (newest last):",
             recent.len()
         ));
         for texture in recent {

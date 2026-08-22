@@ -1680,6 +1680,14 @@ impl<'gc> MovieLoader<'gc> {
                     None
                 };
 
+                // The one load event worth a line in every session log: which map the player is
+                // in. Metrics and censuses record everything except WHERE, and a 2h10m profile
+                // once had a ten-minute 13 FPS window nobody could place afterwards -- the owner
+                // cannot be expected to journal their play session for us.
+                if url.contains("/gamefiles/maps/") {
+                    tracing::info!("Loading map {url}");
+                }
+
                 match shared {
                     Some(movie) => movie,
                     None => {

@@ -820,10 +820,12 @@ pub fn set_transform<'gc>(
 
     let dobj = this.as_display_object().unwrap();
     let base = dobj.base();
+    // Same-value writes must not cost a cache rebuild; AQW re-assigns transforms every frame.
+    let changed = base.matrix() != matrix || base.color_transform() != color_transform;
     base.set_matrix(matrix);
     base.set_has_matrix3d_stub(has_matrix3d);
     base.set_color_transform(color_transform);
-    if let Some(parent) = dobj.parent() {
+    if changed && let Some(parent) = dobj.parent() {
         // Self-transform changes are automatically handled,
         // we only want to inform ancestors to avoid unnecessary invalidations for tx/ty
         parent.invalidate_cached_bitmap();
